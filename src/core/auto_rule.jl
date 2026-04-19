@@ -19,3 +19,6 @@ end
 function AutoRule(rule; name::Symbol=:auto, prob_attr=nothing)
     AutoRule(rule, name, prob_attr)
 end
+
+Base.show(io::IO, ar::AutoRule) =
+    print(io, "AutoRule(:$(ar.name), prob_attr=$(ar.prob_attr))")

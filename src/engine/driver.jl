@@ -25,6 +25,9 @@ struct Experience
     info          :: Dict{Symbol, Any}
 end
 
+Base.show(io::IO, e::Experience) =
+    print(io, "Experience(player=:$(e.player), action=$(e.action), done=$(e.done), winner=$(e.winner))")
+
 # ─── GameDriver ───────────────────────────────────────────────────────────────
 
 """
@@ -48,6 +51,9 @@ mutable struct GameDriver
     _done   :: Bool
     _winner :: Union{Symbol, Nothing}
 end
+
+Base.show(io::IO, d::GameDriver) =
+    print(io, "GameDriver(turn=$(d.state.turn)/$(d.T_max), done=$(d._done))")
 
 function GameDriver(game::Game, agents::Dict{Symbol, <:AbstractAgent}; T_max::Int=1000)
     world = game.initial()
@@ -113,10 +119,9 @@ function step!(driver::GameDriver)
     # Advance turn counter
     state.turn += 1
 
-    # Force done if T_max reached
+    # Force done if T_max reached (winner from terminal predicate is preserved)
     if state.turn > driver.T_max
-        done   = true
-        winner = winner  # preserve any winner set by terminal predicate
+        done = true
     end
 
     driver._done   = done
@@ -132,6 +137,9 @@ function step!(driver::GameDriver)
 end
 
 # ─── Iteration interface ──────────────────────────────────────────────────────
+
+Base.IteratorSize(::Type{GameDriver}) = Base.SizeUnknown()
+Base.eltype(::Type{GameDriver})       = Experience
 
 function Base.iterate(driver::GameDriver)
     driver._done && return nothing

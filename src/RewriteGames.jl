@@ -55,7 +55,7 @@ include("encoding/encoding.jl")
 # ── Agent interface ────────────────────────────────────────────────────────────
 include("agents/abstract.jl")
 include("agents/function_agent.jl")
-include("agents/onnx_agent.jl")
+# ONNXAgent is loaded via the ONNXAgentExt package extension when ONNXRunTime is available.
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
 include("engine/matches.jl")
@@ -68,6 +68,12 @@ include("serialization/arrow.jl")
 # ── Schema migration ───────────────────────────────────────────────────────────
 include("migration/game_migration.jl")
 
+# ── Analysis utilities ─────────────────────────────────────────────────────────
+include("analysis.jl")
+
+# ── DSL ────────────────────────────────────────────────────────────────────────
+include("dsl.jl")
+
 # ─── Public API ────────────────────────────────────────────────────────────────
 
 export
@@ -75,11 +81,11 @@ export
     RuleEntry, RuleLibrary,
     AutoRule,
     Game, GameState,
+    nplayers,
 
-    # Agents
+    # Agents (ONNXAgent is exported by the ONNXAgentExt extension when loaded)
     AbstractAgent, Action,
     FunctionAgent,
-    ONNXAgent,
     select_action,
 
     # Engine
@@ -97,6 +103,12 @@ export
 
     # Migration
     GameMigration,
-    migrate_world, migrate_rules, migrate_game
+    migrate_world, migrate_rules, migrate_game,
+
+    # Analysis
+    win_rate, episode_length, action_counts,
+
+    # DSL
+    @game
 
 end # module RewriteGames
