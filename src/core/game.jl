@@ -66,3 +66,17 @@ function GameState(world, game::Game)
     end
     GameState(world, counters, 1)
 end
+
+Base.copy(s::GameState) = GameState(copy(s.world), copy(s.counters), s.turn)
+
+# ─── Game helpers ─────────────────────────────────────────────────────────────
+
+"""Return the number of players in the game."""
+nplayers(g::Game) = length(g.players)
+Base.length(g::Game) = length(g.players)
+
+Base.show(io::IO, g::Game) =
+    print(io, "Game(players=$(g.players), auto=$(length(g.auto)) rule(s))")
+
+Base.show(io::IO, s::GameState) =
+    print(io, "GameState(turn=$(s.turn), budgets=$(length(s.counters)))")

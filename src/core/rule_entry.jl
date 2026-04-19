@@ -34,6 +34,16 @@ end
 RuleLibrary(entries::Vector) = RuleLibrary(convert(Vector{RuleEntry}, entries))
 
 Base.length(lib::RuleLibrary)            = length(lib.entries)
+Base.isempty(lib::RuleLibrary)           = isempty(lib.entries)
 Base.iterate(lib::RuleLibrary, args...)  = iterate(lib.entries, args...)
 Base.getindex(lib::RuleLibrary, i)       = lib.entries[i]
 Base.eachindex(lib::RuleLibrary)         = eachindex(lib.entries)
+Base.firstindex(lib::RuleLibrary)        = 1
+Base.lastindex(lib::RuleLibrary)         = length(lib.entries)
+Base.eltype(::Type{RuleLibrary})         = RuleEntry
+
+Base.show(io::IO, e::RuleEntry) =
+    print(io, "RuleEntry(:$(e.name), budget=$(e.budget))")
+
+Base.show(io::IO, lib::RuleLibrary) =
+    print(io, "RuleLibrary([", join([":" * string(e.name) for e in lib.entries], ", "), "])")

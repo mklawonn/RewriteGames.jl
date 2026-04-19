@@ -9,21 +9,20 @@ applied, for inclusion in the `Experience.info` field.
 function fire_auto_rules!(state::GameState, auto_rules::Vector{AutoRule})
     results = NamedTuple[]
     for ar in auto_rules
-        matches = get_matches(ar.rule, state.world)
-        fired   = 0
-        for m in matches
+        # Snapshot matches before applying any rewrites; mid-loop world mutation
+        # would invalidate an open iterator but leave already-visited matches stale.
+        snapshot = collect(get_matches(ar.rule, state.world))
+        fired    = 0
+        for m in snapshot
             should_fire = if ar.prob_attr === nothing
                 true
             else
-                # Roll against the probability attribute on the first component.
                 prob = _get_prob_attr(state.world, m, ar.prob_attr)
                 rand() < prob
             end
             if should_fire
                 state.world = rewrite_match(ar.rule, m)
                 fired += 1
-                # Re-enumerate matches against updated world
-                matches = get_matches(ar.rule, state.world)
             end
         end
         push!(results, (rule=ar.name, fired=fired))
@@ -44,7 +43,7 @@ function _get_prob_attr(W, match, attr::Symbol)
         comp = first(values(components(match)))
         part = first(collect(comp))
         return Float64(subpart(W, part, attr))
-    catch
+    catch _
         return 1.0
     end
 end

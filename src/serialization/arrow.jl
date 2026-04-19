@@ -1,4 +1,5 @@
 using Arrow
+using Tables
 
 """
     write_experiences(path::String, experiences::Vector{Experience})
@@ -55,6 +56,5 @@ definition; callers should use the raw tensors for training directly.
 """
 function read_experiences(path::String)
     tbl = Arrow.Table(path)
-    # Arrow.Tables is Arrow's re-exported Tables.jl – convert to vector of NamedTuples
-    return Arrow.Tables.rowtable(tbl)
+    return Tables.rowtable(tbl)
 end
