@@ -106,30 +106,58 @@ L_sq = @acset TicTacToe begin Sq=1 end
 
 l_sq = ACSetTransformation(I_sq, L_sq; Sq=[1])   # identity on Sq
 
+# ── Negative Application Conditions (NACs) ────────────────────────────────────
+# A NAC is a morphism  f : L → N  that *forbids* any match m : L → G from
+# extending to a commuting triangle  n : N → G  (i.e. n ∘ f = m).
+# AlgebraicRewriting.jl exposes this via  NAC(f)  (= AppCond(f, false)).
+#
+# For tic-tac-toe, placing a piece on square `sq` is illegal when another
+# piece already sits on `sq`.  We encode that by building a NAC whose target
+# pattern N is "the matched square with an existing piece":
+
+N_x_occ = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end  # square ← X
+N_o_occ = @acset TicTacToe begin Sq=1; O=1; osq=[1] end  # square ← O
+
+# The morphisms L_sq → N_*_occ each send the bare square to the square in N
+nac_f_x = ACSetTransformation(L_sq, N_x_occ; Sq=[1])
+nac_f_o = ACSetTransformation(L_sq, N_o_occ; Sq=[1])
+
+nac_no_x = NAC(nac_f_x)   # "the matched square must NOT already hold an X"
+nac_no_o = NAC(nac_f_o)   # "the matched square must NOT already hold an O"
+
+# ── Rules ─────────────────────────────────────────────────────────────────────
+# Both rules forbid playing on an occupied square via the two NACs above.
+# get_matches will only return matches to genuinely empty squares —
+# no post-hoc filtering is needed.
+
 # Place X on the matched square
 R_x  = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end
 r_x  = ACSetTransformation(I_sq, R_x; Sq=[1])
-rule_place_x = Rule(l_sq, r_x)
+rule_place_x = Rule(l_sq, r_x; ac=[nac_no_x, nac_no_o])
 
 # Place O on the matched square
 R_o  = @acset TicTacToe begin Sq=1; O=1; osq=[1] end
 r_o  = ACSetTransformation(I_sq, R_o; Sq=[1])
-rule_place_o = Rule(l_sq, r_o)
+rule_place_o = Rule(l_sq, r_o; ac=[nac_no_x, nac_no_o])
 ```
 
-Because `L` matches *any* single square, `get_matches(rule_place_x, board)` will
-return 9 morphisms on an empty board — one per square.  We filter out occupied
-squares with a `post_filter`:
+::: {.callout-note}
+### How NACs work
 
-```{julia}
-#| label: post-filter
-# Return true iff the matched square has no piece on it
-is_empty_sq = (board, match) -> begin
-    sq = components(match)[:Sq][1]   # the matched square's ID in `board`
-    isempty(incident(board, sq, :xsq)) &&
-    isempty(incident(board, sq, :osq))
-end
-```
+A **Negative Application Condition** (NAC) is AlgebraicRewriting's built-in
+mechanism for expressing *forbidden* patterns.  Formally, `NAC(f)` where
+`f : L → N` says: a match `m : L → G` is *only legal* if there is no morphism
+`n : N → G` such that `n ∘ f = m`.
+
+In plain English: the engine checks whether the larger pattern `N` can be
+embedded in the world in a way that is consistent with the proposed match `m`.
+If it can, the match is rejected.
+
+Here, `N_x_occ` is "a square that already has an X on it".  The NAC rejects any
+match that lands on such a square.  Because both `nac_no_x` and `nac_no_o` are
+attached to *both* rules, `get_matches` automatically returns only matches on
+empty squares — the game engine never sees an illegal move.
+:::
 
 ### Terminal predicate
 
@@ -164,8 +192,10 @@ block.  Keyword clauses map to the `Game(...)` constructor arguments:
 
 ```{julia}
 #| label: game-macro
-entry_x = RuleEntry(rule_place_x; name=:place, post_filter=is_empty_sq)
-entry_o = RuleEntry(rule_place_o; name=:place, post_filter=is_empty_sq)
+# No post_filter needed — the NACs embedded in the rules already ensure that
+# get_matches only returns empty-square matches.
+entry_x = RuleEntry(rule_place_x; name=:place)
+entry_o = RuleEntry(rule_place_o; name=:place)
 
 game = @game nothing begin
     players:  X, O
@@ -699,7 +729,7 @@ end
 | Step | Tool |
 |------|------|
 | Board state | ACSet with `Sq`, `X`, `O` objects and two foreign-key morphisms |
-| Legal moves | A single `rule_place_{x,o}` + `post_filter` for occupancy |
+| Legal moves | `rule_place_{x,o}` with `NAC` conditions banning occupied squares |
 | Win detection | `check_terminal` via `incident` on the indexed foreign keys |
 | Game loop | `run_game` / `GameDriver` from RewriteGames.jl |
 | Data format | Custom Arrow writer (27-D feature + chosen square + outcome) |
