@@ -139,4 +139,3 @@ _to_float32(v::Bool)    = v ? 1f0 : 0f0
 _to_float32(::Nothing)  = Float32(NaN)
 _to_float32(::Missing)  = Float32(NaN)
 _to_float32(_)          = Float32(NaN)
-

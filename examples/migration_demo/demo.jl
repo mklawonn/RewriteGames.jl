@@ -109,5 +109,3 @@ println("\nNote: migrate_rules with new attribute types requires rules")
 println("      to be re-defined in the target schema by the caller.")
 
 println("\nDemo complete.")
-
-

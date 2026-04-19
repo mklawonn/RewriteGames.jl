@@ -30,4 +30,3 @@ using Catlab
         @test called[]
     end
 end
-
