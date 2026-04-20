@@ -1,0 +1,19 @@
+# Julia artifacts and caches
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Build artifacts
+deps/build.log
+deps/deps.jl
+
+# OS metadata
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+
+# Yoneda cache created by AlgebraicRewriting
+cache/
