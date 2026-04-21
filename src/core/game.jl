@@ -10,6 +10,8 @@ Defines a turn-based game over ACSet world states.
 - `terminal`:  `(W) -> (done::Bool, winner::Union{Symbol,Nothing})` predicate.
 - `initial`:   `() -> ACSet` factory producing fresh world states.
 - `schema`:    The presentation / schema object (optional metadata).
+- `schedule`:  Optional `GameStep` tree describing the round structure.
+               `nothing` (default) uses the legacy round-robin `GameDriver`.
 """
 struct Game
     players  :: Vector{Symbol}
@@ -18,6 +20,7 @@ struct Game
     terminal :: Function            # W -> (Bool, Union{Symbol,Nothing})
     initial  :: Function            # () -> ACSet
     schema   :: Any                 # optional schema metadata
+    schedule :: Union{GameStep, Nothing}   # schedule tree; nothing = round-robin
 end
 
 function Game(
@@ -27,6 +30,7 @@ function Game(
     auto::Vector  = AutoRule[],
     terminal::Function = (W) -> (false, nothing),
     initial::Function  = () -> error("No initial world factory provided"),
+    schedule = nothing,
 )
     # Normalise rules: accept Vector{RuleEntry} values
     norm_rules = Dict{Symbol, RuleLibrary}()
@@ -34,7 +38,8 @@ function Game(
         lib = get(rules, p, RuleEntry[])
         norm_rules[p] = lib isa RuleLibrary ? lib : RuleLibrary(collect(RuleEntry, lib))
     end
-    Game(players, norm_rules, collect(AutoRule, auto), terminal, initial, schema)
+    Game(players, norm_rules, collect(AutoRule, auto), terminal, initial, schema,
+         schedule)
 end
 
 # ─── GameState ────────────────────────────────────────────────────────────────
@@ -66,3 +71,18 @@ function GameState(world, game::Game)
     end
     GameState(world, counters, 1)
 end
+
+Base.copy(s::GameState) = GameState(copy(s.world), copy(s.counters), s.turn)
+
+# ─── Game helpers ─────────────────────────────────────────────────────────────
+
+"""Return the number of players in the game."""
+nplayers(g::Game) = length(g.players)
+Base.length(g::Game) = length(g.players)
+
+Base.show(io::IO, g::Game) = print(io,
+    "Game(players=$(g.players), auto=$(length(g.auto)) rule(s), " *
+    (g.schedule === nothing ? "schedule=nothing)" : "schedule=GameStep)"))
+
+Base.show(io::IO, s::GameState) =
+    print(io, "GameState(turn=$(s.turn), budgets=$(length(s.counters)))")

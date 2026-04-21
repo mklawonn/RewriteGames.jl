@@ -44,9 +44,14 @@ module RewriteGames
 using Catlab
 using AlgebraicRewriting
 
-# ── Core types ─────────────────────────────────────────────────────────────────
+# ── Core types (rule_entry + auto_rule must precede game_step which uses them) ─
 include("core/rule_entry.jl")
 include("core/auto_rule.jl")
+
+# ── Schedule primitives (before core/game.jl which references GameStep) ───────
+include("schedule/game_step.jl")
+
+# ── Game struct ─────────────────────────────────────────────────────────────────
 include("core/game.jl")
 
 # ── Encoding (must come before engine so EncodedState is visible) ───────────
@@ -55,18 +60,28 @@ include("encoding/encoding.jl")
 # ── Agent interface ────────────────────────────────────────────────────────────
 include("agents/abstract.jl")
 include("agents/function_agent.jl")
-include("agents/onnx_agent.jl")
+# ONNXAgent is loaded via the ONNXAgentExt package extension when ONNXRunTime is available.
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
 include("engine/matches.jl")
 include("engine/auto.jl")
 include("engine/driver.jl")
 
+# ── Schedule context + scheduled driver (after engine so Experience is defined)
+include("schedule/agent_context.jl")
+include("engine/scheduled_driver.jl")
+
 # ── Serialization ──────────────────────────────────────────────────────────────
 include("serialization/arrow.jl")
 
 # ── Schema migration ───────────────────────────────────────────────────────────
 include("migration/game_migration.jl")
+
+# ── Analysis utilities ─────────────────────────────────────────────────────────
+include("analysis.jl")
+
+# ── DSL ────────────────────────────────────────────────────────────────────────
+include("dsl.jl")
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
@@ -75,11 +90,11 @@ export
     RuleEntry, RuleLibrary,
     AutoRule,
     Game, GameState,
+    nplayers,
 
-    # Agents
+    # Agents (ONNXAgent is exported by the ONNXAgentExt extension when loaded)
     AbstractAgent, Action,
     FunctionAgent,
-    ONNXAgent,
     select_action,
 
     # Engine
@@ -89,6 +104,13 @@ export
     GameDriver, Experience,
     step!, run_game,
 
+    # Schedule
+    GameStep,
+    PlayerStep, AutoStep, Auto,
+    Seq, Cond, WhileStep, ForEachStep,
+    AgentContext, push_context,
+    ScheduledGameDriver, run_schedule!,
+
     # Encoding
     EncodedState, encode_state,
 
@@ -97,6 +119,12 @@ export
 
     # Migration
     GameMigration,
-    migrate_world, migrate_rules, migrate_game
+    migrate_world, migrate_rules, migrate_game,
+
+    # Analysis
+    win_rate, episode_length, action_counts,
+
+    # DSL
+    @game
 
 end # module RewriteGames

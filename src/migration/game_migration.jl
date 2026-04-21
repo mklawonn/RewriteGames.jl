@@ -16,6 +16,9 @@ struct GameMigration
     target_schema :: Any
 end
 
+Base.show(io::IO, m::GameMigration) =
+    print(io, "GameMigration(players=$(m.source_game.players))")
+
 """
     migrate_world(migration::GameMigration, W) -> ACSet
 
@@ -46,18 +49,30 @@ function migrate_rules(migration::GameMigration, library::RuleLibrary)
 end
 
 """
-    migrate_game(migration::GameMigration) -> Game
+    migrate_game(migration::GameMigration; initial=nothing, terminal=nothing) -> Game
 
 Produce a new `Game` in the target schema by:
 1. Migrating each player's `RuleLibrary` via `migrate_rules`.
 2. Migrating each `AutoRule`'s underlying rule via the functor.
 3. Preserving player order and the terminal predicate.
 
-Note: The terminal predicate is preserved as-is.  If it references
-schema-specific attribute names that change under migration, the caller is
-responsible for supplying an updated predicate.
+!!! note "Initial world factory"
+    The `initial` factory of the source game produces ACSet instances in the **source**
+    schema. After migration the returned game still references the original factory
+    unless you override it via the `initial` keyword argument. When migrating to a
+    different schema, always supply a new `initial` that returns a target-schema ACSet:
+
+    ```julia
+    migrate_game(m; initial = () -> TargetACSet())
+    ```
+
+The `terminal` keyword allows supplying a replacement terminal predicate for the same
+reason: if the predicate references source-schema attribute names, it will not type-check
+against a target-schema world.
 """
-function migrate_game(migration::GameMigration) :: Game
+function migrate_game(migration::GameMigration;
+                      initial::Union{Function,Nothing}  = nothing,
+                      terminal::Union{Function,Nothing} = nothing) :: Game
     src = migration.source_game
     F   = migration.functor
 
@@ -74,7 +89,7 @@ function migrate_game(migration::GameMigration) :: Game
         players  = src.players,
         rules    = new_rules,
         auto     = new_auto,
-        terminal = src.terminal,
-        initial  = src.initial,
+        terminal = terminal !== nothing ? terminal : src.terminal,
+        initial  = initial  !== nothing ? initial  : src.initial,
     )
 end

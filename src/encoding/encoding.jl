@@ -18,13 +18,16 @@ Agents that need only the raw world state pay no encoding cost; fields marked
 - `turn_frac`:     `Float32` scalar `turn / T_max`.
 """
 struct EncodedState
-    raw           :: Any                    # GameState
+    raw           :: GameState
     node_features :: Matrix{Float32}        # n_nodes × F
     edge_index    :: Matrix{Int32}          # 2 × n_edges (COO)
     edge_type     :: Vector{Int8}           # n_edges
     rule_counters :: Vector{Int32}          # remaining budget per rule
     turn_frac     :: Float32
 end
+
+Base.show(io::IO, s::EncodedState) =
+    print(io, "EncodedState(nodes=$(size(s.node_features,1)), edges=$(size(s.edge_index,2)), turn_frac=$(round(s.turn_frac; digits=3)))")
 
 # ─── encode_state ─────────────────────────────────────────────────────────────
 
@@ -116,7 +119,7 @@ function encode_state(W, counters, turn::Int, T_max::Int)
     turn_frac = Float32(turn) / Float32(max(T_max, 1))
 
     return EncodedState(
-        GameState(W, counters, turn),
+        GameState(W, copy(counters), turn),
         node_feat,
         edge_index,
         edge_type_v,

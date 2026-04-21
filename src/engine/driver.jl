@@ -13,6 +13,9 @@ A single step of interaction between a player and the game environment.
 - `done`:          Whether the game terminated after this step.
 - `winner`:        Winning player symbol, or `nothing`.
 - `info`:          Metadata dict (auto-rule results, budget snapshot, …).
+- `schedule_path`: Path through the `GameStep` tree where this experience was
+                   emitted.  `Symbol[]` for experiences from the legacy
+                   round-robin `GameDriver`.
 """
 struct Experience
     player        :: Symbol
@@ -23,7 +26,11 @@ struct Experience
     done          :: Bool
     winner        :: Union{Symbol, Nothing}
     info          :: Dict{Symbol, Any}
+    schedule_path :: Vector{Symbol}
 end
+
+Base.show(io::IO, e::Experience) =
+    print(io, "Experience(player=:$(e.player), action=$(e.action), done=$(e.done), winner=$(e.winner))")
 
 # ─── GameDriver ───────────────────────────────────────────────────────────────
 
@@ -48,6 +55,9 @@ mutable struct GameDriver
     _done   :: Bool
     _winner :: Union{Symbol, Nothing}
 end
+
+Base.show(io::IO, d::GameDriver) =
+    print(io, "GameDriver(turn=$(d.state.turn)/$(d.T_max), done=$(d._done))")
 
 function GameDriver(game::Game, agents::Dict{Symbol, <:AbstractAgent}; T_max::Int=1000)
     world = game.initial()
@@ -113,10 +123,9 @@ function step!(driver::GameDriver)
     # Advance turn counter
     state.turn += 1
 
-    # Force done if T_max reached
+    # Force done if T_max reached (winner from terminal predicate is preserved)
     if state.turn > driver.T_max
-        done   = true
-        winner = winner  # preserve any winner set by terminal predicate
+        done = true
     end
 
     driver._done   = done
@@ -128,10 +137,13 @@ function step!(driver::GameDriver)
     )
 
     return Experience(player, enc_before, legal_actions, chosen_action,
-                      enc_after, done, winner, info)
+                      enc_after, done, winner, info, Symbol[])
 end
 
 # ─── Iteration interface ──────────────────────────────────────────────────────
+
+Base.IteratorSize(::Type{GameDriver}) = Base.SizeUnknown()
+Base.eltype(::Type{GameDriver})       = Experience
 
 function Base.iterate(driver::GameDriver)
     driver._done && return nothing
@@ -152,8 +164,17 @@ end
         -> Vector{Experience}
 
 Run a single complete episode and return all experiences.
+
+When `game.schedule` is a `GameStep` tree, delegates to `ScheduledGameDriver`
+(defined in `engine/scheduled_driver.jl`).  Otherwise uses the round-robin
+`GameDriver`.
 """
 function run_game(game::Game, agents::Dict{Symbol, <:AbstractAgent}; T_max::Int=1000)
+    # Forward to the scheduled driver when a schedule is set.
+    # _run_scheduled_game is defined in engine/scheduled_driver.jl, loaded after
+    # this file; the forward reference is resolved at call-time, not load-time.
+    game.schedule !== nothing && return _run_scheduled_game(game, agents; T_max=T_max)
+
     driver = GameDriver(game, agents; T_max=T_max)
     experiences = Experience[]
     for exp in driver

@@ -28,3 +28,8 @@ struct Action
     entry :: RuleEntry
     match :: Any        # ACSetTransformation from AlgebraicRewriting
 end
+
+Base.:(==)(a::Action, b::Action) = a.entry === b.entry && a.match === b.match
+Base.hash(a::Action, h::UInt)    = hash(objectid(a.entry), hash(objectid(a.match), h))
+
+Base.show(io::IO, a::Action) = print(io, "Action(:$(a.entry.name))")
