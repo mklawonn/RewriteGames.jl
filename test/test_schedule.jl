@@ -265,18 +265,20 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
         @test exps[end].schedule_path != Symbol[]   # path is non-empty
     end
 
-    @testset "run_game uses legacy GameDriver when schedule=nothing" begin
+    @testset "run_game auto-generates round-robin schedule when none provided" begin
+        # Omitting schedule: triggers auto-generation: Seq(PlayerStep(:p), AutoStep())
         game = Game(nothing;
             players  = [:p],
             rules    = Dict(:p => [entry_add_v]),
             terminal = done_at_3,
             initial  = () -> Graph(0),
-            # no schedule: field → defaults to nothing
         )
+        @test game.schedule isa Seq
         exps = run_game(game, Dict(:p => rand_agent); T_max=20)
         @test !isempty(exps)
         @test exps[end].done == true
-        @test exps[end].schedule_path == Symbol[]   # legacy path is empty
+        # All experiences come from the ScheduledGameDriver; schedule_path is non-empty
+        @test all(e -> !isempty(e.schedule_path), exps)
     end
 
     @testset "T_max enforced when terminal never fires" begin
@@ -325,14 +327,19 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
         @test g.schedule === sched
     end
 
-    @testset "@game without schedule: clause gives schedule=nothing" begin
+    @testset "@game without schedule: clause auto-generates round-robin" begin
         g = @game nothing begin
             players: p
             p: RuleEntry[]
             terminal: (W) -> (false, nothing)
             initial: () -> nothing
         end
-        @test g.schedule === nothing
+        # Auto-generated schedule is a Seq node containing a PlayerStep + AutoStep
+        @test g.schedule isa Seq
+        steps = g.schedule.steps
+        @test length(steps) == 2
+        @test steps[1] isa PlayerStep && steps[1].player == :p
+        @test steps[2] isa AutoStep
     end
 
 end

@@ -35,11 +35,13 @@ using AlgebraicRewriting
     end
 
     @testset "@game matches equivalent Game(...) call" begin
+        sched = Seq(PlayerStep(:p), AutoStep())
         g_macro = @game nothing begin
             players:  p
             p:        [entry_v]
             terminal: (W) -> (nparts(W, :V) >= 5, nothing)
             initial:  () -> Graph(1)
+            schedule: sched
         end
         g_hand = Game(
             nothing;
@@ -47,8 +49,10 @@ using AlgebraicRewriting
             rules    = Dict(:p => [entry_v]),
             terminal = (W) -> (nparts(W, :V) >= 5, nothing),
             initial  = () -> Graph(1),
+            schedule = sched,
         )
         @test g_macro.players == g_hand.players
         @test length(g_macro.rules[:p]) == length(g_hand.rules[:p])
+        @test g_macro.schedule === g_hand.schedule
     end
 end

@@ -24,8 +24,9 @@ end
 - `auto:` — a Julia expression evaluating to a `Vector{AutoRule}` (default: `[]`).
 - `terminal:` — a function `W -> (Bool, Union{Symbol,Nothing})`.
 - `initial:` — a zero-argument factory `() -> ACSet`.
-- `schedule:` — a `GameStep` tree (optional).  When omitted, the game uses the
-  legacy round-robin `GameDriver`.
+- `schedule:` — a `GameStep` tree.  When omitted, a round-robin schedule is
+  generated automatically: each player gets a `PlayerStep` followed by an
+  `AutoStep`, in declaration order.
 
 The macro rewrites the block into a plain `Game(schema; ...)` call, so all
 standard Julia expressions are valid inside each clause.
@@ -39,18 +40,34 @@ macro game(schema, body)
     auto_expr     = :(AutoRule[])
     terminal_expr = :((W) -> (false, nothing))
     initial_expr  = :(() -> error("No initial world factory provided"))
-    schedule_expr = :nothing
+    schedule_expr = nothing          # nothing means "auto-generate round-robin"
 
     for stmt in body.args
         stmt isa LineNumberNode && continue
 
-        # Julia parses `foo: bar` as `Expr(:call, :(:), :foo, bar)`
+        # Julia parses `foo: bar`       as Expr(:call, :(:), :foo, bar)
+        # Julia parses `foo: a, b, c`  as Expr(:tuple, Expr(:call, :(:), :foo, a), b, c)
+        #   because `,` has lower precedence than `:`, so the colon binds to the
+        #   first element only.  We detect and reassemble this tuple form so that
+        #   `players: alice, bob` works without requiring explicit parentheses.
         local keysym::Symbol, val
         if stmt isa Expr && stmt.head === :call && length(stmt.args) == 3 &&
                 stmt.args[1] === :((:))
             keysym = stmt.args[2] isa Symbol ? stmt.args[2] :
                 error("@game: clause key must be a bare symbol, got $(stmt.args[2])")
             val = stmt.args[3]
+        elseif stmt isa Expr && stmt.head === :tuple &&
+                !isempty(stmt.args) &&
+                stmt.args[1] isa Expr && stmt.args[1].head === :call &&
+                length(stmt.args[1].args) == 3 &&
+                stmt.args[1].args[1] === :((:))
+            # `foo: a, b, c` parsed as `(foo:a, b, c)` — reassemble
+            first_kv = stmt.args[1]
+            keysym = first_kv.args[2] isa Symbol ? first_kv.args[2] :
+                error("@game: clause key must be a bare symbol, got $(first_kv.args[2])")
+            rest = stmt.args[2:end]
+            val = isempty(rest) ? first_kv.args[3] :
+                  Expr(:tuple, first_kv.args[3], rest...)
         elseif stmt isa Expr && stmt.head === :(=)
             keysym = stmt.args[1] isa Symbol ? stmt.args[1] :
                 error("@game: clause key must be a bare symbol, got $(stmt.args[1])")

@@ -101,8 +101,8 @@ export
     enumerate_all_matches, enumerate_legal_actions,
     apply_rule!, rule_index,
     fire_auto_rules!,
-    GameDriver, Experience,
-    step!, run_game,
+    Experience,
+    run_game,
 
     # Schedule
     GameStep,

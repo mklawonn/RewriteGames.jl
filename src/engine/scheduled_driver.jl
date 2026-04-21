@@ -39,9 +39,6 @@ Base.show(io::IO, d::ScheduledGameDriver) =
 
 function ScheduledGameDriver(game::Game, agents::Dict{Symbol, <:AbstractAgent};
                               T_max::Int = 1000)
-    game.schedule === nothing && error(
-        "ScheduledGameDriver requires game.schedule to be a GameStep; " *
-        "use GameDriver for schedule=nothing (round-robin) games.")
     world = game.initial()
     state = GameState(world, game)
     ScheduledGameDriver(game, Dict{Symbol,AbstractAgent}(agents),

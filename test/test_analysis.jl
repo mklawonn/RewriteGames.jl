@@ -11,12 +11,9 @@ using AlgebraicRewriting
     rule_stub = RuleEntry("r"; name=:move)
     act = Action(rule_stub, nothing)
 
-    exp_win = Experience(:alice, enc, [act], act, enc, true, :alice,
-                         Dict{Symbol,Any}())
-    exp_draw = Experience(:bob, enc, [act], nothing, enc, true, nothing,
-                          Dict{Symbol,Any}())
-    exp_mid  = Experience(:alice, enc, [act], act, enc, false, nothing,
-                          Dict{Symbol,Any}())
+    exp_win  = Experience(:alice, enc, [act], act,     enc, true,  :alice,  Dict{Symbol,Any}(), Symbol[])
+    exp_draw = Experience(:bob,   enc, [act], nothing, enc, true,  nothing, Dict{Symbol,Any}(), Symbol[])
+    exp_mid  = Experience(:alice, enc, [act], act,     enc, false, nothing, Dict{Symbol,Any}(), Symbol[])
 
     exps = [exp_mid, exp_win, exp_draw]
 

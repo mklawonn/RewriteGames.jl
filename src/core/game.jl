@@ -10,8 +10,10 @@ Defines a turn-based game over ACSet world states.
 - `terminal`:  `(W) -> (done::Bool, winner::Union{Symbol,Nothing})` predicate.
 - `initial`:   `() -> ACSet` factory producing fresh world states.
 - `schema`:    The presentation / schema object (optional metadata).
-- `schedule`:  Optional `GameStep` tree describing the round structure.
-               `nothing` (default) uses the legacy round-robin `GameDriver`.
+- `schedule`:  `GameStep` tree describing the round structure.  When the
+               keyword constructor receives `schedule=nothing` (the default),
+               a round-robin schedule is generated automatically:
+               `Seq([PlayerStep(p), AutoStep()]` for each player in order.
 """
 struct Game
     players  :: Vector{Symbol}
@@ -20,7 +22,7 @@ struct Game
     terminal :: Function            # W -> (Bool, Union{Symbol,Nothing})
     initial  :: Function            # () -> ACSet
     schema   :: Any                 # optional schema metadata
-    schedule :: Union{GameStep, Nothing}   # schedule tree; nothing = round-robin
+    schedule :: GameStep
 end
 
 function Game(
@@ -30,7 +32,7 @@ function Game(
     auto::Vector  = AutoRule[],
     terminal::Function = (W) -> (false, nothing),
     initial::Function  = () -> error("No initial world factory provided"),
-    schedule = nothing,
+    schedule::Union{GameStep, Nothing} = nothing,
 )
     # Normalise rules: accept Vector{RuleEntry} values
     norm_rules = Dict{Symbol, RuleLibrary}()
@@ -38,8 +40,13 @@ function Game(
         lib = get(rules, p, RuleEntry[])
         norm_rules[p] = lib isa RuleLibrary ? lib : RuleLibrary(collect(RuleEntry, lib))
     end
-    Game(players, norm_rules, collect(AutoRule, auto), terminal, initial, schema,
-         schedule)
+    # Auto-generate a round-robin schedule when none is provided.
+    # Each player gets a PlayerStep followed by an AutoStep so that auto-rules
+    # fire after every move, exactly as the legacy GameDriver did.
+    sched = schedule === nothing ?
+        Seq(GameStep[s for p in players for s in (PlayerStep(p), AutoStep())]) :
+        schedule
+    Game(players, norm_rules, collect(AutoRule, auto), terminal, initial, schema, sched)
 end
 
 # ─── GameState ────────────────────────────────────────────────────────────────
@@ -81,8 +88,7 @@ nplayers(g::Game) = length(g.players)
 Base.length(g::Game) = length(g.players)
 
 Base.show(io::IO, g::Game) = print(io,
-    "Game(players=$(g.players), auto=$(length(g.auto)) rule(s), " *
-    (g.schedule === nothing ? "schedule=nothing)" : "schedule=GameStep)"))
+    "Game(players=$(g.players), auto=$(length(g.auto)) rule(s), schedule=$(g.schedule))")
 
 Base.show(io::IO, s::GameState) =
     print(io, "GameState(turn=$(s.turn), budgets=$(length(s.counters)))")

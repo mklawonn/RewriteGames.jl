@@ -10,6 +10,7 @@ format:
     code-fold: false
     highlight-style: github
     theme: cosmo
+jupyter: julia-1.11
 execute:
   eval: false        # set to true once dependencies are installed
   echo: true
@@ -31,7 +32,7 @@ enough to demonstrate every layer of the framework.
 ```{julia}
 #| label: setup
 using Catlab, AlgebraicRewriting, RewriteGames
-using Arrow, Tables, Random
+using Arrow, Tables, Random, Statistics
 ```
 
 ---
@@ -185,6 +186,46 @@ function check_terminal(board)
 end
 ```
 
+### Game schedule
+
+Every game in RewriteGames is driven by a **schedule** — a tree of `GameStep`
+nodes that describes one *round* of play.  The driver executes the tree once
+per round and loops until the terminal predicate fires or `T_max` steps are
+reached.
+
+For tic-tac-toe, one round is simply "X moves, then O moves":
+
+```julia
+Seq(PlayerStep(:X), PlayerStep(:O))
+```
+
+`Seq` runs its children in order and **short-circuits** as soon as the game
+ends — if X wins mid-round, O never moves.  `PlayerStep` is a leaf that asks
+the named player's agent to choose and apply one action, then checks the
+terminal predicate.
+
+The full set of node types is:
+
+| Type | Purpose |
+|------|---------|
+| `PlayerStep(p)` | Player `p` selects and applies one action |
+| `AutoStep()` | Fire `game.auto` rules without player input |
+| `Seq(steps...)` | Run children in order; short-circuit on terminal |
+| `Cond(pred, branches...)` | Branch on `pred(W) -> Int` (1-based index) |
+| `WhileStep(cond, body)` | Repeat `body` while `cond(W)` is true |
+| `ForEachStep(ob, body)` | Iterate over every part of type `ob` |
+
+Each `Experience` record carries a `schedule_path` vector that identifies
+which nodes were active when it was emitted — useful for logging, replay, and
+attributing steps in multi-agent or hierarchical schedules.
+
+::: {.callout-note}
+`PlayerStep` does **not** automatically fire auto-rules; that is `AutoStep`'s
+responsibility.  For games with probabilistic environment events, interleave
+`AutoStep()` nodes explicitly in the schedule.  Tic-tac-toe has no auto-rules,
+so the two-node `Seq` above is the complete schedule.
+:::
+
 ### Assembling the game with `@game`
 
 RewriteGames exports a `@game` DSL macro that builds a `Game` from a concise
@@ -194,6 +235,11 @@ block.  Keyword clauses map to the `Game(...)` constructor arguments:
 #| label: game-macro
 # No post_filter needed — the NACs embedded in the rules already ensure that
 # get_matches only returns empty-square matches.
+#
+# RuleEntry also accepts an optional `budget=N` keyword that caps how many
+# times the rule may fire per episode.  Tic-tac-toe needs no cap (each player
+# can place at most 5 pieces naturally), but it is useful for more complex
+# games where rule-use limits encode game semantics.
 entry_x = RuleEntry(rule_place_x; name=:place)
 entry_o = RuleEntry(rule_place_o; name=:place)
 
@@ -203,12 +249,19 @@ game = @game nothing begin
     O:        [entry_o]
     terminal: check_terminal
     initial:  initial_board
+    schedule: Seq(PlayerStep(:X), PlayerStep(:O))
 end
 ```
 
 ::: {.callout-note}
 `initial: initial_board` passes the function object itself (no parentheses).
 The engine calls `game.initial()` at the start of each episode.
+
+`schedule: Seq(PlayerStep(:X), PlayerStep(:O))` makes the round structure
+explicit.  Without a `schedule:` clause the engine auto-generates
+`Seq(PlayerStep(p), AutoStep())` for each player in order, which is equivalent
+for this game — but supplying the schedule explicitly is clearer and is the
+recommended style.
 :::
 
 ### Displaying the board
@@ -273,14 +326,13 @@ We can also compute quick statistics with the analysis helpers:
 ```{julia}
 #| label: quick-stats
 # Pool many episodes
-all_exps = reduce(vcat, [run_game(game, random_agents; T_max=20)
-                          for _ in 1:200])
+all_episodes = [run_game(game, random_agents; T_max=20) for _ in 1:200]
+all_exps     = reduce(vcat, all_episodes)
 
-println("X win rate: ", round(win_rate(all_exps, :X); digits=3))
-println("O win rate: ", round(win_rate(all_exps, :O); digits=3))
-println("Mean episode length: ",
-        round(mean(episode_length, [run_game(game, random_agents; T_max=20)
-                                    for _ in 1:200]); digits=1))
+println("X win rate:          ", round(win_rate(all_exps, :X); digits=3))
+println("O win rate:          ", round(win_rate(all_exps, :O); digits=3))
+println("Mean episode length: ", round(mean(episode_length, all_episodes); digits=1))
+println("Action counts:       ", action_counts(all_exps))
 ```
 
 ---
@@ -288,9 +340,22 @@ println("Mean episode length: ",
 ## Part 2 — Collecting Training Data
 
 Before training in Python we need to serialise the board state and chosen action
-for every step.  The built-in `write_experiences` saves the generic ACSet
-encoding; here we write a **game-specific** writer that produces the fixed-size
-27-feature representation the policy network expects.
+for every step.
+
+::: {.callout-note}
+### Built-in vs custom serialisation
+
+RewriteGames exports `write_experiences` / `read_experiences` (backed by
+Arrow) that save the *generic* ACSet encoding from every `Experience` —
+`node_features`, `edge_index`, rule counters, and the chosen rule name.  This
+is convenient for graph-neural-network policies that consume the raw ACSet
+graph.
+
+Here we write a **game-specific** writer instead, because our policy network
+expects a fixed 27-element one-hot feature vector (9 squares × 3 states) that
+is cheaper and more interpretable than the generic encoding.  Whenever your
+policy can work with the generic ACSet encoding, prefer `write_experiences`.
+:::
 
 ### Feature extraction
 
@@ -623,6 +688,25 @@ Now we load `ttt_policy.onnx` back into Julia using the `ONNXAgentExt` package
 extension.  The extension is activated automatically when you load `ONNXRunTime`
 alongside `RewriteGames`.
 
+### `EncodedState` — what agents receive
+
+Every agent's `select_action` method receives an `EncodedState`, which bundles
+the raw game state with pre-computed tensor encodings:
+
+| Field | Type | Contents |
+|-------|------|----------|
+| `raw` | `GameState` | Raw world ACSet plus counters and turn number |
+| `node_features` | `Matrix{Float32}` (n × F) | One-hot table type + attribute values per (table, row) node |
+| `edge_index` | `Matrix{Int32}` (2 × E) | COO-format foreign-key edges |
+| `edge_type` | `Vector{Int8}` | Schema morphism index per edge |
+| `rule_counters` | `Vector{Int32}` | Remaining budget per rule |
+| `turn_frac` | `Float32` | `turn / T_max` |
+
+`state.raw.world` is the live ACSet.  `state.node_features` and
+`state.edge_index` are already in a format suitable for graph neural networks.
+Simple agents that only need the raw board can access `state.raw.world`
+directly and pay no encoding cost.
+
 ### Building the input function
 
 `ONNXAgent` calls `input_fn(state::EncodedState)` before every inference step.
@@ -640,10 +724,12 @@ end
 
 ### A square-aware policy wrapper
 
-`ONNXAgent.select_action` picks the action whose *index in `legal_actions`*
-matches the argmax of the model's output.  For tic-tac-toe the logits are
-indexed by **square** (1–9), not by position in `legal_actions`, so we write a
-thin `FunctionAgent` wrapper instead:
+RewriteGames exports `ONNXAgent` as a built-in agent type for models whose
+output logits align directly with positions in `legal_actions`.  Tic-tac-toe
+does not fit that pattern because our model outputs one logit per **square**
+(1–9), while `legal_actions` is a variable-length vector of only the *empty*
+squares.  We therefore write a thin `FunctionAgent` wrapper that translates
+square logits into the correct `Action`:
 
 ```{julia}
 #| label: onnx-agent
@@ -731,7 +817,7 @@ end
 | Board state | ACSet with `Sq`, `X`, `O` objects and two foreign-key morphisms |
 | Legal moves | `rule_place_{x,o}` with `NAC` conditions banning occupied squares |
 | Win detection | `check_terminal` via `incident` on the indexed foreign keys |
-| Game loop | `run_game` / `GameDriver` from RewriteGames.jl |
+| Game loop | `run_game` + `ScheduledGameDriver` via `Seq(PlayerStep(:X), PlayerStep(:O))` |
 | Data format | Custom Arrow writer (27-D feature + chosen square + outcome) |
 | Training | PyTorch MLP with REINFORCE |
 | Bridge | `torch.onnx.export` → `ONNXRunTime.load_inference` → `FunctionAgent` |
@@ -750,3 +836,16 @@ learning algorithms.
 - **More complex games**: the same schema pattern extends to hex, go, or any
   game whose state is naturally a graph — the rewrite-rule formulation handles
   arbitrary topology changes.
+- **Rich schedules**: use `Cond`, `WhileStep`, or `ForEachStep` in the schedule
+  tree to model games with variable turn order, per-unit actions (e.g. each
+  piece moves independently), or conditional phases.  The `schedule_path` in
+  each `Experience` record tells you exactly where in the tree that step was
+  emitted.
+- **Auto-rules**: wrap any rule in `AutoRule(rule; prob_attr=:p)` and add it
+  to the `auto:` clause of `@game`.  Auto-rules fire automatically between
+  player steps via `AutoStep()` nodes in the schedule, making it easy to model
+  stochastic environment dynamics (weather, spawning, decay).
+- **Schema migration**: `GameMigration` lets you apply a Catlab schema functor
+  to an entire game (world, rules, and initial factory) in one call.  This is
+  useful when you want to extend a prototype schema with new attributes or
+  objects without rewriting all the rules from scratch.
