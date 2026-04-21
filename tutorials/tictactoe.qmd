@@ -26,7 +26,17 @@ This tutorial walks through a complete workflow using **RewriteGames.jl**:
 3. Train a policy network in **PyTorch** with REINFORCE.
 4. Export the policy to **ONNX** and load it back into Julia as a drop-in agent.
 
-The game we use is tic-tac-toe: simple enough to understand at a glance, but rich
+TODO: Flesh out and polish the following motivating paragraphs a bit. Replace awkward phrasing and expand on concepts that are not introduced sufficiently. Note wherever the library as currently implemented does not yet provide the functionality noted in these forward looking notes.
+One major motivation of RewriteGames.jl is to model a wide variety of games using the same framework. 
+Modeling the game state as an ACSet helps pursue this goal because copresheaves are very general.
+Rewrites are a natural way to manipulate ACSets and therefore rewrite rules can model a general class of moves.
+
+Another motivation of the library is to allow for users to build complicated games modularly. ACSets and rewrite rules facilitate migration and composition operators for schemas, world states, rewrite rules, and game schedules.
+
+One day we foresee this formalism being able to help relate different games to one another, which could help in training agents to play them.
+END MOTIVATION PARAGRAPHS
+
+In this tutorial, the game we use to demonstrate RewriteGames.jl functionality is tic-tac-toe: simple enough to understand at a glance, but rich
 enough to demonstrate every layer of the framework.
 
 ```{julia}
@@ -41,7 +51,7 @@ using Arrow, Tables, Random, Statistics
 
 ### Schema design
 
-An ACSet (attributed C-set) is a database-style data structure whose *schema*
+An ACSet (attributed C-set) is a relational data structure whose *schema*
 describes the tables and foreign keys.  For tic-tac-toe we use three tables:
 
 | Table | Meaning |
@@ -89,6 +99,8 @@ function initial_board()
 end
 ```
 
+
+TODO: This section should be moved to after the game schedule section. Once it is, we can more naturally talk about the mechanics of how moves are made available to the players based on the schedule. Right now that is missing. 
 ### Rewrite rules
 
 A *rewrite rule* in AlgebraicRewriting is a span `L ← I → R` of ACSet
@@ -96,9 +108,13 @@ morphisms.  The engine finds all injective morphisms from `L` into the current
 world (the *matches*), and for each match it applies the double-pushout
 construction to produce the next world.
 
+TODO: Make it clearer that we're talking about playing tic-tac-toe here
 **For placing a piece**, the pattern `L` is a single square.  The interface
 `I` keeps that square, and the result `R` adds a piece pointing at it.
 
+#TODO: We need to break this code block up into smaller pieces and explain what's happening in each using prose
+in the main document, not just in the comments. Additionally, we need to illustrate in graphics the process of finding a match for a given rewrite rule,
+the process of checking for negative conditions, and the process of rewriting. 
 ```{julia}
 #| label: rules
 # Shared pattern and interface: one square
@@ -160,6 +176,7 @@ attached to *both* rules, `get_matches` automatically returns only matches on
 empty squares — the game engine never sees an illegal move.
 :::
 
+TODO: This section should go just before "assembling the game"
 ### Terminal predicate
 
 We check the eight winning lines (3 rows, 3 columns, 2 diagonals):
@@ -186,6 +203,7 @@ function check_terminal(board)
 end
 ```
 
+TODO: This section will move up in the order, and I believe it should actually go before the rewrite rules. That way we can talk about the rewrite rules as the moves that a player can play in the schedule.
 ### Game schedule
 
 Every game in RewriteGames is driven by a **schedule** — a tree of `GameStep`
@@ -288,6 +306,7 @@ function show_board(board)
 end
 ```
 
+TODO: Change this so that we actually return the output of this code block.
 ### Running a quick random episode
 
 ```{julia}
