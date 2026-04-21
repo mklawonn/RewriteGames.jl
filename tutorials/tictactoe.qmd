@@ -18,26 +18,39 @@ execute:
 
 ## Overview
 
-This tutorial walks through a complete workflow using **RewriteGames.jl**:
+**RewriteGames.jl** models game states as *attributed C-sets* (ACSets) and
+moves as *algebraic rewrite rules*.  Both concepts come from applied category
+theory: ACSets are typed relational data structures whose schemas describe
+objects (tables) and morphisms (foreign keys), and rewrite rules describe how
+those structures transform under play.
 
-1. Model the board as an *attributed C-set* (ACSet) and the legal moves as
-   *algebraic rewrite rules*.
+This choice of representation is deliberately general.  Any game whose state
+can be described as a relational structure — boards, graphs, maps, unit
+networks — fits naturally into the framework.  Because every game shares the
+same substrate, the engine's bookkeeping (match enumeration, budget tracking,
+serialisation) applies uniformly across games without modification.
+
+Two longer-term goals shape the library's design, though neither is fully
+realised yet:
+
+- **Modular game composition.**  ACSets and rewrite rules support algebraic
+  composition: schemas can be combined, rules can be glued together, and
+  schedules can be nested.  The infrastructure for this — `GameMigration`,
+  compositional schedules — is in place; a library of reusable primitives is
+  forthcoming.
+- **Cross-game transfer.**  Because games share a common representation, a
+  policy trained on one game could, in principle, transfer to another via
+  *schema migration*.  This is ongoing research; the current library provides
+  the representational foundation but not yet the transfer machinery.
+
+In this tutorial we use **tic-tac-toe** to demonstrate every layer of the
+framework: simple enough to understand at a glance, rich enough to exercise
+the full workflow.
+
+1. Model the board as an ACSet and the legal moves as algebraic rewrite rules.
 2. Run self-play episodes and serialise the experience stream to Arrow.
 3. Train a policy network in **PyTorch** with REINFORCE.
 4. Export the policy to **ONNX** and load it back into Julia as a drop-in agent.
-
-TODO: Flesh out and polish the following motivating paragraphs a bit. Replace awkward phrasing and expand on concepts that are not introduced sufficiently. Note wherever the library as currently implemented does not yet provide the functionality noted in these forward looking notes.
-One major motivation of RewriteGames.jl is to model a wide variety of games using the same framework. 
-Modeling the game state as an ACSet helps pursue this goal because copresheaves are very general.
-Rewrites are a natural way to manipulate ACSets and therefore rewrite rules can model a general class of moves.
-
-Another motivation of the library is to allow for users to build complicated games modularly. ACSets and rewrite rules facilitate migration and composition operators for schemas, world states, rewrite rules, and game schedules.
-
-One day we foresee this formalism being able to help relate different games to one another, which could help in training agents to play them.
-END MOTIVATION PARAGRAPHS
-
-In this tutorial, the game we use to demonstrate RewriteGames.jl functionality is tic-tac-toe: simple enough to understand at a glance, but rich
-enough to demonstrate every layer of the framework.
 
 ```{julia}
 #| label: setup
@@ -75,8 +88,16 @@ end
 @acset_type TicTacToe(SchTTT, index=[:xsq, :osq])
 ```
 
-We index on both foreign keys so that `incident(board, sq_id, :xsq)` (all X pieces
-on square `sq_id`) is an O(1) lookup.
+```{mermaid}
+%%| label: fig-schema
+%%| fig-cap: "Schema for tic-tac-toe: each piece points to the square it occupies."
+graph LR
+    X["X  (pieces)"] -->|xsq| Sq["Sq  (squares)"]
+    O["O  (pieces)"] -->|osq| Sq
+```
+
+We index on both foreign keys so that `incident(board, sq_id, :xsq)` — "all X
+pieces on square `sq_id`" — is an O(1) lookup.
 
 Squares are numbered 1–9 in row-major order:
 
@@ -99,54 +120,155 @@ function initial_board()
 end
 ```
 
+### Game schedule
 
-TODO: This section should be moved to after the game schedule section. Once it is, we can more naturally talk about the mechanics of how moves are made available to the players based on the schedule. Right now that is missing. 
+Every game in RewriteGames is driven by a **schedule** — a tree of `GameStep`
+nodes that describes one *round* of play.  The driver executes the tree once
+per round and loops until the terminal predicate fires or `T_max` steps are
+reached.
+
+The schedule determines *who can act and when*.  Each `PlayerStep` asks the
+named player's agent to pick from their available rewrite rules and apply one.
+Because the schedule is explicit, turn order, conditional branching, and
+per-unit actions are all expressible without modifying the engine.
+
+For tic-tac-toe, one round is simply "X moves, then O moves":
+
+```julia
+Seq(PlayerStep(:X), PlayerStep(:O))
+```
+
+`Seq` runs its children in order and **short-circuits** as soon as the game
+ends — if X wins mid-round, O never moves.
+
+The full set of node types is:
+
+| Type | Purpose |
+|------|---------|
+| `PlayerStep(p)` | Player `p` selects and applies one action |
+| `AutoStep()` | Fire `game.auto` rules without player input |
+| `Seq(steps...)` | Run children in order; short-circuit on terminal |
+| `Cond(pred, branches...)` | Branch on `pred(W) -> Int` (1-based index) |
+| `WhileStep(cond, body)` | Repeat `body` while `cond(W)` is true |
+| `ForEachStep(ob, body)` | Iterate over every part of type `ob` |
+
+Each `Experience` record carries a `schedule_path` vector that identifies
+which nodes were active when it was emitted — useful for logging, replay, and
+attributing steps in multi-agent or hierarchical schedules.
+
+::: {.callout-note}
+`PlayerStep` does **not** automatically fire auto-rules; that is `AutoStep`'s
+responsibility.  For games with probabilistic environment events, interleave
+`AutoStep()` nodes explicitly in the schedule.  Tic-tac-toe has no auto-rules,
+so the two-node `Seq` above is the complete schedule.
+:::
+
 ### Rewrite rules
 
-A *rewrite rule* in AlgebraicRewriting is a span `L ← I → R` of ACSet
-morphisms.  The engine finds all injective morphisms from `L` into the current
-world (the *matches*), and for each match it applies the double-pushout
-construction to produce the next world.
+In tic-tac-toe, each player's only legal move is to place their piece on an
+*empty* square.  We model this as an algebraic rewrite rule on the board ACSet:
+find an empty square (the *match*), then add a piece pointing at it (the
+*rewrite*).
 
-TODO: Make it clearer that we're talking about playing tic-tac-toe here
-**For placing a piece**, the pattern `L` is a single square.  The interface
-`I` keeps that square, and the result `R` adds a piece pointing at it.
+A rewrite rule in AlgebraicRewriting is a **span** `L ← I → R` of ACSet
+morphisms:
 
-#TODO: We need to break this code block up into smaller pieces and explain what's happening in each using prose
-in the main document, not just in the comments. Additionally, we need to illustrate in graphics the process of finding a match for a given rewrite rule,
-the process of checking for negative conditions, and the process of rewriting. 
+- **L** (left): the pattern that must be found in the current world.
+- **I** (interface): the sub-pattern of L that is *preserved* by the rewrite.
+- **R** (right): what the matched region becomes after the rewrite.
+
+The engine finds all injective morphisms `m : L → G` from the pattern `L`
+into the current world `G` that satisfy every attached condition.  For each
+valid match it applies the double-pushout (DPO) construction to produce the
+updated world `G'`.
+
+#### Pattern and interface
+
+Both the "place X" and "place O" rules search for the same thing: one bare
+square.  We build the shared pattern and interface once:
+
 ```{julia}
-#| label: rules
-# Shared pattern and interface: one square
+#| label: rules-pattern
+# Shared pattern and interface: one bare square
 I_sq = @acset TicTacToe begin Sq=1 end
 L_sq = @acset TicTacToe begin Sq=1 end
 
 l_sq = ACSetTransformation(I_sq, L_sq; Sq=[1])   # identity on Sq
+```
 
-# ── Negative Application Conditions (NACs) ────────────────────────────────────
-# A NAC is a morphism  f : L → N  that *forbids* any match m : L → G from
-# extending to a commuting triangle  n : N → G  (i.e. n ∘ f = m).
-# AlgebraicRewriting.jl exposes this via  NAC(f)  (= AppCond(f, false)).
-#
-# For tic-tac-toe, placing a piece on square `sq` is illegal when another
-# piece already sits on `sq`.  We encode that by building a NAC whose target
-# pattern N is "the matched square with an existing piece":
+```{mermaid}
+%%| label: fig-rule-span
+%%| fig-cap: "Span L ← I → R for placing a piece. L and I are a single bare square; R adds a piece pointing at that square."
+graph LR
+    subgraph L["L — find a square"]
+        LSq["Sq"]
+    end
+    subgraph I["I — keep the square"]
+        ISq["Sq"]
+    end
+    subgraph R["R — square + new piece"]
+        RSq["Sq"]
+        RX["X  (or O)"]
+        RX -->|"xsq"| RSq
+    end
+    ISq -.->|l| LSq
+    ISq -.->|r| RSq
+```
 
-N_x_occ = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end  # square ← X
-N_o_occ = @acset TicTacToe begin Sq=1; O=1; osq=[1] end  # square ← O
+This span alone would match *every* square on the board, including occupied
+ones.  We need to restrict matches to squares that are genuinely empty.
 
-# The morphisms L_sq → N_*_occ each send the bare square to the square in N
+#### Negative Application Conditions
+
+A **Negative Application Condition** (NAC) is a morphism `f : L → N` that
+forbids matches.  Formally, a match `m : L → G` is only legal if there is *no*
+morphism `n : N → G` satisfying `n ∘ f = m`.  In plain English: the engine
+checks whether the larger pattern `N` can be embedded in the world consistently
+with the proposed match.  If it can, the match is rejected.
+
+For tic-tac-toe, `N` is "a square with a piece already on it".  We build one
+NAC forbidding X-occupied squares and one forbidding O-occupied squares:
+
+```{julia}
+#| label: rules-nac
+# Forbidden patterns: a square that already holds a piece
+N_x_occ = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end  # square with an X
+N_o_occ = @acset TicTacToe begin Sq=1; O=1; osq=[1] end  # square with an O
+
+# Morphisms send the bare L_sq square to the square inside each forbidden pattern
 nac_f_x = ACSetTransformation(L_sq, N_x_occ; Sq=[1])
 nac_f_o = ACSetTransformation(L_sq, N_o_occ; Sq=[1])
 
-nac_no_x = NAC(nac_f_x)   # "the matched square must NOT already hold an X"
-nac_no_o = NAC(nac_f_o)   # "the matched square must NOT already hold an O"
+nac_no_x = NAC(nac_f_x)   # reject if matched square already holds an X
+nac_no_o = NAC(nac_f_o)   # reject if matched square already holds an O
+```
 
-# ── Rules ─────────────────────────────────────────────────────────────────────
-# Both rules forbid playing on an occupied square via the two NACs above.
-# get_matches will only return matches to genuinely empty squares —
-# no post-hoc filtering is needed.
+```{mermaid}
+%%| label: fig-nac
+%%| fig-cap: "NAC for an X-occupied square. If the candidate match m : L → G extends through f to a morphism n : N → G, the match is rejected."
+graph LR
+    subgraph L["L — candidate square"]
+        LSq["Sq"]
+    end
+    subgraph N["N — forbidden: square with X"]
+        NSq["Sq"]
+        NX["X"]
+        NX -->|xsq| NSq
+    end
+    LSq -.->|f| NSq
+```
 
+Attaching both `nac_no_x` and `nac_no_o` to a rule means `get_matches`
+automatically returns only squares that are empty in both respects.  The game
+engine never sees an illegal move candidate; no post-hoc filtering is needed.
+
+#### Completing the rules
+
+With the shared interface and NACs in hand, building the two rules is
+straightforward:
+
+```{julia}
+#| label: rules-complete
 # Place X on the matched square
 R_x  = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end
 r_x  = ACSetTransformation(I_sq, R_x; Sq=[1])
@@ -158,25 +280,9 @@ r_o  = ACSetTransformation(I_sq, R_o; Sq=[1])
 rule_place_o = Rule(l_sq, r_o; ac=[nac_no_x, nac_no_o])
 ```
 
-::: {.callout-note}
-### How NACs work
+Both rules forbid playing on a square that holds *either* piece — only a
+square that is empty in both respects produces a valid match.
 
-A **Negative Application Condition** (NAC) is AlgebraicRewriting's built-in
-mechanism for expressing *forbidden* patterns.  Formally, `NAC(f)` where
-`f : L → N` says: a match `m : L → G` is *only legal* if there is no morphism
-`n : N → G` such that `n ∘ f = m`.
-
-In plain English: the engine checks whether the larger pattern `N` can be
-embedded in the world in a way that is consistent with the proposed match `m`.
-If it can, the match is rejected.
-
-Here, `N_x_occ` is "a square that already has an X on it".  The NAC rejects any
-match that lands on such a square.  Because both `nac_no_x` and `nac_no_o` are
-attached to *both* rules, `get_matches` automatically returns only matches on
-empty squares — the game engine never sees an illegal move.
-:::
-
-TODO: This section should go just before "assembling the game"
 ### Terminal predicate
 
 We check the eight winning lines (3 rows, 3 columns, 2 diagonals):
@@ -202,47 +308,6 @@ function check_terminal(board)
     return (false, nothing)
 end
 ```
-
-TODO: This section will move up in the order, and I believe it should actually go before the rewrite rules. That way we can talk about the rewrite rules as the moves that a player can play in the schedule.
-### Game schedule
-
-Every game in RewriteGames is driven by a **schedule** — a tree of `GameStep`
-nodes that describes one *round* of play.  The driver executes the tree once
-per round and loops until the terminal predicate fires or `T_max` steps are
-reached.
-
-For tic-tac-toe, one round is simply "X moves, then O moves":
-
-```julia
-Seq(PlayerStep(:X), PlayerStep(:O))
-```
-
-`Seq` runs its children in order and **short-circuits** as soon as the game
-ends — if X wins mid-round, O never moves.  `PlayerStep` is a leaf that asks
-the named player's agent to choose and apply one action, then checks the
-terminal predicate.
-
-The full set of node types is:
-
-| Type | Purpose |
-|------|---------|
-| `PlayerStep(p)` | Player `p` selects and applies one action |
-| `AutoStep()` | Fire `game.auto` rules without player input |
-| `Seq(steps...)` | Run children in order; short-circuit on terminal |
-| `Cond(pred, branches...)` | Branch on `pred(W) -> Int` (1-based index) |
-| `WhileStep(cond, body)` | Repeat `body` while `cond(W)` is true |
-| `ForEachStep(ob, body)` | Iterate over every part of type `ob` |
-
-Each `Experience` record carries a `schedule_path` vector that identifies
-which nodes were active when it was emitted — useful for logging, replay, and
-attributing steps in multi-agent or hierarchical schedules.
-
-::: {.callout-note}
-`PlayerStep` does **not** automatically fire auto-rules; that is `AutoStep`'s
-responsibility.  For games with probabilistic environment events, interleave
-`AutoStep()` nodes explicitly in the schedule.  Tic-tac-toe has no auto-rules,
-so the two-node `Seq` above is the complete schedule.
-:::
 
 ### Assembling the game with `@game`
 
@@ -284,11 +349,11 @@ recommended style.
 
 ### Displaying the board
 
-A quick ASCII helper makes it easy to follow a game:
+A quick ASCII helper returns the board as a string:
 
 ```{julia}
 #| label: display
-function show_board(board)
+function show_board(board) :: String
     marks = fill(' ', 3, 3)
     for xp in parts(board, :X)
         sq = subpart(board, xp, :xsq)
@@ -299,14 +364,15 @@ function show_board(board)
         marks[(sq-1)÷3+1, (sq-1)%3+1] = 'O'
     end
     sep = "───┼───┼───"
+    rows = String[]
     for (i, row) in enumerate(eachrow(marks))
-        println(" ", join(string.(row), " │ "))
-        i < 3 && println(sep)
+        push!(rows, " " * join(string.(row), " │ "))
+        i < 3 && push!(rows, sep)
     end
+    return join(rows, "\n")
 end
 ```
 
-TODO: Change this so that we actually return the output of this code block.
 ### Running a quick random episode
 
 ```{julia}
@@ -324,7 +390,7 @@ println("Episode: $(length(exps)) steps")
 println("Winner:  $(exps[end].winner)")
 println()
 
-show_board(exps[end].next_state.raw.world)
+print(show_board(exps[end].next_state.raw.world))
 ```
 
 You should see output like:
@@ -821,7 +887,7 @@ println("Move-by-move replay\n")
 for (i, exp) in enumerate(demo_exps)
     sq = exp.action === nothing ? "–" : string(components(exp.action.match)[:Sq][1])
     println("Turn $i: $(exp.player) plays square $sq")
-    show_board(exp.next_state.raw.world)
+    print(show_board(exp.next_state.raw.world))
     exp.done && println("\nResult: $(something(exp.winner, :draw))")
     println()
 end
