@@ -10,4 +10,5 @@ using Test
     include("test_bug_fixes.jl")
     include("test_analysis.jl")
     include("test_dsl.jl")
+    include("test_schedule.jl")
 end
