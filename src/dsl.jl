@@ -12,6 +12,7 @@ clauses (each on its own line, in any order):
     auto:     [AutoRule(r_env; prob_attr=:p)]
     terminal: (W) -> (nparts(W, :V) >= 10, nothing)
     initial:  () -> Graph(2)
+    schedule: Seq(PlayerStep(:alice), AutoStep(), PlayerStep(:bob))
 end
 ```
 
@@ -23,6 +24,8 @@ end
 - `auto:` — a Julia expression evaluating to a `Vector{AutoRule}` (default: `[]`).
 - `terminal:` — a function `W -> (Bool, Union{Symbol,Nothing})`.
 - `initial:` — a zero-argument factory `() -> ACSet`.
+- `schedule:` — a `GameStep` tree (optional).  When omitted, the game uses the
+  legacy round-robin `GameDriver`.
 
 The macro rewrites the block into a plain `Game(schema; ...)` call, so all
 standard Julia expressions are valid inside each clause.
@@ -36,6 +39,7 @@ macro game(schema, body)
     auto_expr     = :(AutoRule[])
     terminal_expr = :((W) -> (false, nothing))
     initial_expr  = :(() -> error("No initial world factory provided"))
+    schedule_expr = :nothing
 
     for stmt in body.args
         stmt isa LineNumberNode && continue
@@ -70,6 +74,8 @@ macro game(schema, body)
             terminal_expr = val
         elseif keysym === :initial
             initial_expr = val
+        elseif keysym === :schedule
+            schedule_expr = val
         else
             push!(rules_pairs, keysym => val)
         end
@@ -91,6 +97,7 @@ macro game(schema, body)
             auto     = $(esc(auto_expr)),
             terminal = $(esc(terminal_expr)),
             initial  = $(esc(initial_expr)),
+            schedule = $(esc(schedule_expr)),
         )
     end
 end

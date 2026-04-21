@@ -44,9 +44,14 @@ module RewriteGames
 using Catlab
 using AlgebraicRewriting
 
-# ── Core types ─────────────────────────────────────────────────────────────────
+# ── Core types (rule_entry + auto_rule must precede game_step which uses them) ─
 include("core/rule_entry.jl")
 include("core/auto_rule.jl")
+
+# ── Schedule primitives (before core/game.jl which references GameStep) ───────
+include("schedule/game_step.jl")
+
+# ── Game struct ─────────────────────────────────────────────────────────────────
 include("core/game.jl")
 
 # ── Encoding (must come before engine so EncodedState is visible) ───────────
@@ -61,6 +66,10 @@ include("agents/function_agent.jl")
 include("engine/matches.jl")
 include("engine/auto.jl")
 include("engine/driver.jl")
+
+# ── Schedule context + scheduled driver (after engine so Experience is defined)
+include("schedule/agent_context.jl")
+include("engine/scheduled_driver.jl")
 
 # ── Serialization ──────────────────────────────────────────────────────────────
 include("serialization/arrow.jl")
@@ -94,6 +103,13 @@ export
     fire_auto_rules!,
     GameDriver, Experience,
     step!, run_game,
+
+    # Schedule
+    GameStep,
+    PlayerStep, AutoStep, Auto,
+    Seq, Cond, WhileStep, ForEachStep,
+    AgentContext, push_context,
+    ScheduledGameDriver, run_schedule!,
 
     # Encoding
     EncodedState, encode_state,
