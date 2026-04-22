@@ -79,7 +79,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
 
     # ─── Layer 3: Individual node semantics ───────────────────────────────────
 
-    @testset "PlayerStep emits one Experience per evaluation" begin
+    @testset "PlayerStep records one step in history" begin
         game = Game(nothing;
             players  = [:p],
             rules    = Dict(:p => [entry_add_v]),
@@ -89,10 +89,10 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
         )
         agents = Dict(:p => rand_agent)
         driver = ScheduledGameDriver(game, agents; T_max=20)
-        exps = run_schedule!(driver)
-        @test length(exps) == 1
-        @test exps[1].player == :p
-        @test exps[1].schedule_path == [:p]
+        run_schedule!(driver)
+        @test history_length(driver.history) == 1
+        @test get_player(driver.history, 0) == :p
+        @test get_path(driver.history, 0)   == [:p]
         @test nparts(driver.state.world, :V) == 1
     end
 
@@ -131,7 +131,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
 
     @testset "Seq short-circuits on terminal" begin
         # After player :a acts, world has 3 vertices → done_at_3 fires.
-        # Player :b should NOT get an experience.
+        # Player :b should NOT get a step recorded.
         game = Game(nothing;
             players  = [:a, :b],
             rules    = Dict(:a => [entry_add_v], :b => [entry_add_v]),
@@ -141,10 +141,10 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
         )
         agents = Dict(:a => rand_agent, :b => rand_agent)
         driver = ScheduledGameDriver(game, agents; T_max=20)
-        exps = run_schedule!(driver)
-        @test length(exps) == 1
-        @test exps[1].player == :a
-        @test exps[1].done == true
+        done   = run_schedule!(driver)
+        @test history_length(driver.history) == 1   # only :a
+        @test get_player(driver.history, 0)  == :a
+        @test done == true
     end
 
     @testset "Cond routes to correct branch" begin
@@ -165,9 +165,9 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             )
             agents = Dict(:big => rand_agent, :small => rand_agent)
             driver = ScheduledGameDriver(game, agents; T_max=20)
-            exps = run_schedule!(driver)
-            @test length(exps) == 1
-            @test exps[1].player == expected_player
+            run_schedule!(driver)
+            @test history_length(driver.history) == 1
+            @test get_player(driver.history, 0)  == expected_player
         end
     end
 
@@ -182,9 +182,9 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             schedule = WhileStep(W -> nparts(W, :V) < 5, PlayerStep(:p)),
         )
         driver = ScheduledGameDriver(game, Dict(:p => rand_agent); T_max=20)
-        exps = run_schedule!(driver)
-        @test length(exps) == 3
-        @test nparts(driver.state.world, :V) == 5
+        run_schedule!(driver)
+        @test history_length(driver.history) == 3
+        @test nparts(driver.state.world, :V)  == 5
     end
 
     @testset "WhileStep max_iter safety cap" begin
@@ -202,7 +202,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
 
     @testset "ForEachStep runs body once per part" begin
         # World has 3 vertices; ForEachStep iterates over :V (vertex ids 1,2,3).
-        # Each iteration: PlayerStep(:p) with add_vertex rule → 3 experiences.
+        # Each iteration: PlayerStep(:p) with add_vertex rule → 3 steps.
         game = Game(nothing;
             players  = [:p],
             rules    = Dict(:p => [entry_add_v]),
@@ -211,27 +211,8 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             schedule = ForEachStep(:V, PlayerStep(:p)),
         )
         driver = ScheduledGameDriver(game, Dict(:p => rand_agent); T_max=20)
-        exps = run_schedule!(driver)
-        @test length(exps) == 3
-    end
-
-    @testset "ForEachStep context stored in experience info" begin
-        game = Game(nothing;
-            players  = [:p],
-            rules    = Dict(:p => [entry_add_v]),
-            terminal = never_terminal,
-            initial  = () -> Graph(2),
-            schedule = ForEachStep(:V, PlayerStep(:p)),
-        )
-        driver = ScheduledGameDriver(game, Dict(:p => rand_agent); T_max=20)
-        exps = run_schedule!(driver)
-        @test length(exps) == 2
-        ctx1 = exps[1].info[:context]
-        ctx2 = exps[2].info[:context]
-        @test ctx1 isa AgentContext
-        @test ctx1.ob == :V
-        @test ctx1.id == 1
-        @test ctx2.id == 2
+        run_schedule!(driver)
+        @test history_length(driver.history) == 3
     end
 
     @testset "ForEachStep schedule_path includes foreach name" begin
@@ -239,13 +220,15 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             players  = [:p],
             rules    = Dict(:p => [entry_add_v]),
             terminal = never_terminal,
-            initial  = () -> Graph(1),
+            initial  = () -> Graph(2),
             schedule = ForEachStep(:V, PlayerStep(:p); name=:vloop),
         )
         driver = ScheduledGameDriver(game, Dict(:p => rand_agent); T_max=20)
-        exps = run_schedule!(driver)
-        @test :vloop ∈ exps[1].schedule_path
-        @test :p     ∈ exps[1].schedule_path
+        run_schedule!(driver)
+        @test history_length(driver.history) == 2
+        path0 = get_path(driver.history, 0)
+        @test :vloop ∈ path0
+        @test :p     ∈ path0
     end
 
     # ─── Layer 4: ScheduledGameDriver integration ──────────────────────────────
@@ -259,10 +242,10 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             schedule = Seq(PlayerStep(:a), PlayerStep(:b)),
         )
         agents = Dict(:a => rand_agent, :b => rand_agent)
-        exps = run_game(game, agents; T_max=20)
-        @test !isempty(exps)
-        @test exps[end].done == true
-        @test exps[end].schedule_path != Symbol[]   # path is non-empty
+        hist = run_game(game, agents; T_max=20)
+        @test history_length(hist) > 0
+        # All recorded steps have a non-empty schedule path
+        @test all(t -> !isempty(get_path(hist, t)), hist._step_turns)
     end
 
     @testset "run_game auto-generates round-robin schedule when none provided" begin
@@ -274,11 +257,8 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             initial  = () -> Graph(0),
         )
         @test game.schedule isa Seq
-        exps = run_game(game, Dict(:p => rand_agent); T_max=20)
-        @test !isempty(exps)
-        @test exps[end].done == true
-        # All experiences come from the ScheduledGameDriver; schedule_path is non-empty
-        @test all(e -> !isempty(e.schedule_path), exps)
+        hist = run_game(game, Dict(:p => rand_agent); T_max=20)
+        @test history_length(hist) > 0
     end
 
     @testset "T_max enforced when terminal never fires" begin
@@ -289,15 +269,15 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             initial  = () -> Graph(0),
             schedule = PlayerStep(:p),
         )
-        exps = run_game(game, Dict(:p => rand_agent); T_max=4)
+        hist = run_game(game, Dict(:p => rand_agent); T_max=4)
         # Each PlayerStep increments turn; we stop when turn > T_max
-        @test !isempty(exps)
-        @test exps[end].done == true
+        @test history_length(hist) > 0
+        @test history_length(hist) <= 4
     end
 
     @testset "schedule_path correctly identifies nested position" begin
         # Seq(name=:round, Seq(name=:inner, PlayerStep(:p; name=:step)))
-        # Expected path: [:seq, :inner, :step]  (outer Seq uses default :seq name)
+        # Expected path: [:round, :inner, :step]
         game = Game(nothing;
             players  = [:p],
             rules    = Dict(:p => [entry_add_v]),
@@ -309,8 +289,8 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
             ),
         )
         driver = ScheduledGameDriver(game, Dict(:p => rand_agent); T_max=20)
-        exps = run_schedule!(driver)
-        @test exps[1].schedule_path == [:round, :inner, :step]
+        run_schedule!(driver)
+        @test get_path(driver.history, 0) == [:round, :inner, :step]
     end
 
     # ─── Layer 5: DSL ─────────────────────────────────────────────────────────

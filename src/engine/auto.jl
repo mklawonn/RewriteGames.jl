@@ -2,9 +2,9 @@
     fire_auto_rules!(state::GameState, auto_rules::Vector{AutoRule})
         -> Vector{NamedTuple}
 
-Fire each `AutoRule` in order against the current world state.  Returns a
-vector of named tuples recording which rules fired and how many matches were
-applied, for inclusion in the `Experience.info` field.
+Fire each `AutoRule` in order against the current world state.  Returns one
+named tuple `(rule_name, rule, match)` per match that was actually applied,
+preserving firing order.
 """
 function fire_auto_rules!(state::GameState, auto_rules::Vector{AutoRule})
     results = NamedTuple[]
@@ -12,7 +12,6 @@ function fire_auto_rules!(state::GameState, auto_rules::Vector{AutoRule})
         # Snapshot matches before applying any rewrites; mid-loop world mutation
         # would invalidate an open iterator but leave already-visited matches stale.
         snapshot = collect(get_matches(ar.rule, state.world))
-        fired    = 0
         for m in snapshot
             should_fire = if ar.prob_attr === nothing
                 true
@@ -22,10 +21,9 @@ function fire_auto_rules!(state::GameState, auto_rules::Vector{AutoRule})
             end
             if should_fire
                 state.world = rewrite_match(ar.rule, m)
-                fired += 1
+                push!(results, (rule_name=ar.name, rule=ar.rule, match=m))
             end
         end
-        push!(results, (rule=ar.name, fired=fired))
     end
     return results
 end

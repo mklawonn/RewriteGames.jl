@@ -33,10 +33,16 @@ game = Game(SchGraph;
     initial  = () -> Graph(),
 )
 
-# 4. Run with random agents
+# 4. Run with random agents — returns a GameHistory
 agents = Dict(:alice => FunctionAgent((s,a) -> rand(a)),
               :bob   => FunctionAgent((s,a) -> rand(a)))
-exps = run_game(game, agents; T_max=50)
+hist = run_game(game, agents; T_max=50)
+
+# 5. Inspect the history
+get_world(hist, 0)          # initial world
+get_world(hist, 1)          # world after turn 1
+get_player(hist, 0)         # who acted on turn 0
+winner(hist)                # winning player or nothing
 ```
 """
 module RewriteGames
@@ -67,12 +73,15 @@ include("engine/matches.jl")
 include("engine/auto.jl")
 include("engine/driver.jl")
 
-# ── Schedule context + scheduled driver (after engine so Experience is defined)
+# ── History (before scheduled_driver which records into it) ────────────────────
+include("history/game_history.jl")
+
+# ── Schedule context + scheduled driver (after engine so GameHistory is defined)
 include("schedule/agent_context.jl")
 include("engine/scheduled_driver.jl")
 
 # ── Serialization ──────────────────────────────────────────────────────────────
-include("serialization/arrow.jl")
+include("serialization/json.jl")
 
 # ── Schema migration ───────────────────────────────────────────────────────────
 include("migration/game_migration.jl")
@@ -101,7 +110,6 @@ export
     enumerate_all_matches, enumerate_legal_actions,
     apply_rule!, rule_index,
     fire_auto_rules!,
-    Experience,
     run_game,
 
     # Schedule
@@ -111,18 +119,25 @@ export
     AgentContext, push_context,
     ScheduledGameDriver, run_schedule!,
 
-    # Encoding
+    # History
+    GameHistory,
+    record_world!, record_step!,
+    get_world, get_chosen, get_available,
+    get_player, get_path, get_match, get_terminal,
+    turns, history_length,
+
+    # Encoding (kept for agent implementations)
     EncodedState, encode_state,
 
     # Serialization
-    write_experiences, read_experiences,
+    write_history, read_history,
 
     # Migration
     GameMigration,
     migrate_world, migrate_rules, migrate_game,
 
     # Analysis
-    win_rate, episode_length, action_counts,
+    winner, win_rate, episode_length, action_counts,
 
     # DSL
     @game

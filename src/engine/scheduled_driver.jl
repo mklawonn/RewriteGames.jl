@@ -19,9 +19,8 @@ end
     ScheduledGameDriver
 
 Drives a game whose `game.schedule` field is a `GameStep` tree.  Each call to
-`run_schedule!` executes one full pass of the schedule tree and returns all
-`Experience` records emitted during that pass.  The outer loop (until terminal
-or T_max) is handled by `run_game`.
+`run_schedule!` executes one full pass of the schedule tree.  The outer loop
+(until terminal or T_max) is handled by `_run_scheduled_game`.
 
 Constructed automatically by `run_game` when `game.schedule !== nothing`.
 """
@@ -32,6 +31,7 @@ mutable struct ScheduledGameDriver
     T_max   :: Int
     _done   :: Bool
     _winner :: Union{Symbol, Nothing}
+    history :: GameHistory
 end
 
 Base.show(io::IO, d::ScheduledGameDriver) =
@@ -39,34 +39,34 @@ Base.show(io::IO, d::ScheduledGameDriver) =
 
 function ScheduledGameDriver(game::Game, agents::Dict{Symbol, <:AbstractAgent};
                               T_max::Int = 1000)
-    world = game.initial()
-    state = GameState(world, game)
+    world   = game.initial()
+    state   = GameState(world, game)
+    history = GameHistory(world)   # records initial world at t = 0
     ScheduledGameDriver(game, Dict{Symbol,AbstractAgent}(agents),
-                        state, T_max, false, nothing)
+                        state, T_max, false, nothing, history)
 end
 
 # ─── execute_step! dispatch ───────────────────────────────────────────────────
 
 """
-    execute_step!(driver, step, path, context, out_exps) -> StepResult
+    execute_step!(driver, step, path, context) -> StepResult
 
-Recursively execute `step` against `driver.state`.
+Recursively execute `step` against `driver.state`.  Narrative data is
+accumulated in `driver.history` by `PlayerStep` leaves.
 
-- `path`:     Accumulated schedule path (`Vector{Symbol}`); each node pushes
-              its `name` before recursing.
-- `context`:  `nothing` or an `AgentContext` from a surrounding `ForEachStep`.
-- `out_exps`: `Vector{Experience}` that leaf `PlayerStep` nodes append to.
+- `path`:    Accumulated schedule path (`Vector{Symbol}`); each node pushes
+             its `name` before recursing.
+- `context`: `nothing` or an `AgentContext` from a surrounding `ForEachStep`.
 """
 function execute_step! end
 
 # ── PlayerStep ────────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: PlayerStep,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: PlayerStep,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     game    = driver.game
@@ -74,6 +74,10 @@ function execute_step!(
     player  = step.player
     agent   = driver.agents[player]
     my_path = push!(copy(path), step.name)
+
+    # t_left is the left endpoint of the transition interval for this step.
+    # state.turn starts at 1; the first player step spans [0, 1].
+    t_left = state.turn - 1
 
     enc_before    = encode_state(state.world, state.counters, state.turn, driver.T_max)
     lib           = game.rules[player]
@@ -90,15 +94,18 @@ function execute_step!(
     state.turn  += 1
     done = done || state.turn > driver.T_max
 
-    enc_after = encode_state(state.world, state.counters, state.turn, driver.T_max)
+    # Record action narratives (transition t_left → t_left+1)
+    record_step!(driver.history;
+        chosen_action = chosen,
+        legal_actions = legal_actions,
+        player        = player,
+        path          = my_path,
+        winner        = done ? winner : nothing,
+        t             = t_left)
 
-    push!(out_exps, Experience(
-        player, enc_before, legal_actions, chosen,
-        enc_after, done, winner,
-        Dict{Symbol,Any}(:budget_snapshot => copy(state.counters),
-                         :context         => context),
-        my_path,
-    ))
+    # Record world state after the action (and any auto rules that fired earlier
+    # via AutoStep siblings in the same Seq node).
+    record_world!(driver.history, state.world, t_left + 1)
 
     driver._done   = done
     driver._winner = winner
@@ -108,11 +115,10 @@ end
 # ── AutoStep ──────────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: AutoStep,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: AutoStep,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     rules = step.rules === nothing ? driver.game.auto : step.rules
@@ -128,16 +134,15 @@ end
 # ── Seq ───────────────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: Seq,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: Seq,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     my_path = push!(copy(path), step.name)
     for child in step.steps
-        result = execute_step!(driver, child, my_path, context, out_exps)
+        result = execute_step!(driver, child, my_path, context)
         result.done && return result
     end
     return StepResult(driver._done, driver._winner)
@@ -146,11 +151,10 @@ end
 # ── Cond ──────────────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: Cond,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: Cond,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     my_path = push!(copy(path), step.name)
@@ -158,17 +162,16 @@ function execute_step!(
     1 <= idx <= length(step.branches) ||
         error("Cond '$(step.name)': predicate returned branch index $idx " *
               "but only $(length(step.branches)) branch(es) defined")
-    return execute_step!(driver, step.branches[idx], my_path, context, out_exps)
+    return execute_step!(driver, step.branches[idx], my_path, context)
 end
 
 # ── WhileStep ─────────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: WhileStep,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: WhileStep,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     my_path = push!(copy(path), step.name)
@@ -178,7 +181,7 @@ function execute_step!(
         iter > step.max_iter &&
             error("WhileStep '$(step.name)': max_iter=$(step.max_iter) exceeded; " *
                   "ensure the condition eventually becomes false")
-        result = execute_step!(driver, step.body, my_path, context, out_exps)
+        result = execute_step!(driver, step.body, my_path, context)
         result.done && return result
     end
     return StepResult(driver._done, driver._winner)
@@ -187,11 +190,10 @@ end
 # ── ForEachStep ───────────────────────────────────────────────────────────────
 
 function execute_step!(
-    driver   :: ScheduledGameDriver,
-    step     :: ForEachStep,
-    path     :: Vector{Symbol},
-    context  :: Union{AgentContext, Nothing},
-    out_exps :: Vector{Experience},
+    driver  :: ScheduledGameDriver,
+    step    :: ForEachStep,
+    path    :: Vector{Symbol},
+    context :: Union{AgentContext, Nothing},
 ) :: StepResult
 
     my_path = push!(copy(path), step.name)
@@ -203,13 +205,12 @@ function execute_step!(
 
     for id in ids
         # Skip if this instance was deleted by an earlier rewrite in this loop.
-        # parts() returns 1:nparts, so id > nparts means the part is gone.
         id <= nparts(driver.state.world, step.ob) || continue
 
         new_ctx = context === nothing ? AgentContext(step.ob, id) :
                                         push_context(context, step.ob, id)
 
-        result = execute_step!(driver, step.body, my_path, new_ctx, out_exps)
+        result = execute_step!(driver, step.body, my_path, new_ctx)
         result.done && return result
     end
     return StepResult(driver._done, driver._winner)
@@ -218,36 +219,34 @@ end
 # ─── run_schedule! ────────────────────────────────────────────────────────────
 
 """
-    run_schedule!(driver::ScheduledGameDriver) -> Vector{Experience}
+    run_schedule!(driver::ScheduledGameDriver) -> Bool
 
-Execute one full pass of `game.schedule` and return all `Experience` records
-emitted during that pass.
+Execute one full pass of `game.schedule`.  Returns `true` if the game ended
+during this pass.  Narrative data accumulates in `driver.history`.
 """
 function run_schedule!(driver::ScheduledGameDriver)
-    out = Experience[]
-    execute_step!(driver, driver.game.schedule, Symbol[], nothing, out)
-    return out
+    execute_step!(driver, driver.game.schedule, Symbol[], nothing)
+    return driver._done
 end
 
 # ─── Dispatched run_game implementation ──────────────────────────────────────
 
 """
-    _run_scheduled_game(game, agents; T_max) -> Vector{Experience}
+    _run_scheduled_game(game, agents; T_max) -> GameHistory
 
-Internal implementation for `run_game` when `game.schedule !== nothing`.
-Loops over full schedule passes until the terminal predicate fires or T_max
-is reached.
+Internal implementation for `run_game`.  Loops over full schedule passes until
+the terminal predicate fires or T_max is reached, returning the accumulated
+`GameHistory`.
 """
 function _run_scheduled_game(game::Game, agents::Dict{Symbol, <:AbstractAgent};
                               T_max::Int = 1000)
-    driver   = ScheduledGameDriver(game, agents; T_max = T_max)
-    all_exps = Experience[]
+    driver = ScheduledGameDriver(game, agents; T_max = T_max)
     while !driver._done && driver.state.turn <= driver.T_max
-        exps = run_schedule!(driver)
-        append!(all_exps, exps)
-        # Stop if the schedule emitted nothing (empty schedule guard) or game ended
-        isempty(exps) && break
-        all_exps[end].done && break
+        steps_before = length(driver.history._step_turns)
+        run_schedule!(driver)
+        # Stop if the schedule fired no PlayerSteps (degenerate schedule guard)
+        length(driver.history._step_turns) == steps_before && break
+        driver._done && break
     end
-    return all_exps
+    return driver.history
 end

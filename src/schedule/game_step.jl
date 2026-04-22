@@ -6,7 +6,7 @@ one *round* of a game; the driver loops over rounds until the terminal
 predicate fires.
 
 Every concrete subtype carries a `name::Symbol` field used to build the
-`schedule_path` in emitted `Experience` records.
+`schedule_path` recorded in `GameHistory` for each player step.
 """
 abstract type GameStep end
 
@@ -19,7 +19,7 @@ A leaf schedule node where the named player's agent picks an action from its
 rule library.  When inside a `ForEachStep`, action enumeration is restricted to
 matches that involve the current context instance.
 
-Emits exactly one `Experience` per evaluation.
+Records exactly one step in `GameHistory` per evaluation.
 """
 struct PlayerStep <: GameStep
     player :: Symbol
@@ -38,7 +38,7 @@ When `rules` is `nothing` (the default), the driver uses `game.auto` at
 execution time.  When an explicit `Vector{AutoRule}` is supplied those rules
 fire instead, overriding `game.auto` at that point in the schedule.
 
-Emits no `Experience` records.
+Records no steps in `GameHistory`.
 """
 struct AutoStep <: GameStep
     rules :: Union{Vector{AutoRule}, Nothing}

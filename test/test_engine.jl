@@ -56,40 +56,40 @@ using AlgebraicRewriting
     # ── Episode-level invariants (checked across 10 random episodes) ──────────
     @testset "run_game terminates within T_max" begin
         for _ in 1:10
-            exps = run_game(game, agents; T_max=T_MAX)
-            @test !isempty(exps)
-            @test length(exps) <= T_MAX
-            @test exps[end].done == true
+            hist = run_game(game, agents; T_max=T_MAX)
+            @test history_length(hist) > 0
+            @test history_length(hist) <= T_MAX
         end
     end
 
-    # ── Experience struct contract (checked once on a single episode) ─────────
-    @testset "Experience fields have correct types" begin
-        exps = run_game(game, agents; T_max=T_MAX)
-        exp  = first(exps)
+    # ── GameHistory API contract (checked once on a single episode) ───────────
+    @testset "GameHistory fields have correct types" begin
+        hist = run_game(game, agents; T_max=T_MAX)
+        t0   = first(hist._step_turns)
 
-        @test exp.player in game.players
-        @test exp.state     isa EncodedState
-        @test exp.next_state isa EncodedState
-        @test exp.state.node_features  isa Matrix{Float32}
-        @test exp.next_state.node_features isa Matrix{Float32}
-        @test size(exp.state.edge_index,    1) == 2   # COO: 2 rows
-        @test size(exp.next_state.edge_index, 1) == 2
-        @test size(exp.state.node_features, 2) ==
-              size(exp.next_state.node_features, 2)   # consistent feature width
-        @test exp.legal_actions isa Vector{Action}
-        @test exp.action isa Union{Action, Nothing}
-        @test 0.0f0 <= exp.state.turn_frac     <= 1.0f0
-        @test 0.0f0 <= exp.next_state.turn_frac <= 1.0f0
-        @test exp.info isa Dict{Symbol, Any}
-        @test exp.schedule_path isa Vector{Symbol}
+        @test get_player(hist, t0) isa Symbol
+        @test get_player(hist, t0) in game.players
+        @test get_path(hist, t0)   isa Vector{Symbol}
+        @test get_world(hist, t0)  isa Graph
+        @test get_world(hist, 0)   isa Graph   # initial world
+
+        # chosen span is (rule_name, L, K, R) or nothing
+        ch = get_chosen(hist, t0)
+        if ch !== nothing
+            @test ch.rule_name isa Symbol
+            @test ch.L isa Graph
+            @test ch.K isa Graph
+            @test ch.R isa Graph
+        end
     end
 
     # ── Terminal semantics ────────────────────────────────────────────────────
-    @testset "Exactly one experience per episode has done=true" begin
-        exps = run_game(game, agents; T_max=T_MAX)
-        @test count(e -> e.done, exps) == 1
-        @test exps[end].done
+    @testset "Game produces a complete history" begin
+        hist = run_game(game, agents; T_max=T_MAX)
+        # turns() includes initial world (t=0) plus one world per player step
+        @test length(turns(hist)) == history_length(hist) + 1
+        # last world snapshot corresponds to the final game state
+        @test get_world(hist, last(turns(hist))) isa Graph
     end
 
     # ── Agent behaviour ───────────────────────────────────────────────────────
@@ -99,9 +99,8 @@ using AlgebraicRewriting
             :alice => first_agent,
             :bob   => FunctionAgent((s, a) -> rand(a)),
         )
-        exps = run_game(game, agents2; T_max=T_MAX)
-        @test !isempty(exps)
-        @test exps[end].done
+        hist = run_game(game, agents2; T_max=T_MAX)
+        @test history_length(hist) > 0
     end
 
     # ── Budget limiting ───────────────────────────────────────────────────────
@@ -120,8 +119,8 @@ using AlgebraicRewriting
         )
         # With budget=3 and terminal at 10 vertices, the budget is exhausted after
         # 3 moves; the player passes on all subsequent turns until T_max.
-        exps = run_game(game_budgeted, agents3; T_max=20)
-        @test !isempty(exps)
-        @test length(filter(e -> e.action !== nothing, exps)) <= 3
+        hist = run_game(game_budgeted, agents3; T_max=20)
+        @test history_length(hist) > 0
+        @test get(action_counts(hist), :add_vertex, 0) <= 3
     end
 end
