@@ -22,7 +22,9 @@ using Catlab.Graphics.Graphviz: Attributes, Statement, Node
 import Catlab.Graphics.Graphviz
 ```
 
-## Playground
+TODO Document wide, let's suppress the output of cells unless we are plotting something (e.g with a graphviz call).
+
+## Background
 
 For any game we have to define what our world will look like. This is the Tic-Tac-Toe schema.
 
@@ -129,8 +131,15 @@ N = Names(Dict("X" => X, "O" => O, "Sq" => Sq, "" => I, "I" => I));
 ## Available Moves as Rewrite Rules
 
 ### Moves
+Moves of our game will be rewrite rules. To understand rewrite rules and integrate them into the schedule we need to understand the three layers of abstraction:
 
-The `mark_x` rule adds an X to any unmarked square. Its interface K is the representable `Sq`. The left leg is the identity on `Sq` (match any square), and the right leg is the unique homomorphism `Sq → X` (which includes a square with an X on it), effectively adding the mark. Two negative application conditions (NACs) prevent the rule from firing on a square that already carries an X or an O.
+A **`Rule`** is the mathematical specification of a local graph transformation: a span K ← L → R where L is the pattern to match, R is the replacement, and K is their shared interface (the part preserved). Rules are purely declarative — they say *what* can change but not *when* to apply it.
+
+A **`RuleApp`** wraps a rule into a schedulable box and specifies how a distinguished agent (a sub-object of the world state) threads through the match. A `RuleApp` has **two output wires**: port 1 fires on *success* (a match was found and the rewrite applied), port 2 fires on *failure* (no match). This two-wire structure is what allows schedules to branch based on whether a rule could be applied.
+
+A **`tryrule`** collapses those two output wires into one, meaning "apply this rule if possible and continue either way." Use `tryrule` when you do not need to branch; use a bare `RuleApp` when success vs. failure should steer control flow.
+
+Let's now discuss the rules of interest to Tic Tac Toe. The `mark_x` rule adds an X to any unmarked square. Its interface K is the representable `Sq`. The left leg is the identity on `Sq` (match any square), and the right leg is the unique homomorphism `Sq → X` (which includes a square with an X on it), effectively adding the mark. Two negative application conditions (NACs) prevent the rule from firing on a square that already carries an X or an O.
 
 ```{julia}
 id_Sq = id[𝒞](Sq)
@@ -144,14 +153,7 @@ try_mark_x = tryrule(mark_x_app)
 
 ### Terminating Conditions
 
-We want the engine to detect a win by searching for homomorphisms into the current board. To integrate this into the schedule we need to understand the three layers of abstraction:
-
-A **`Rule`** is the mathematical specification of a local graph transformation: a span K ← L → R where L is the pattern to match, R is the replacement, and K is their shared interface (the part preserved). Rules are purely declarative — they say *what* can change but not *when* to apply it.
-
-A **`RuleApp`** wraps a rule into a schedulable box and specifies how a distinguished agent (a sub-object of the world state) threads through the match. A `RuleApp` has **two output wires**: port 1 fires on *success* (a match was found and the rewrite applied), port 2 fires on *failure* (no match). This two-wire structure is what allows schedules to branch based on whether a rule could be applied.
-
-A **`tryrule`** collapses those two output wires into one, meaning "apply this rule if possible and continue either way." Use `tryrule` when you do not need to branch; use a bare `RuleApp` when success vs. failure should steer control flow.
-
+We want the engine to detect a win by searching for homomorphisms into the current board. 
 For win detection we use *no-op* rules where L = R = K = the win pattern. The rule leaves the board unchanged, but its success wire fires whenever the winning configuration is present, letting the schedule react to it. Because `RuleApp` stores its patterns as explicit ACSets, the migration functor `F` can swap X ↔ O throughout to produce the corresponding O-win checks automatically.
 ```{julia}
 # Helper to create a win pattern for X on specific square indices
@@ -244,6 +246,8 @@ x_won_check = mk_sched((;), (init=:I,), N,
 
 ## Building the Gameplay Schedule
 
+TODO Call view_sched (from AlgebraicRewriting?) to visualize all schedules
+
 ### Making the X schedule
 
 X's turn is: mark any empty square with X via `try_mark_x`, then check for a win via `x_won_check`. The resulting schedule has two output wires: port 1 carries the board if X has just won, port 2 carries the board if the game continues.
@@ -260,6 +264,7 @@ Because `X_sched` is built entirely from `RuleApp` boxes whose patterns store ex
 O_sched = F(X_sched)
 ```
 
+TODO The schedule below assumes someone wins but doesn't account for a tie, I don't think!
 ### The full game schedule is to run the X schedule then the O schedule in a loop until someone wins!
 
 The game loops: X moves and checks for a win; if the game continues, O moves and checks; if neither has won, the board is fed back for another round. On each iteration the board enters either via the initial `init` wire (first turn) or the looping `trace_arg` wire (subsequent turns) — the two are merged before being handed to `X_sched`. The two "game over" paths (X won, O won) are merged into a single output wire with `merge_wires`.

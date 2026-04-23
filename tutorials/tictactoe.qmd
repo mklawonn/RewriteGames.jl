@@ -10,7 +10,13 @@ format:
     code-fold: false
     highlight-style: github
     theme: cosmo
-jupyter: julia-1.11
+jupyter:
+  kernelspec:
+    name: "julia-1.11"
+    language: "julia"
+    display_name: "Julia 1.11"
+    env:
+      JULIA_PROJECT: "@."
 execute:
   eval: false        # set to true once dependencies are installed
   echo: true
@@ -54,6 +60,8 @@ the full workflow.
 
 ```{julia}
 #| label: setup
+#| eval: true
+import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using Catlab, AlgebraicRewriting, RewriteGames
 using Arrow, Tables, Random, Statistics
 ```
@@ -75,8 +83,10 @@ describes the tables and foreign keys.  For tic-tac-toe we use three tables:
 
 Two foreign keys record which square each piece occupies:
 
+TODO I also want to capture the board topology, which means we need to be thinking about a graph, so we need to add an edge table with source and target foreign keys in the Sq table. Each square should then be connected to its non-diagonal neighbors. 
 ```{julia}
 #| label: schema
+#| eval: true
 @present SchTTT(FreeSchema) begin
     Sq::Ob
     X::Ob
@@ -88,8 +98,10 @@ end
 @acset_type TicTacToe(SchTTT, index=[:xsq, :osq])
 ```
 
+TODO Replace this mermaid cell with a "to_graphviz(SchLV; prog="dot")" call in the above cell.
 ```{mermaid}
 %%| label: fig-schema
+%%| eval: true
 %%| fig-cap: "Schema for tic-tac-toe: each piece points to the square it occupies."
 graph LR
     X["X  (pieces)"] -->|xsq| Sq["Sq  (squares)"]
@@ -110,9 +122,10 @@ Squares are numbered 1–9 in row-major order:
 ```
 
 The initial world has 9 squares and no pieces:
-
+TODO This should be edited to include the graph topology mentioned above.
 ```{julia}
 #| label: initial-board
+#| eval: true
 function initial_board()
     b = TicTacToe()
     add_parts!(b, :Sq, 9)
@@ -189,6 +202,7 @@ square.  We build the shared pattern and interface once:
 
 ```{julia}
 #| label: rules-pattern
+#| eval: true
 # Shared pattern and interface: one bare square
 I_sq = @acset TicTacToe begin Sq=1 end
 L_sq = @acset TicTacToe begin Sq=1 end
@@ -196,8 +210,10 @@ L_sq = @acset TicTacToe begin Sq=1 end
 l_sq = ACSetTransformation(I_sq, L_sq; Sq=[1])   # identity on Sq
 ```
 
+TODO This figure doesn't look right. For one, the background is too dark for each square. Secondly, we should not show the code in the cell and instead only show the output. Thirdly, I would like to fix the position of the elements of the span to resemble L <- K -> R in terms of positioning. Lastly, it would be great to use icons to represent the board squares and the xs and os.
 ```{mermaid}
 %%| label: fig-rule-span
+%%| eval: true
 %%| fig-cap: "Span L ← I → R for placing a piece. L and I are a single bare square; R adds a piece pointing at that square."
 graph LR
     subgraph L["L — find a square"]
@@ -231,6 +247,7 @@ NAC forbidding X-occupied squares and one forbidding O-occupied squares:
 
 ```{julia}
 #| label: rules-nac
+#| eval: true
 # Forbidden patterns: a square that already holds a piece
 N_x_occ = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end  # square with an X
 N_o_occ = @acset TicTacToe begin Sq=1; O=1; osq=[1] end  # square with an O
@@ -243,8 +260,10 @@ nac_no_x = NAC(nac_f_x)   # reject if matched square already holds an X
 nac_no_o = NAC(nac_f_o)   # reject if matched square already holds an O
 ```
 
+TODO Please make the same changes to this graphic as to the one above.
 ```{mermaid}
 %%| label: fig-nac
+%%| eval: true
 %%| fig-cap: "NAC for an X-occupied square. If the candidate match m : L → G extends through f to a morphism n : N → G, the match is rejected."
 graph LR
     subgraph L["L — candidate square"]
@@ -267,8 +286,16 @@ engine never sees an illegal move candidate; no post-hoc filtering is needed.
 With the shared interface and NACs in hand, building the two rules is
 straightforward:
 
+TODO These rules are identical but swap x for o. We should use a data migration functor as in the following example from AlgebraicRewriting.jl's lotka-volterra example, but adapted for our use case. The point is not that this saves a bunch of time for tic tac toe, but can save a lot of time for more complicated games, and helps ensure symmetry when the game designer is seeking symmetry. Here's the example from AlgebraicRewriting. "The schema LV has a certain symmetry between wolves and sheep, and this symmetry can be used to take instances of the schema (i.e. world states) and swap the wolves and the sheep. This is helpful for avoiding repeating work: there are certain actions that wolves and sheep share, so, by using this data migration, we can define them in terms of sheep and then migrate along F to obtain the analogous actions for wolves. F = Migrate(
+  ℒ,
+  Dict(:Sheep => :Wolf, :Wolf => :Sheep, :Time=>:Time),
+  Dict([:sheep_loc => :wolf_loc, :wolf_loc => :sheep_loc,
+    :sheep_eng => :wolf_eng, :wolf_eng => :sheep_eng, :countdown => :countdown,
+    :sheep_dir => :wolf_dir, :wolf_dir => :sheep_dir,]), SchLV, LV);"
+
 ```{julia}
 #| label: rules-complete
+#| eval: true
 # Place X on the matched square
 R_x  = @acset TicTacToe begin Sq=1; X=1; xsq=[1] end
 r_x  = ACSetTransformation(I_sq, R_x; Sq=[1])
@@ -289,6 +316,7 @@ We check the eight winning lines (3 rows, 3 columns, 2 diagonals):
 
 ```{julia}
 #| label: terminal
+#| eval: true
 const WINS = [
     [1,2,3], [4,5,6], [7,8,9],    # rows
     [1,4,7], [2,5,8], [3,6,9],    # columns
@@ -316,6 +344,7 @@ block.  Keyword clauses map to the `Game(...)` constructor arguments:
 
 ```{julia}
 #| label: game-macro
+#| eval: true
 # No post_filter needed — the NACs embedded in the rules already ensure that
 # get_matches only returns empty-square matches.
 #
@@ -353,6 +382,7 @@ A quick ASCII helper returns the board as a string:
 
 ```{julia}
 #| label: display
+#| eval: true
 function show_board(board) :: String
     marks = fill(' ', 3, 3)
     for xp in parts(board, :X)
@@ -377,6 +407,7 @@ end
 
 ```{julia}
 #| label: random-episode
+#| eval: true
 Random.seed!(42)
 
 random_agents = Dict{Symbol, AbstractAgent}(
@@ -410,6 +441,7 @@ We can also compute quick statistics with the analysis helpers:
 
 ```{julia}
 #| label: quick-stats
+#| eval: true
 # Pool many episodes
 all_episodes = [run_game(game, random_agents; T_max=20) for _ in 1:200]
 all_exps     = reduce(vcat, all_episodes)
