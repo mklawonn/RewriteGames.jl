@@ -1,0 +1,279 @@
+---
+title: "AlgebraicRewriting Lab"
+format:
+  html:
+    theme: cosmo
+    code-fold: false
+    toc: true
+jupyter: julia-1.11
+---
+
+## Setup
+
+This block initializes the project environment and loads the necessary libraries.
+
+```{julia}
+using Pkg
+Pkg.activate(".")
+
+using Catlab, AlgebraicRewriting
+using Random, Test
+using Catlab.Graphics.Graphviz: Attributes, Statement, Node
+import Catlab.Graphics.Graphviz
+```
+
+## Playground
+
+For any game we have to define what our world will look like. This is the Tic-Tac-Toe schema.
+
+```{julia}
+#| label: schema
+#| eval: true
+# Define your schema or ACSets here
+@present SchTTT(FreeSchema) begin
+    Sq::Ob
+    E::Ob
+    X::Ob
+    O::Ob
+    xsq::Hom(X, Sq)
+    osq::Hom(O, Sq)
+    src::Hom(E, Sq)
+    tgt::Hom(E, Sq)
+end
+
+@acset_type TicTacToe(SchTTT, index=[:xsq, :osq], part_type=BitSetParts)
+const TTT = TicTacToe
+𝒞 = ACSetCategory(MADVarACSetCat(TTT()))
+
+to_graphviz(SchTTT; prog="dot")
+```
+
+```{julia}
+#| label: constructor
+#| echo: false
+#| eval: true
+#| output: false
+function create_board()
+    ttt = TTT()
+    add_parts!(ttt, :Sq, 9)
+    # Horizontal edges
+    for i in 0:2, j in 0:1
+        add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+2)
+    end
+    # Vertical edges
+    for i in 0:1, j in 0:2
+        add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+1+3)
+    end
+    return ttt
+end
+
+board = create_board()
+```
+
+```{julia}
+function view_TTT(p::TTT)
+    stmts = Statement[]
+    for s in parts(p, :Sq)
+        row = div(s-1, 3)
+        col = mod(s-1, 3)
+        x, y = col, 2-row
+        
+        label = ""
+        xs = incident(p, s, :xsq)
+        os = incident(p, s, :osq)
+        if !isempty(xs)
+            label = "X"
+        elseif !isempty(os)
+            label = "O"
+        end
+        
+        push!(stmts, Node("v$s", Attributes(
+            :label => label,
+            :shape => "square",
+            :width => "0.5",
+            :height => "0.5",
+            :pos => "$(x),$(y)!",
+            :fixedsize => "true"
+        )))
+    end
+    Graphviz.Digraph("TTT", stmts; prog="neato")
+end
+
+view_TTT(board)
+```
+
+## Helper Utilities
+
+Our game is going to be symmetric in many ways, in that the role of X and O are interchangeable aside from who goes first. With that in mind, it will be beneficial to be able to switch perspectives on demand.
+```{julia}
+F = Migrate(
+  𝒞,
+  Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E),
+  Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt),
+  SchTTT, TTT);
+```
+
+It will also be handy to reference a single square, X, O, etc. We use the yoneda_cache functionality to realize this.
+```{julia}
+gSq, gE, gX, gO = ob_generators(FinCat(SchTTT))
+yTTT = yoneda_cache(TTT; clear=true);
+I = TTT()
+
+Sq = ob_map(yTTT, gSq)
+E = ob_map(yTTT, gE)
+X = ob_map(yTTT, gX)
+O = ob_map(yTTT, gO)
+N = Names(Dict("X" => X, "O" => O, "Sq" => Sq, "" => I, "I" => I));
+```
+
+## Available Moves as Rewrite Rules
+
+### Moves
+
+The `mark_x` rule adds an X to any unmarked square. Its interface K is the representable `Sq`. The left leg is the identity on `Sq` (match any square), and the right leg is the unique homomorphism `Sq → X` (which includes a square with an X on it), effectively adding the mark. Two negative application conditions (NACs) prevent the rule from firing on a square that already carries an X or an O.
+
+```{julia}
+id_Sq = id[𝒞](Sq)
+mark_X_l = id_Sq
+mark_X_r = homomorphism(Sq, X; cat=𝒞)
+mark_x = Rule(mark_X_l, mark_X_r;
+              ac=[NAC(homomorphism(Sq, X; cat=𝒞)), NAC(homomorphism(Sq, O; cat=𝒞))])
+mark_x_app = RuleApp(:mark_x, mark_x, I; cat=𝒞)
+try_mark_x = tryrule(mark_x_app)
+```
+
+### Terminating Conditions
+
+We want the engine to detect a win by searching for homomorphisms into the current board. To integrate this into the schedule we need to understand the three layers of abstraction:
+
+A **`Rule`** is the mathematical specification of a local graph transformation: a span K ← L → R where L is the pattern to match, R is the replacement, and K is their shared interface (the part preserved). Rules are purely declarative — they say *what* can change but not *when* to apply it.
+
+A **`RuleApp`** wraps a rule into a schedulable box and specifies how a distinguished agent (a sub-object of the world state) threads through the match. A `RuleApp` has **two output wires**: port 1 fires on *success* (a match was found and the rewrite applied), port 2 fires on *failure* (no match). This two-wire structure is what allows schedules to branch based on whether a rule could be applied.
+
+A **`tryrule`** collapses those two output wires into one, meaning "apply this rule if possible and continue either way." Use `tryrule` when you do not need to branch; use a bare `RuleApp` when success vs. failure should steer control flow.
+
+For win detection we use *no-op* rules where L = R = K = the win pattern. The rule leaves the board unchanged, but its success wire fires whenever the winning configuration is present, letting the schedule react to it. Because `RuleApp` stores its patterns as explicit ACSets, the migration functor `F` can swap X ↔ O throughout to produce the corresponding O-win checks automatically.
+```{julia}
+# Helper to create a win pattern for X on specific square indices
+function x_win_pattern(indices::Vector{Int})
+    pat = create_board()
+    for i in indices
+        add_part!(pat, :X, xsq=i)
+    end
+    return pat
+end
+
+# Define all 8 winning lines
+win_indices = [
+    [1,2,3], [4,5,6], [7,8,9], # Rows
+    [1,4,7], [2,5,8], [3,6,9], # Cols
+    [1,5,9], [3,5,7]           # Diagonals
+]
+
+x_wins = [x_win_pattern(idx) for idx in win_indices]
+
+# To force identity on Sq and E, we use initial conditions for homomorphism finding.
+# Example usage:
+# m = homomorphism(x_wins[1], current_board, initial=(Sq=1:9, E=1:12))
+```
+
+An alternative way to specify win conditions is to define structural patterns that represent "three-in-a-row" via the board's graph structure. This approach is more concise than hardcoding all eight winning positions, as a single structural pattern can match multiple locations on the board. However, it requires a non-trivial homomorphism search to identify all valid matchings.
+
+We define three such patterns:
+1. A linear pattern `Sq1 -> Sq2 -> Sq3` which matches any horizontal row or vertical column (as these always follow the "right" and "down" edge orientations).
+2. A "step" pattern for the 1-5-9 diagonal.
+3. A "reverse-step" pattern for the 3-5-7 diagonal, which is necessary because the board's edges are directed and the second diagonal traverses them in a different orientation.
+
+```{julia}
+# 1. Row/Column structural pattern: Sq1 -> Sq2 -> Sq3
+row_col_structural = TTT()
+add_parts!(row_col_structural, :Sq, 3)
+add_part!(row_col_structural, :E, src=1, tgt=2)
+add_part!(row_col_structural, :E, src=2, tgt=3)
+for i in 1:3 add_part!(row_col_structural, :X, xsq=i) end
+
+# 2. Diagonal "step" structural pattern (for 1-5-9)
+# Sq1 -H-> Sq2 -V-> Sq3 -H-> Sq4 -V-> Sq5 (Xs on 1, 3, 5)
+diag_structural_1 = TTT()
+add_parts!(diag_structural_1, :Sq, 5)
+add_part!(diag_structural_1, :E, src=1, tgt=2)
+add_part!(diag_structural_1, :E, src=2, tgt=3)
+add_part!(diag_structural_1, :E, src=3, tgt=4)
+add_part!(diag_structural_1, :E, src=4, tgt=5)
+for i in [1, 3, 5] add_part!(diag_structural_1, :X, xsq=i) end
+
+# 3. Diagonal "reverse-step" structural pattern (for 3-5-7)
+# Sq1 -V-> Sq2 <-H- Sq3 -V-> Sq4 <-H- Sq5 (Xs on 1, 3, 5)
+diag_structural_2 = TTT()
+add_parts!(diag_structural_2, :Sq, 5)
+add_part!(diag_structural_2, :E, src=1, tgt=2) # 3 -> 6
+add_part!(diag_structural_2, :E, src=3, tgt=2) # 5 -> 6
+add_part!(diag_structural_2, :E, src=3, tgt=4) # 5 -> 8
+add_part!(diag_structural_2, :E, src=5, tgt=4) # 7 -> 8
+for i in [1, 3, 5] add_part!(diag_structural_2, :X, xsq=i) end
+
+# Example of matching:
+# row_col_matches = homomorphisms(row_col_structural, current_board)
+# diag1_matches = homomorphisms(diag_structural_1, current_board)
+# diag2_matches = homomorphisms(diag_structural_2, current_board)
+```
+
+Each structural pattern becomes a no-op `Rule` (L = R = the pattern itself) and is wrapped in a `RuleApp` so the schedule can branch on whether X has achieved that configuration. The three `RuleApp`s are then composed into a single `x_won_check` schedule that succeeds (port 1) if *any* of the three patterns matches and fails (port 2) otherwise. Two cascaded binary `merge_wires` boxes collect the three success paths into one wire.
+
+```{julia}
+x_rows_rule  = Rule(id[𝒞](row_col_structural),  id[𝒞](row_col_structural))
+x_diag1_rule = Rule(id[𝒞](diag_structural_1),   id[𝒞](diag_structural_1))
+x_diag2_rule = Rule(id[𝒞](diag_structural_2),   id[𝒞](diag_structural_2))
+
+x_rows_app  = RuleApp(:x_wins_rows,  x_rows_rule,  I; cat=𝒞)
+x_diag1_app = RuleApp(:x_wins_diag1, x_diag1_rule, I; cat=𝒞)
+x_diag2_app = RuleApp(:x_wins_diag2, x_diag2_rule, I; cat=𝒞)
+
+x_won_check = mk_sched((;), (init=:I,), N,
+    (r=x_rows_app, d1=x_diag1_app, d2=x_diag2_app, mw=merge_wires(I)),
+    quote
+        won_r,  not_r  = r(init)
+        won_d1, not_d1 = d1(not_r)
+        won_d2, not_d2 = d2(not_d1)
+        won12 = mw(won_r,  won_d1)
+        won   = mw(won12,  won_d2)
+        return won, not_d2
+    end)
+```
+
+
+## Building the Gameplay Schedule
+
+### Making the X schedule
+
+X's turn is: mark any empty square with X via `try_mark_x`, then check for a win via `x_won_check`. The resulting schedule has two output wires: port 1 carries the board if X has just won, port 2 carries the board if the game continues.
+
+```{julia}
+X_sched = try_mark_x ⋅ x_won_check
+```
+
+### Migrating to get moves for O
+
+Because `X_sched` is built entirely from `RuleApp` boxes whose patterns store explicit ACSets, the migration functor `F` (which swaps X ↔ O in every ACSet) can be applied directly to the full schedule. `F(mark_x_app)` produces a rule that marks O on an empty square, and `F(x_won_check)` produces a schedule that detects three-in-a-row O configurations.
+
+```{julia}
+O_sched = F(X_sched)
+```
+
+### The full game schedule is to run the X schedule then the O schedule in a loop until someone wins!
+
+The game loops: X moves and checks for a win; if the game continues, O moves and checks; if neither has won, the board is fed back for another round. On each iteration the board enters either via the initial `init` wire (first turn) or the looping `trace_arg` wire (subsequent turns) — the two are merged before being handed to `X_sched`. The two "game over" paths (X won, O won) are merged into a single output wire with `merge_wires`.
+
+```{julia}
+game = mk_sched(
+    (trace_arg=:I,),
+    (init=:I,),
+    N,
+    (x=X_sched, o=O_sched, mw=merge_wires(I)),
+    quote
+        x_won, x_not  = x([init, trace_arg])
+        o_won, o_not  = o(x_not)
+        game_over = mw(x_won, o_won)
+        return o_not, game_over
+    end)
+```
