@@ -6,6 +6,8 @@ format:
     code-fold: false
     toc: true
 jupyter: julia-1.11
+execute:
+  output: false
 ---
 
 ## Setup
@@ -22,8 +24,6 @@ using Catlab.Graphics.Graphviz: Attributes, Statement, Node
 import Catlab.Graphics.Graphviz
 ```
 
-TODO Document wide, let's suppress the output of cells unless we are plotting something (e.g with a graphviz call).
-
 ## Background
 
 For any game we have to define what our world will look like. This is the Tic-Tac-Toe schema.
@@ -31,6 +31,7 @@ For any game we have to define what our world will look like. This is the Tic-Ta
 ```{julia}
 #| label: schema
 #| eval: true
+#| output: true
 # Define your schema or ACSets here
 @present SchTTT(FreeSchema) begin
     Sq::Ob
@@ -73,6 +74,7 @@ board = create_board()
 ```
 
 ```{julia}
+#| output: true
 function view_TTT(p::TTT)
     stmts = Statement[]
     for s in parts(p, :Sq)
@@ -148,7 +150,6 @@ mark_X_r = homomorphism(Sq, X; cat=𝒞)
 mark_x = Rule(mark_X_l, mark_X_r;
               ac=[NAC(homomorphism(Sq, X; cat=𝒞)), NAC(homomorphism(Sq, O; cat=𝒞))])
 mark_x_app = RuleApp(:mark_x, mark_x, I; cat=𝒞)
-try_mark_x = tryrule(mark_x_app)
 ```
 
 ### Terminating Conditions
@@ -243,17 +244,30 @@ x_won_check = mk_sched((;), (init=:I,), N,
     end)
 ```
 
+```{julia}
+#| output: true
+view_sched(x_won_check; names=N)
+```
 
 ## Building the Gameplay Schedule
 
-TODO Call view_sched (from AlgebraicRewriting?) to visualize all schedules
-
 ### Making the X schedule
 
-X's turn is: mark any empty square with X via `try_mark_x`, then check for a win via `x_won_check`. The resulting schedule has two output wires: port 1 carries the board if X has just won, port 2 carries the board if the game continues.
+X's turn uses `mark_x_app` directly (rather than `tryrule`) so that the failure wire is exposed. Port 1 fires if X has just won, port 2 carries the board if the game continues, and port 3 fires if X had no legal move — i.e., the board is already full and the game is a tie.
 
 ```{julia}
-X_sched = try_mark_x ⋅ x_won_check
+X_sched = mk_sched((;), (init=:I,), N,
+    (mx=mark_x_app, wc=x_won_check),
+    quote
+        moved, tie = mx(init)
+        x_won, cont = wc(moved)
+        return x_won, cont, tie
+    end)
+```
+
+```{julia}
+#| output: true
+view_sched(X_sched; names=N)
 ```
 
 ### Migrating to get moves for O
@@ -264,10 +278,16 @@ Because `X_sched` is built entirely from `RuleApp` boxes whose patterns store ex
 O_sched = F(X_sched)
 ```
 
-TODO The schedule below assumes someone wins but doesn't account for a tie, I don't think!
-### The full game schedule is to run the X schedule then the O schedule in a loop until someone wins!
+```{julia}
+#| output: true
+view_sched(O_sched; names=N)
+```
 
-The game loops: X moves and checks for a win; if the game continues, O moves and checks; if neither has won, the board is fed back for another round. On each iteration the board enters either via the initial `init` wire (first turn) or the looping `trace_arg` wire (subsequent turns) — the two are merged before being handed to `X_sched`. The two "game over" paths (X won, O won) are merged into a single output wire with `merge_wires`.
+### The full game schedule is to run the X schedule then the O schedule in a loop until someone wins or ties!
+
+The game loops: X moves and checks for a win; if the game continues, O moves and checks for a win; if neither has won, the board is fed back for another round. On each iteration the board enters either via the initial `init` wire (first turn) or the looping `trace_arg` wire (subsequent turns) — the two are merged before being handed to `X_sched`.
+
+Ties are handled by the third output wire of each player schedule. Because `mark_x_app` is used directly (not `tryrule`), its failure wire fires when the board is full. In a standard game this surfaces on O's side — after X places the ninth piece without winning, O's mark attempt fails and the `o_tie` wire carries the final board state. Both tie wires and both win wires are merged into a single `game_over` output.
 
 ```{julia}
 game = mk_sched(
@@ -276,9 +296,14 @@ game = mk_sched(
     N,
     (x=X_sched, o=O_sched, mw=merge_wires(I)),
     quote
-        x_won, x_not  = x([init, trace_arg])
-        o_won, o_not  = o(x_not)
-        game_over = mw(x_won, o_won)
+        x_won, x_not, x_tie = x([init, trace_arg])
+        o_won, o_not, o_tie  = o(x_not)
+        game_over = mw(mw(x_won, o_won), mw(x_tie, o_tie))
         return o_not, game_over
     end)
+```
+
+```{julia}
+#| output: true
+view_sched(game; names=N)
 ```
