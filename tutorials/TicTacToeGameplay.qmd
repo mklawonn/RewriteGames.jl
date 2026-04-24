@@ -12,29 +12,79 @@ execute:
 
 ## Setup
 
-This notebook assumes you have worked through `AlgebraicRewritingLab.qmd`,
-which defines the Tic-Tac-Toe schema, board constructor, rules, and the
-`x_won_check` / `X_sched` / `O_sched` schedules using the base
-`AlgebraicRewriting` API.  Here we rebuild those same schedules using
-`RewriteGames`'s `PlayerRuleApp` wrapper, which lets the wiring-diagram
-schedule call back into agent code for move selection.
-
 ```{julia}
 using Pkg
-Pkg.activate(".")
+Pkg.activate("..")
 
 using Catlab, AlgebraicRewriting
 using RewriteGames
+using Random
 using Statistics: mean
 using Catlab.Graphics.Graphviz: Attributes, Statement, Node
 import Catlab.Graphics.Graphviz
 ```
 
-## Schema and Board
+---
 
-We reuse the Tic-Tac-Toe schema verbatim from `AlgebraicRewritingLab.qmd`.
+## Overview
+
+**RewriteGames.jl** models game states as *attributed C-sets* (ACSets) and
+moves as *algebraic rewrite rules*.  Both concepts come from applied category
+theory: ACSets are typed relational data structures whose schemas describe
+objects (tables) and morphisms (foreign keys), and rewrite rules describe how
+those structures transform under play.
+
+This choice of representation is deliberately general.  Any game whose state
+can be described as a relational structure — boards, graphs, maps, unit
+networks — fits naturally into the framework.  Because every game shares the
+same substrate, the engine's bookkeeping (match enumeration, budget tracking,
+serialisation) applies uniformly across games without modification.
+
+Two longer-term goals shape the library's design, though neither is fully
+realised yet:
+
+- **Modular game composition.**  ACSets and rewrite rules support algebraic
+  composition: schemas can be combined, rules can be glued together, and
+  schedules can be nested.  The infrastructure for this — `GameMigration`,
+  compositional schedules — is in place; a library of reusable primitives is
+  forthcoming.
+- **Cross-game transfer.**  Because games share a common representation, a
+  policy trained on one game could, in principle, transfer to another via
+  *schema migration*.  This is ongoing research; the current library provides
+  the representational foundation but not yet the transfer machinery.
+
+In this tutorial we use **tic-tac-toe** to demonstrate every layer of the
+framework: simple enough to understand at a glance, rich enough to exercise
+the full workflow.
+
+1. Model the board as an ACSet and legal moves as rewrite rules.
+2. Build wiring-diagram schedules that express turn order and win detection.
+3. Use a *data migration functor* to derive O's schedule automatically from X's — avoiding
+   duplicated code and guaranteeing structural symmetry.
+4. Run self-play episodes and inspect the final board state.
+
+---
+
+## Part 1 — Modelling the Board as an ACSet
+
+### Schema design
+
+An ACSet's *schema* declares the tables (objects) and foreign keys (morphisms) that make
+up a world state.  For tic-tac-toe we need:
+
+| Object | Meaning |
+|--------|---------|
+| `Sq`   | Board squares (always exactly 9) |
+| `E`    | Edges encoding the board's graph topology |
+| `X`    | X pieces placed so far |
+| `O`    | O pieces placed so far |
+
+Two foreign keys record which square each piece occupies, and two more record the source
+and target squares of each edge:
 
 ```{julia}
+#| label: schema
+#| output: true
 @present SchTTT(FreeSchema) begin
     Sq::Ob; E::Ob; X::Ob; O::Ob
     xsq::Hom(X, Sq); osq::Hom(O, Sq)
@@ -45,12 +95,49 @@ end
 const TTT = TicTacToe
 𝒞 = ACSetCategory(MADVarACSetCat(TTT()))
 
+to_graphviz(SchTTT; prog="dot")
+```
+
+We index on `:xsq` and `:osq` so that `incident(board, sq_id, :xsq)` — "all X pieces on
+square `sq_id`" — is an O(1) lookup instead of a linear scan.
+
+`ACSetCategory(MADVarACSetCat(TTT()))` constructs the category in which all subsequent
+morphisms and rules live.  The `MADVarACSetCat` variant supports the *naturality*
+conditions required by DPO rewriting.
+
+### Why include edges?
+
+The edge table `E` with `src` and `tgt` morphisms embeds the board's graph topology
+directly into every world state.  The primary payoff is for win detection:
+
+- **Structural win patterns**: We can define "three in a row" as an ACSet homomorphism
+  problem rather than hardcoding the eight winning index-sets.  A pattern with three X
+  pieces connected by edges matches any three-in-a-row configuration automatically.
+
+<!-- Downstream-learning justification removed pending a cleaner story.
+     EncodedState encodes all foreign-key edges uniformly by morphism index, which is
+     fine when every edge in the schema carries the same semantic role.  For richer
+     games with multiple distinct graph structures (adjacency, attack range, movement
+     graph, …) a policy needs to distinguish edge types.  A future direction is to let
+     game designers annotate morphisms with semantic roles and expose those tags in the
+     EncodedState edge_type vector so GNN policies can attend selectively.
+-->
+
+### Board constructor and visualisation
+
+Squares are numbered 1–9 in row-major order.  Horizontal edges connect adjacent squares
+in the same row; vertical edges connect squares directly above/below each other.
+
+```{julia}
+#| label: constructor
 function create_board()
     ttt = TTT()
     add_parts!(ttt, :Sq, 9)
+    # Horizontal edges: (1→2), (2→3), (4→5), (5→6), (7→8), (8→9)
     for i in 0:2, j in 0:1
         add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+2)
     end
+    # Vertical edges: (1→4), (2→5), (3→6), (4→7), (5→8), (6→9)
     for i in 0:1, j in 0:2
         add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+1+3)
     end
@@ -58,18 +145,64 @@ function create_board()
 end
 ```
 
-```{julia}
-# Migration functor: swap X ↔ O
-F = Migrate(
-    𝒞,
-    Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E),
-    Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt),
-    SchTTT, TTT)
+A small Graphviz helper renders any board state for quick inspection:
 
-# Yoneda representables and Names object
+```{julia}
+#| label: view-board
+#| output: true
+function view_TTT(p::TTT)
+    stmts = Statement[]
+    for s in parts(p, :Sq)
+        row = div(s-1, 3)
+        col = mod(s-1, 3)
+        x, y = col, 2-row
+        label = ""
+        xs = incident(p, s, :xsq)
+        os = incident(p, s, :osq)
+        if !isempty(xs)
+            label = "X"
+        elseif !isempty(os)
+            label = "O"
+        end
+        push!(stmts, Node("v$s", Attributes(
+            :label => label,
+            :shape => "square",
+            :width => "0.5",
+            :height => "0.5",
+            :pos => "$(x),$(y)!",
+            :fixedsize => "true"
+        )))
+    end
+    Graphviz.Digraph("TTT", stmts; prog="neato")
+end
+
+view_TTT(create_board())
+```
+
+---
+
+## Part 2 — Rewrite Rules
+
+Everything a player can do in a game — place a piece, move a unit, build a structure —
+is represented in RewriteGames as an **algebraic rewrite rule**.  This is more than a
+notational choice: because the framework inherits its match-finding and rule-application
+machinery from AlgebraicRewriting, any rule you write automatically comes with legal-move
+enumeration, NAC enforcement, and the ability to be migrated to a different player or
+schema.  You describe *what* a move looks like, and the engine handles *when* and *how*
+to apply it.
+
+We will build X's rules first.  Once those are in place, Part 3 shows how a single
+migration functor derives O's entire ruleset — including move rules, win-detection rules,
+and schedule structure — without writing any additional rule code.
+
+Before we can write rules, it will be convenient to have the Yoneda representables and the `Names` object that
+AlgebraicRewriting uses to construct and label morphisms:
+
+```{julia}
+#| label: yoneda
 gSq, gE, gX, gO = ob_generators(FinCat(SchTTT))
 yTTT = yoneda_cache(TTT; clear=true)
-I  = TTT()
+I  = TTT()          # the empty ACSet (initial object)
 Sq = ob_map(yTTT, gSq)
 E  = ob_map(yTTT, gE)
 X  = ob_map(yTTT, gX)
@@ -77,56 +210,109 @@ O  = ob_map(yTTT, gO)
 N  = Names(Dict("X" => X, "O" => O, "Sq" => Sq, "" => I, "I" => I))
 ```
 
-## Rewrite Rules
 
-### Mark-X rule
+TODO We need to explain with a graphic what the representables are.
 
-The `mark_x` rule places an X on any unmarked square.  Two NACs prevent
-firing on an already-marked square.
+The representable for object `gX` is the unique (up to isomorphism) ACSet with exactly
+one element of type `X` and the minimum number of elements of all other types required by
+the foreign keys.  `yoneda_cache` computes all representables once and caches them.
+`Names` maps human-readable strings to representables; `mk_sched` and `view_sched` use it
+to label wires in the wiring diagram.
+
+### Rewrite rules as spans
+
+A rewrite rule in AlgebraicRewriting is a **span** `L ← K → R` of ACSet morphisms:
+
+- **L** (left pattern): the sub-structure that must be *found* in the current world.
+- **K** (interface): the part of L that is *preserved* by the rewrite — it appears in
+  both L and R and is not deleted or added.
+- **R** (right pattern): what the matched region looks like *after* the rewrite.
+
+
+The engine finds all injective morphisms `m : L → G` from the pattern into the current
+world `G` that satisfy all attached conditions.  For each valid match it applies the
+**double-pushout (DPO)** construction: delete everything in L that is not in K, then glue
+in R to produce the updated world `G'`.
+
+TODO We need a graphic showing how the DPO alters an ACSet. We can show something simple, like adding a node and edge to a graph. We should depict the homomorphisms by coloring/highlighting the image of the legs.
+
+### The `mark_x` rule
+
+The `mark_x` rule places an X on any *unmarked* square.  The interface K is the
+representable `Sq` (one bare square).  The left leg is the identity on `Sq` (find any
+square), and the right leg is the unique morphism `Sq → X` (which maps that square into
+the representable for X, effectively adding an X piece).
+
+TODO We need a graphic that shows the span. It should draw the relevant ACSets, and depict the homomorphisms by coloring/highlighting the image of the legs.
+
+Two **Negative Application Conditions** (NACs) prevent the rule from firing on an already
+occupied square.  A NAC is a morphism `f : L → N` specifying a *forbidden extension*: a
+match `m : L → G` is rejected whenever there exists a morphism `n : N → G` such that
+`n ∘ f = m`.  In plain English, the engine checks whether the larger forbidden pattern
+`N` can be embedded in the world consistently with the proposed match.  If it can, the
+match is rejected.
+
+TODO We need a graphic that shows the NAC 
+TODO We should also explain exactly what Rule() is with repect to the abstract rewriting concepts that we introduced above. Say that it encodes the Span that we're talking about.
 
 ```{julia}
+#| label: mark-x-rule
 id_Sq    = id[𝒞](Sq)
 mark_X_l = id_Sq
 mark_X_r = homomorphism(Sq, X; cat=𝒞)
 
 mark_x = Rule(mark_X_l, mark_X_r;
-              ac=[NAC(homomorphism(Sq, X; cat=𝒞)),
-                  NAC(homomorphism(Sq, O; cat=𝒞))])
+              ac=[NAC(homomorphism(Sq, X; cat=𝒞)),   # reject if square holds an X
+                  NAC(homomorphism(Sq, O; cat=𝒞))])  # reject if square holds an O
 ```
 
-### Win-detection rules (no-op identity rules)
+### Win-detection rules (structural patterns)
 
+TODO We should introduce this section better, explaining that we can use hom search to check for wins as well, then explain there are a couple of ways to do it. The first is that we could hardcode each of the whole-board configurations that represents winning. The other is that we could encode the more atomic pattern that constitutes winning and search for it within the board state. We should absolutely show both, which means we should add back in the hardcoded option as well.
+
+Rather than hardcoding all eight winning index-sets, we exploit the board's graph
+structure to write *three* structural patterns that together cover all configurations:
+
+1. **Row or column**: three Xs on squares connected by two successive edges
+   (`Sq1 → Sq2 → Sq3`).  Because horizontal and vertical edges share the same
+   direction convention, a single connected-path pattern matches both rows and columns.
+2. **Diagonal 1–5–9**: the main diagonal traverses one horizontal edge then one vertical
+   edge, repeated.  A five-square path `Sq1 → Sq2 → Sq3 → Sq4 → Sq5` with Xs on the
+   odd nodes captures it.
+3. **Diagonal 3–5–7**: the anti-diagonal reverses the horizontal direction.  A
+   fork/join pattern where two nodes share targets encodes it.
+
+TODO In the code blocks that follow there are many methods that people may not be familiar with, such as add_parts! (actually we might need to explain what that is way back before the create_board() function). But generally, I think we could also do a better job holding the reader's hand through the following cell as well.
 ```{julia}
-function x_win_pattern(indices::Vector{Int})
-    pat = create_board()
-    for i in indices
-        add_part!(pat, :X, xsq=i)
-    end
-    return pat
-end
-
-win_indices = [[1,2,3],[4,5,6],[7,8,9],[1,4,7],[2,5,8],[3,6,9],[1,5,9],[3,5,7]]
-x_wins = [x_win_pattern(idx) for idx in win_indices]
-
-# Structural patterns that match three-in-a-row via the board graph
+#| label: win-patterns
+# Pattern 1: row or column — Sq1 -E-> Sq2 -E-> Sq3, all marked X
 row_col_structural = TTT()
 add_parts!(row_col_structural, :Sq, 3)
 add_part!(row_col_structural, :E, src=1, tgt=2)
 add_part!(row_col_structural, :E, src=2, tgt=3)
 for i in 1:3; add_part!(row_col_structural, :X, xsq=i); end
 
+# Pattern 2: main diagonal (1-5-9), hop-skip path
 diag_structural_1 = TTT()
 add_parts!(diag_structural_1, :Sq, 5)
 add_part!(diag_structural_1, :E, src=1, tgt=2); add_part!(diag_structural_1, :E, src=2, tgt=3)
 add_part!(diag_structural_1, :E, src=3, tgt=4); add_part!(diag_structural_1, :E, src=4, tgt=5)
 for i in [1,3,5]; add_part!(diag_structural_1, :X, xsq=i); end
 
+# Pattern 3: anti-diagonal (3-5-7), shared-target fork
 diag_structural_2 = TTT()
 add_parts!(diag_structural_2, :Sq, 5)
 add_part!(diag_structural_2, :E, src=1, tgt=2); add_part!(diag_structural_2, :E, src=3, tgt=2)
 add_part!(diag_structural_2, :E, src=3, tgt=4); add_part!(diag_structural_2, :E, src=5, tgt=4)
 for i in [1,3,5]; add_part!(diag_structural_2, :X, xsq=i); end
+```
 
+Each pattern becomes a **no-op rule** where L = R = K = the pattern itself.  The rule
+leaves the board unchanged, but its *success wire* fires whenever the pattern can be
+embedded in the current board — letting the schedule branch on whether X has won.
+
+```{julia}
+#| label: win-rules
 x_rows_rule  = Rule(id[𝒞](row_col_structural),  id[𝒞](row_col_structural))
 x_diag1_rule = Rule(id[𝒞](diag_structural_1),   id[𝒞](diag_structural_1))
 x_diag2_rule = Rule(id[𝒞](diag_structural_2),   id[𝒞](diag_structural_2))
@@ -136,15 +322,291 @@ x_diag1_app = RuleApp(:x_wins_diag1, x_diag1_rule, I; cat=𝒞)
 x_diag2_app = RuleApp(:x_wins_diag2, x_diag2_rule, I; cat=𝒞)
 ```
 
-## Building the GameSched Schedules
+### `RuleApp` and its two output ports
+
+TODO We should clarify in this section that you can only use RuleApps for checking for rewrites without a players input, i.e. to check for win conditions. Otherwise we have to use a PlayerRuleApp which we talk about in a later section.
+
+A `RuleApp` wraps a `Rule` into a *schedulable box*.  Its key property is its **two
+output wires**:
+
+- **Port 1** (success): carries the rewritten world when a match was found and the rule
+  applied.
+- **Port 2** (failure): carries the original world unchanged when no match existed.
+
+This two-port structure lets schedules branch based on whether a rule could fire — which
+is exactly what we need for win detection and tie detection.
+
+---
+
+## Part 3 — Schema Symmetry and Data Migrations
+
+### The X ↔ O symmetry
+
+Tic-tac-toe is symmetric between X and O in everything except turn order.  Both players
+have the same move type (mark an empty square), and both have the same win condition
+(three in a row).  Any rule or schedule built for X can be mechanically converted to its
+O counterpart by swapping every occurrence of `X` for `O`, `xsq` for `osq`, and vice
+versa.
+
+Doing this swap by hand is tedious and error-prone.  AlgebraicJulia provides a better
+tool: the `Migrate` functor.
+
+### The `Migrate` functor in AlgebraicJulia
+
+`Migrate` encodes a **schema morphism** as a Julia object that can be applied to any
+ACSet instance, ACSet morphism, or even an entire rewrite rule.  Formally, if two schemas
+`S` and `T` are related by a functor `F : S → T`, then any `T`-instance can be
+*restricted* (pulled back) along `F` to produce an `S`-instance.
+
+In our case both the source and target schema are `SchTTT`, but we define a non-trivial
+self-map of the schema that swaps `X ↔ O` and `xsq ↔ osq` while leaving `Sq` and the
+edge morphisms `src`, `tgt`, `E` unchanged:
+
+```{julia}
+#| label: migration-functor
+F = Migrate(
+    𝒞,
+    Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E),
+    Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt),
+    SchTTT, TTT)
+```
+
+The first `Dict` maps **objects** (tables) and the second maps **morphisms** (foreign
+keys).  Every object and every morphism in the schema must appear exactly once as a key.
+
+Once `F` is built, you can apply it to:
+
+- **ACSet instances**: `F(board)` returns a new board with all X pieces turned into O
+  pieces and vice versa.
+- **ACSet morphisms**: `F(h)` pushes a homomorphism forward through the schema map.
+- **Rules**: `F(rule)` migrates the left pattern, the right pattern, the interface, and
+  every application condition (NAC) of the rule.
+- **Entire schedules**: `F(sched)` (for AlgebraicRewriting `Schedule` objects) migrates
+  every rule inside the schedule.
+
+This single functor definition is all we need to derive O's entire ruleset from X's
+without repeating any code.
+
+---
+
+## Part 4 — The RewriteGames API
+TODO This section needs some connective prose to introduce it. We're now talking about bundling the rest of the information together. However, I think we're going out of order right now. I think bundling everything up in a Game struct is maybe the last thing that we talk about. We talked about Moves in section 2, the next thing to talk about, in my opinion, is the schedule. Rather than introducing all the API functionality in a single section, I think it makes sense to introduce it as we need it. So in this section we should introduce scheduling and show how to apply the migration to X's schedule to get O's schedule, then move on to packaging everything up into a game, then talk about running the game. 
+
+### The `Game` metadata record
+
+`Game` is a lightweight struct that bundles the metadata describing a game, without
+containing any schedule or rules:
+
+```julia
+struct Game
+    players  :: Vector{Symbol}          # ordered list of player names
+    terminal :: Function                # W -> (done::Bool, winner::Union{Symbol,Nothing})
+    initial  :: Function                # () -> ACSet   (fresh starting world)
+    schema   :: Any                     # schema presentation (optional metadata)
+end
+```
+
+- `players` declares who participates and in what order.  The order matters for display
+  and for the default schedule if you use `@game`; the actual turn-taking logic lives in
+  the `GameSched`.
+- `terminal` is called after every move to decide whether the episode is over.  It
+  returns a `(Bool, Symbol|Nothing)` pair: `(true, :X)` means X won, `(true, nothing)`
+  means a draw, `(false, nothing)` means play continues.
+- `initial` is a zero-argument factory called once at the start of each episode to
+  produce a fresh world ACSet.  Keeping it as a callable (rather than storing a single
+  ACSet) ensures episodes are truly independent.
+- `schema` is optional metadata that `GameMigration` uses when migrating an entire game
+  to a new schema.
+
+The `@game` DSL macro is sugar for constructing a `Game`:
+
+```julia
+game = @game SchTTT begin
+    players:  X, O
+    terminal: ttt_terminal
+    initial:  create_board
+end
+```
+
+### `PlayerRuleApp` — tagging a rule with a player
+
+`RuleApp` from AlgebraicRewriting applies a rule to the world deterministically (picks
+the first match, or fails).  `PlayerRuleApp` extends this by tagging the rule with a
+*player identity*:
+
+```julia
+mark_x_app = PlayerRuleApp(:mark_x, mark_x, I, :X; cat=𝒞)
+```
+
+Arguments:
+- `:mark_x` — the display name used by `view_sched` and stored in `Action` records.
+- `mark_x` — the AlgebraicRewriting `Rule`.
+- `I` — the interface ACSet (same role as the third argument to `RuleApp`).
+- `:X` — the player key; must match a key in the `agents` dict passed to
+  `run_game_sched!`.
+
+When `run_game_sched!` reaches a `PlayerRuleApp` box, it:
+
+1. Calls `get_matches(box.rule, world)` to enumerate all valid matches (all legal moves).
+2. Wraps each match in an `Action` record and assembles `legal_actions`.
+3. Calls `select_action(agents[box.player], encoded_state, legal_actions)` to let the
+   agent pick one.
+4. Applies the chosen match via `rewrite_match(box.rule, chosen.match)`.
+5. Emits an `Experience` record capturing the state before, the chosen action, the state
+   after, and the terminal outcome.
+
+If no matches exist (board full for a mark rule), `chosen` is `nothing` and the box
+routes to its failure port — signalling a tie.
+
+### `GameSched` and `mk_game_sched`
+
+`GameSched` wraps an AlgebraicRewriting `Schedule` together with the extra bookkeeping
+needed by `run_game_sched!`:
+
+- `_inner` — the raw AlgebraicRewriting `Schedule`; this is what `view_sched` renders.
+- `_player_map` — a `Dict{Symbol, PlayerRuleApp}` mapping box keys to their
+  `PlayerRuleApp` structs, so the runner knows which boxes require agent decisions.
+- `_all_boxes` — the original `NamedTuple` of boxes (including `PlayerRuleApp` and nested
+  `GameSched` objects) needed to reconstruct the schedule after migration.
+- `_steps`, `_ret_names`, `_init_names`, `_trace_names` — a parsed IR of the schedule
+  body used by `_run_body!`.
+- `_trace_args`, `_init_args`, `_body`, `_N` — the original constructor arguments
+  retained so `player_migrate` can rebuild the schedule from scratch after migrating the
+  boxes.
+
+You construct a `GameSched` with `mk_game_sched`, which has the same signature as
+AlgebraicRewriting's `mk_sched`:
+
+```julia
+mk_game_sched(trace_args, init_args, N, boxes, body) -> GameSched
+```
+
+- `trace_args` — a `NamedTuple` of `(name = :TypeName, ...)` declaring wires that loop
+  back from the last return wire(s) to feed subsequent iterations.
+- `init_args` — a `NamedTuple` declaring wires that are active only on the first
+  iteration.
+- `N` — the `Names` object for wire-type labels.
+- `boxes` — a `NamedTuple` whose values can be `PlayerRuleApp`, `GameSched`, bare
+  `RuleApp`, `merge_wires(I)`, or any other `AgentBox`.  `PlayerRuleApp` and `GameSched`
+  values are automatically unwrapped to their `_inner` for the underlying AlgebraicRewriting
+  schedule construction; the originals are retained in `_all_boxes`.
+- `body` — a `quote` block written in the same wire-assignment DSL as `mk_sched`.
+
+### Wiring diagram body syntax
+
+The body uses a simple DSL:
+
+```julia
+quote
+    out1, out2 = box_name(in_wire)           # box with one input, two outputs
+    out3, out4 = box2([wire_a, wire_b])      # merge two input wires before entering box
+    single_out = merge_box(out1, out3)       # merge_wires: first active input wins
+    return trace_wire, exit_wire             # first N = length(trace_args) wires loop back
+end
+```
+
+`[wire_a, wire_b]` passes the first active (non-`nothing`) wire into the box.  This is
+how the outer game loop merges the `init` wire (first turn) with the `trace_arg` wire
+(subsequent turns).
+
+### `view_sched` and the labeling question
+
+`view_sched(gs; names=N)` renders the schedule as a Graphviz wiring diagram.  For a
+`GameSched` it delegates directly to the underlying AlgebraicRewriting `Schedule` stored
+in `gs._inner`:
+
+```julia
+view_sched(gs::GameSched; kw...) = view_sched(gs._inner; kw...)
+```
+
+The label shown for each box in the diagram is the `Symbol` name given when the box was
+*constructed* — `:mark_x`, `:x_wins_rows`, and so on.  This name is stored in the inner
+`RuleApp` and is never changed by migration.
+
+**Does the box name changing mean `player_migrate` failed?**  No.  The name is purely
+cosmetic.  When `player_migrate` processes a `PlayerRuleApp`, it migrates the rule
+(`F(v.rule)` — swapping every X ACSet for an O ACSet in the pattern, interface, and NACs)
+and remaps the player identity (`new_player = get(player_map, v.player, v.player)`), but
+it preserves the original display name:
+
+```julia
+PlayerRuleApp(v.name, F(v.rule), F(v.init), new_player; cat=v.cat)
+#              ^^^^^^ unchanged   ^^^^^^^^^ correctly migrated
+```
+
+You can confirm the semantic migration is correct by inspecting the right-hand side of
+the migrated rule — it should contain an `O` piece on a `Sq`, not an `X`:
+
+```julia
+# After migration, the mark rule's right pattern has an O piece
+O_mark_rule = F(mark_x)
+@assert nparts(codom(right(O_mark_rule)), :O) == 1
+@assert nparts(codom(right(O_mark_rule)), :X) == 0
+```
+
+If you want `view_sched` to show `:mark_o` instead of `:mark_x` after migration, the
+simplest workaround is to construct the O-side `PlayerRuleApp` directly with the desired
+name rather than deriving it via `player_migrate`.
+
+### `run_game_sched!` — the episode loop
+
+```julia
+run_game_sched!(gs::GameSched, game::Game, agents::Dict; T_max=1000)
+    -> Vector{Experience}
+```
+
+The runner maintains a `Dict{Symbol, Any}` of *wires*, each holding either a live ACSet
+world or `nothing` (inactive).  On the first iteration, the `init` wires are active; on
+subsequent iterations, the first `length(trace_args)` return wires are fed back.  The
+episode terminates when an exit wire (any return wire beyond the trace wires) becomes
+active, when `game.terminal(world)` fires, or when `T_max` turns are exhausted.
+
+### `Experience` — what is recorded per step
+
+Every `PlayerRuleApp` execution emits one `Experience`:
+
+```julia
+struct Experience
+    player        :: Symbol                  # which player moved
+    state         :: EncodedState            # world before the move
+    legal_actions :: Vector{Action}          # all available actions this turn
+    action        :: Union{Action, Nothing}  # chosen action (nothing = no legal moves)
+    next_state    :: EncodedState            # world after the move
+    done          :: Bool                    # was this the last step?
+    winner        :: Union{Symbol, Nothing}  # :X, :O, or nothing (draw/ongoing)
+    info          :: Dict{Symbol, Any}       # extensible metadata
+    schedule_path :: Vector{Symbol}          # reserved (always [])
+end
+```
+
+`EncodedState` bundles the raw `GameState` (the ACSet world and turn number) with
+pre-computed GNN-ready tensors: a node-feature matrix (`node_features`), a COO-format
+edge index (`edge_index`), and edge types (`edge_type`).  Agents that need only the raw
+world access `state.raw.world` directly and pay no encoding cost.
+
+### `FunctionAgent` — the simplest agent type
+
+```julia
+FunctionAgent((state, actions) -> rand(actions))
+```
+
+A `FunctionAgent` wraps any Julia function with the signature
+`(EncodedState, Vector{Action}) -> Action` into an `AbstractAgent`.  It is the workhorse
+for random baselines and hand-coded heuristics.
+
+---
+
+## Part 5 — Building the Schedules
 
 ### Win-check sub-schedule
 
-`x_won_check_gs` is a `GameSched` that succeeds (port 1) when X has three in
-a row and fails (port 2) otherwise.  It contains only `RuleApp` boxes (no
-player choices), so `run_game_sched!` will execute them deterministically.
+`x_won_check_gs` succeeds (port 1) when X has three in a row, fails (port 2) otherwise.
+It contains only plain `RuleApp` boxes — no player decisions — so `run_game_sched!`
+executes them deterministically.  The three patterns are tested in cascade; two
+`merge_wires` boxes collect the three success paths into one exit wire.
 
 ```{julia}
+#| label: x-won-check
 x_won_check_gs = mk_game_sched((;), (init=:I,), N,
     (r=x_rows_app, d1=x_diag1_app, d2=x_diag2_app, mw=merge_wires(I)),
     quote
@@ -164,12 +626,12 @@ view_sched(x_won_check_gs; names=N)
 
 ### X's turn schedule
 
-`mark_x_app` is a `PlayerRuleApp` tagged with player `:X`.  When
-`run_game_sched!` reaches this box it enumerates all legal mark-X moves,
-asks the `:X` agent to choose one, applies the rewrite, and records an
-`Experience`.
+`mark_x_app` is a `PlayerRuleApp` tagged `:X`.  Port 1 fires after a successful mark
+(move made); port 2 fires if no empty square exists (tie).  After a move the win-check
+sub-schedule determines whether X has just won.
 
 ```{julia}
+#| label: x-sched
 mark_x_app = PlayerRuleApp(:mark_x, mark_x, I, :X; cat=𝒞)
 
 X_sched_gs = mk_game_sched((;), (init=:I,), N,
@@ -186,14 +648,34 @@ X_sched_gs = mk_game_sched((;), (init=:I,), N,
 view_sched(X_sched_gs; names=N)
 ```
 
-### Migrate to get O's schedule
+The schedule has three return wires:
+- `x_won` — X just won; exit the game.
+- `cont` — game continues; pass the board to O.
+- `tie` — board was full when X tried to move; exit as draw.
 
-Because every rule and interface ACSet inside `X_sched_gs` is stored
-explicitly, the migration functor `F` (X ↔ O swap) can rebuild the entire
-schedule for player `:O` in one call.  `player_migrate` also re-tags the
-`PlayerRuleApp` box from `:X` to `:O`.
+### Migrating to O's schedule with `player_migrate`
+
+`player_migrate` applies the schema functor `F` to every box in a `GameSched` and
+remaps player identities through a provided `Dict`:
+
+```julia
+player_migrate(F, gs::GameSched, player_map::Dict{Symbol,Symbol}) -> GameSched
+```
+
+It traverses `gs._all_boxes` recursively:
+
+- **`PlayerRuleApp`**: the rule and interface are migrated (`F(v.rule)`, `F(v.init)`),
+  and the player key is remapped (`get(player_map, v.player, v.player)`).  The box
+  display name is preserved unchanged (see the labeling discussion in Part 4).
+- **`GameSched`**: migrated recursively.
+- **Other boxes** (plain `RuleApp`, `merge_wires`): migrated by calling `F(box)`.
+
+After migration, `mk_game_sched` is called with the rebuilt boxes and the *original*
+`trace_args`, `init_args`, and `body` stored inside the `GameSched` — so the wiring
+diagram structure is reproduced exactly but with all patterns swapped.
 
 ```{julia}
+#| label: o-sched
 O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O))
 ```
 
@@ -202,14 +684,22 @@ O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O))
 view_sched(O_sched_gs; names=N)
 ```
 
+The rendered diagram looks identical to X's schedule (same box names, same topology)
+because `view_sched` uses the original display names.  The *functional* difference is
+entirely in the rules: the mark rule's right-hand side now adds an `O` piece, and the
+win-check rules now look for three `O` pieces in a row.  The `PlayerRuleApp` player tag
+has also been correctly updated from `:X` to `:O`, so the runner will call the `:O`
+agent when this box is reached.
+
 ### Full game loop
 
-The outer schedule loops: X moves then O moves, repeating until either
-player wins or the board is full.  The first return wire (`o_not`) feeds the
-board back for the next iteration; the second return wire (`game_over`)
-exits the loop.
+The outer schedule loops: X moves then O moves, repeating until someone wins or the board
+fills.  The `trace_arg` wire loops the continuing board back for the next round; `init`
+carries the fresh board on the very first iteration.  Both are merged before entering
+`X_sched_gs`.
 
 ```{julia}
+#| label: game-sched
 game_sched = mk_game_sched(
     (trace_arg=:I,),
     (init=:I,),
@@ -228,57 +718,106 @@ game_sched = mk_game_sched(
 view_sched(game_sched; names=N)
 ```
 
-## Running the Game
+The first return wire `o_not` is the trace wire; the second `game_over` is the exit wire.
+An episode terminates when `game_over` becomes active (someone won or tied) or when
+`game.terminal` fires, or when `T_max` iterations are exhausted.
 
-### Define a terminal predicate and a Game metadata record
+---
+
+## Part 6 — Running the Game
+
+### Terminal predicate
+
+The terminal predicate is called after every move.  It checks whether either player has
+three in a row (using the same no-op rules as the in-schedule win check), and whether
+the board is full:
 
 ```{julia}
+#| label: terminal
 function ttt_terminal(W)
-    # X wins?
     for rule in [x_rows_rule, x_diag1_rule, x_diag2_rule]
         !isempty(get_matches(rule, W)) && return (true, :X)
     end
-    # O wins? (use F to get O-win rules)
     o_rows_rule  = F(x_rows_rule)
     o_diag1_rule = F(x_diag1_rule)
     o_diag2_rule = F(x_diag2_rule)
     for rule in [o_rows_rule, o_diag1_rule, o_diag2_rule]
         !isempty(get_matches(rule, W)) && return (true, :O)
     end
-    # Draw — board full (9 X+O pieces on 9 squares)?
     nparts(W, :X) + nparts(W, :O) >= 9 && return (true, nothing)
     return (false, nothing)
 end
+```
 
+### Game record
+
+```{julia}
+#| label: game-record
 game = Game(SchTTT;
     players  = [:X, :O],
     terminal = ttt_terminal,
     initial  = create_board)
 ```
 
-### Random agents
+`run_game_sched!(game_sched, game, agents; T_max=20)` is the convenience overload that
+calls `game.initial()` to create the starting world and `game.terminal` as the stopping
+criterion.
+
+### Agents
 
 ```{julia}
+#| label: agents
+Random.seed!(42)
 agents = Dict{Symbol, AbstractAgent}(
     :X => FunctionAgent((state, actions) -> rand(actions)),
     :O => FunctionAgent((state, actions) -> rand(actions)),
 )
 ```
 
-### Play a single episode
+### Single episode and final board state
 
 ```{julia}
+#| label: single-episode
 #| output: true
+Random.seed!(42)
 exps = run_game_sched!(game_sched, game, agents; T_max=20)
 
 println("Episode length : ", episode_length(exps))
-println("Winner         : ", isempty(exps) ? "N/A" : exps[end].winner)
+println("Winner         : ", isempty(exps) ? "N/A" : something(exps[end].winner, "draw"))
 println("Done flag      : ", isempty(exps) ? false  : exps[end].done)
 ```
 
-### Play 200 episodes and analyse
+After the episode, `exps[end].next_state.raw.world` holds the final board ACSet.  We can
+render it directly with `view_TTT`:
 
 ```{julia}
+#| label: final-board
+#| output: true
+final_board = exps[end].next_state.raw.world
+view_TTT(final_board)
+```
+
+You can also inspect the move-by-move transcript.  Each `Experience` in `exps` records
+which player moved, which square was chosen (via the match morphism), and whether the
+episode ended:
+
+```{julia}
+#| label: transcript
+#| output: true
+for (i, exp) in enumerate(exps)
+    if exp.action !== nothing
+        sq = collect(components(exp.action.match)[:Sq])[1]
+        println("Turn $i: $(exp.player) → square $sq  (done=$(exp.done), winner=$(exp.winner))")
+    else
+        println("Turn $i: $(exp.player) passed  (done=$(exp.done), winner=$(exp.winner))")
+    end
+end
+```
+
+### Statistics over many episodes
+
+```{julia}
+#| label: statistics
 #| output: true
 all_exps = [run_game_sched!(game_sched, game, agents; T_max=20) for _ in 1:200]
 
@@ -293,16 +832,24 @@ println("Draws   : $draws / 200")
 println("Mean episode length : ", round(mean(lengths); digits=2))
 ```
 
-X goes first so it has a slight advantage in random play — expect roughly
-55–60 % win rate for X, 30–35 % for O, and a small fraction of draws.
+X goes first, so it has a slight advantage under purely random play — expect roughly
+55–60 % for X, 30–35 % for O, and a small fraction of draws.
 
-## Key Takeaways
+---
 
-| Concept | RewriteGames type |
+## Summary
+
+| Concept | What to reach for |
 |---------|-------------------|
-| One player's rule box | `PlayerRuleApp(:name, rule, I, :player; cat=𝒞)` |
-| Build schedule (with agents) | `mk_game_sched(trace_args, init_args, N, boxes, body)` |
-| Visualise schedule | `view_sched(gs; names=N)` |
-| Migrate X→O | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
+| World representation | ACSet with schema objects and morphisms |
+| Schema symmetry | `Migrate` functor — apply once, derives X↔O swap for free |
+| Legal moves | `Rule` with `NAC` conditions; `RuleApp` for two-port scheduling |
+| Player decisions | `PlayerRuleApp(:name, rule, I, :player; cat=𝒞)` |
+| Schedule construction | `mk_game_sched(trace_args, init_args, N, boxes, body)` |
+| Schedule visualisation | `view_sched(gs; names=N)` |
+| Migrate X→O schedule | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
+| Box labels after migration | Preserved from construction — cosmetic only, not functional |
+| Game metadata | `Game(schema; players, terminal, initial)` |
 | Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
+| Inspect final state | `exps[end].next_state.raw.world` → `view_TTT(...)` |
 | Analyse results | `win_rate`, `episode_length`, `action_counts` |

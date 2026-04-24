@@ -16,7 +16,7 @@ This block initializes the project environment and loads the necessary libraries
 
 ```{julia}
 using Pkg
-Pkg.activate(".")
+Pkg.activate("..")
 
 using Catlab, AlgebraicRewriting
 using Random, Test

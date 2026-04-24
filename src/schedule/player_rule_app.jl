@@ -110,6 +110,8 @@ end
 
 # ─── view_sched extension ─────────────────────────────────────────────────────
 
+import AlgebraicRewriting: view_sched
+
 """
     view_sched(gs::GameSched; kw...) -> Graphviz diagram
 
@@ -117,7 +119,6 @@ Render the underlying AlgebraicRewriting schedule diagram.  Identical output
 to calling `view_sched` on the schedule built by `mk_sched` with the same
 arguments (since `PlayerRuleApp` boxes display identically to `RuleApp` boxes).
 """
-import AlgebraicRewriting: view_sched
 view_sched(gs::GameSched; kw...) = view_sched(gs._inner; kw...)
 
 # ─── player_migrate ───────────────────────────────────────────────────────────
