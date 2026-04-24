@@ -13,8 +13,6 @@ Agents that need only the raw world state pay no encoding cost; fields marked
 - `edge_index`:    `(2 × n_edges)` `Int32` matrix in COO format; edges are foreign-key
                    entries.
 - `edge_type`:     `(n_edges,)` `Int8` vector; schema morphism index for each edge.
-- `rule_counters`: `Vector{Int32}` of remaining budget per rule (across all players,
-                   in declaration order).
 - `turn_frac`:     `Float32` scalar `turn / T_max`.
 """
 struct EncodedState
@@ -22,7 +20,6 @@ struct EncodedState
     node_features :: Matrix{Float32}        # n_nodes × F
     edge_index    :: Matrix{Int32}          # 2 × n_edges (COO)
     edge_type     :: Vector{Int8}           # n_edges
-    rule_counters :: Vector{Int32}          # remaining budget per rule
     turn_frac     :: Float32
 end
 
@@ -32,10 +29,10 @@ Base.show(io::IO, s::EncodedState) =
 # ─── encode_state ─────────────────────────────────────────────────────────────
 
 """
-    encode_state(W, counters, turn::Int, T_max::Int) -> EncodedState
+    encode_state(W, turn::Int, T_max::Int) -> EncodedState
 
-Build an `EncodedState` from a raw ACSet world `W`, the current budget
-counters, the turn number, and the episode horizon.
+Build an `EncodedState` from a raw ACSet world `W`, the turn number, and the
+episode horizon.
 
 The encoding is *schema-generic*: it introspects `acset_schema(W)` to
 discover tables and foreign keys.
@@ -52,7 +49,7 @@ Each (table, row) pair becomes one node.  Node features are:
 Each foreign-key entry `hom(src_table, tgt_table)` recorded as a directed
 edge `src_node -> tgt_node` in COO format.
 """
-function encode_state(W, counters, turn::Int, T_max::Int)
+function encode_state(W, turn::Int, T_max::Int)
     S        = acset_schema(W)
     obs      = collect(Symbol, objects(S))      # Vector{Symbol}
     hom_list = collect(homs(S))                 # Vector of (name, dom, codom) triples
@@ -112,18 +109,13 @@ function encode_state(W, counters, turn::Int, T_max::Int)
         vcat(reshape(edge_src_v, 1, :), reshape(edge_dst_v, 1, :)) :
         Matrix{Int32}(undef, 2, 0)
 
-    # ── Rule counters ────────────────────────────────────────────────────────
-    sorted_keys = sort(collect(keys(counters)))
-    rule_ctrs   = Int32[counters[k] for k in sorted_keys]
-
     turn_frac = Float32(turn) / Float32(max(T_max, 1))
 
     return EncodedState(
-        GameState(W, copy(counters), turn),
+        GameState(W, turn),
         node_feat,
         edge_index,
         edge_type_v,
-        rule_ctrs,
         turn_frac,
     )
 end

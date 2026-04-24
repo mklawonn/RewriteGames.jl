@@ -3,13 +3,11 @@ using RewriteGames
 using Catlab
 
 @testset "Encoding tests" begin
-    # Use Catlab's built-in Graph schema: V, E; src::Hom(E,V), tgt::Hom(E,V)
-    W = @acset Graph begin V=3; E=2; src=[1,2]; tgt=[2,3] end
-    counters = Dict{Tuple{Symbol,Int}, Int}()
-    turn     = 1
-    T_max    = 100
+    W    = @acset Graph begin V=3; E=2; src=[1,2]; tgt=[2,3] end
+    turn = 1
+    T_max = 100
 
-    enc = encode_state(W, counters, turn, T_max)
+    enc = encode_state(W, turn, T_max)
 
     @testset "EncodedState structure" begin
         @test enc isa EncodedState
@@ -25,9 +23,7 @@ using Catlab
         @test size(nf, 1) == 5
         # Features: 2 (one-hot ob type: V or E) + 0 attrs = 2
         @test size(nf, 2) == 2
-        # First three nodes are V-type (one-hot column 1 = 1)
         @test all(nf[1:3, 1] .== 1f0)
-        # Last two nodes are E-type (one-hot column 2 = 1)
         @test all(nf[4:5, 2] .== 1f0)
     end
 
@@ -47,22 +43,9 @@ using Catlab
         @test enc.turn_frac ≈ Float32(turn / T_max)
     end
 
-    @testset "rule_counters" begin
-        # No budget constraints → empty counters
-        @test enc.rule_counters == Int32[]
-    end
-
-    @testset "encode_state with limited budgets" begin
-        ctrs = Dict((:p1, 1) => 5, (:p1, 2) => 3)
-        enc2 = encode_state(W, ctrs, 2, T_max)
-        @test length(enc2.rule_counters) == 2
-        # Sorted by key: (:p1, 1) then (:p1, 2)
-        @test enc2.rule_counters == Int32[5, 3]
-    end
-
     @testset "empty world" begin
         W_empty = Graph()
-        enc_e   = encode_state(W_empty, counters, 1, T_max)
+        enc_e   = encode_state(W_empty, 1, T_max)
         @test size(enc_e.node_features) == (0, 2)
         @test size(enc_e.edge_index, 2) == 0
     end

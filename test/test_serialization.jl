@@ -4,15 +4,13 @@ using Catlab
 using AlgebraicRewriting
 
 @testset "Serialization tests" begin
-    # Build a minimal experience to serialize
-    W = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
-    counters = Dict{Tuple{Symbol,Int}, Int}()
-    enc = encode_state(W, counters, 1, 50)
+    W   = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
+    enc = encode_state(W, 1, 50)
 
     I_empty = Graph()
     R_one_v = Graph(1)
-    rule = Rule(ACSetTransformation(I_empty, I_empty),
-                ACSetTransformation(I_empty, R_one_v))
+    rule  = Rule(ACSetTransformation(I_empty, I_empty),
+                 ACSetTransformation(I_empty, R_one_v))
     entry = RuleEntry(rule; name=:add_vertex)
 
     exp = Experience(
@@ -40,12 +38,12 @@ using AlgebraicRewriting
         @test row.player == "alice"
         @test row.done   == true
         @test row.winner == "alice"
-        @test row.action_rule_name == "nothing"   # action was nothing
+        @test row.action_rule_name == "nothing"
         @test row.turn_frac ≈ enc.turn_frac
     end
 
     @testset "multiple experiences" begin
-        exps = [exp, exp, exp]
+        exps  = [exp, exp, exp]
         path2 = tempname() * ".arrow"
         write_experiences(path2, exps)
         rows2 = read_experiences(path2)

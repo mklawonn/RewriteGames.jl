@@ -1,58 +1,47 @@
 using Test
 using RewriteGames
-using Catlab
-using AlgebraicRewriting
 
 @testset "DSL @game macro" begin
-    I_empty = Graph()
-    R_one_v = Graph(1)
-    rule_add_vertex = Rule(ACSetTransformation(I_empty, I_empty),
-                           ACSetTransformation(I_empty, R_one_v))
-    entry_v = RuleEntry(rule_add_vertex; name=:add_vertex)
-
     @testset "@game basic construction" begin
         g = @game nothing begin
             players:  alice, bob
-            alice:    [entry_v]
-            bob:      RuleEntry[]
             terminal: (W) -> (false, nothing)
             initial:  () -> nothing
         end
 
         @test g isa Game
         @test g.players == [:alice, :bob]
-        @test length(g.rules[:alice]) == 1
-        @test g.rules[:alice][1].name == :add_vertex
-        @test isempty(g.rules[:bob])
     end
 
-    @testset "@game player order inferred from rule clauses" begin
+    @testset "@game single player" begin
         g = @game nothing begin
-            red:   [entry_v]
-            blue:  RuleEntry[]
+            players:  solo
+            terminal: (W) -> (false, nothing)
+            initial:  () -> nothing
         end
-        @test g.players == [:red, :blue]
+        @test g.players == [:solo]
     end
 
-    @testset "@game matches equivalent Game(...) call" begin
-        sched = Seq(PlayerStep(:p), AutoStep())
-        g_macro = @game nothing begin
+    @testset "@game schema is stored" begin
+        g = @game :my_schema begin
             players:  p
-            p:        [entry_v]
-            terminal: (W) -> (nparts(W, :V) >= 5, nothing)
-            initial:  () -> Graph(1)
-            schedule: sched
+            terminal: (W) -> (false, nothing)
+            initial:  () -> nothing
         end
-        g_hand = Game(
-            nothing;
-            players  = [:p],
-            rules    = Dict(:p => [entry_v]),
-            terminal = (W) -> (nparts(W, :V) >= 5, nothing),
-            initial  = () -> Graph(1),
-            schedule = sched,
-        )
-        @test g_macro.players == g_hand.players
-        @test length(g_macro.rules[:p]) == length(g_hand.rules[:p])
-        @test g_macro.schedule === g_hand.schedule
+        @test g.schema === :my_schema
+    end
+
+    @testset "@game missing players clause errors" begin
+        @test_throws ErrorException @macroexpand @game nothing begin
+            terminal: (W) -> (false, nothing)
+            initial:  () -> nothing
+        end
+    end
+
+    @testset "@game unrecognised clause errors" begin
+        @test_throws ErrorException @macroexpand @game nothing begin
+            players: p
+            rules: Dict()
+        end
     end
 end

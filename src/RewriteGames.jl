@@ -1,9 +1,9 @@
 """
     RewriteGames
 
-A framework for defining turn-based games via algebraic rewriting on
-attributed C-sets, with a minimal harness for running agents and collecting
-experience.
+A framework for defining turn-based games via AlgebraicRewriting wiring-diagram
+schedules on attributed C-sets, with a minimal harness for running agents and
+collecting experience.
 
 ## Quick-start
 
@@ -11,32 +11,30 @@ experience.
 using RewriteGames
 using Catlab, AlgebraicRewriting
 
-# 1. Define a schema and an initial world factory
-@present SchGraph(FreeSchema) begin
-    V::Ob; E::Ob
-    src::Hom(E,V); tgt::Hom(E,V)
-end
-@acset_type Graph(SchGraph, index=[:src,:tgt])
-
-# 2. Define rewrite rules (see AlgebraicRewriting.jl docs)
-# r_add_vertex = Rule(...)
-# r_add_edge   = Rule(...)
-
-# 3. Construct a Game
+# 1. Define schema, world factory, and terminal predicate
 game = Game(SchGraph;
     players  = [:alice, :bob],
-    rules    = Dict(
-        :alice => [RuleEntry(r_add_vertex)],
-        :bob   => [RuleEntry(r_add_edge)],
-    ),
     terminal = (W) -> (nparts(W,:V) >= 10, nothing),
     initial  = () -> Graph(),
 )
 
-# 4. Run with random agents
+# 2. Build wiring-diagram schedule with PlayerRuleApp boxes
+alice_app = PlayerRuleApp(:add_vertex, rule_add_vertex, I, :alice; cat=𝒞)
+bob_app   = PlayerRuleApp(:add_edge,   rule_add_edge,   I, :bob;   cat=𝒞)
+sched = mk_game_sched(
+    (trace_arg=:I,), (init=:I,), N,
+    (a=alice_app, b=bob_app, mw=merge_wires(I)),
+    quote
+        a_moved, a_pass = a(init)
+        b_moved, b_pass = b([a_moved, trace_arg])
+        cont = mw(b_moved, b_pass)
+        return cont, a_pass
+    end)
+
+# 3. Run with random agents
 agents = Dict(:alice => FunctionAgent((s,a) -> rand(a)),
               :bob   => FunctionAgent((s,a) -> rand(a)))
-exps = run_game(game, agents; T_max=50)
+exps = run_game_sched!(sched, game, agents; T_max=50)
 ```
 """
 module RewriteGames
@@ -44,46 +42,44 @@ module RewriteGames
 using Catlab
 using AlgebraicRewriting
 
-# ── Core types (rule_entry + auto_rule must precede game_step which uses them) ─
+# ── Core types ──────────────────────────────────────────────────────────────
 include("core/rule_entry.jl")
 include("core/auto_rule.jl")
 
-# ── Schedule primitives (before core/game.jl which references GameStep) ───────
-include("schedule/game_step.jl")
-
-# ── Game struct ─────────────────────────────────────────────────────────────────
+# ── Game struct ─────────────────────────────────────────────────────────────
 include("core/game.jl")
 
-# ── Encoding (must come before engine so EncodedState is visible) ───────────
+# ── Encoding (must come before engine so EncodedState is visible) ────────
 include("encoding/encoding.jl")
 
-# ── Agent interface ────────────────────────────────────────────────────────────
+# ── Agent interface ──────────────────────────────────────────────────────
 include("agents/abstract.jl")
 include("agents/function_agent.jl")
 # ONNXAgent is loaded via the ONNXAgentExt package extension when ONNXRunTime is available.
 
-# ── Engine ─────────────────────────────────────────────────────────────────────
+# ── Engine ──────────────────────────────────────────────────────────────────
 include("engine/matches.jl")
 include("engine/auto.jl")
 include("engine/driver.jl")
 
-# ── Schedule context + scheduled driver (after engine so Experience is defined)
-include("schedule/agent_context.jl")
-include("engine/scheduled_driver.jl")
+# ── Wiring-diagram schedule layer ────────────────────────────────────────────
+# (player_rule_app.jl defines _parse_body used by sched_runner.jl)
+include("schedule/player_rule_app.jl")
+include("engine/sched_runner.jl")
 
-# ── Serialization ──────────────────────────────────────────────────────────────
+# ── Serialization ─────────────────────────────────────────────────────────
 include("serialization/arrow.jl")
 
-# ── Schema migration ───────────────────────────────────────────────────────────
+# ── Schema migration ─────────────────────────────────────────────────────
 include("migration/game_migration.jl")
 
-# ── Analysis utilities ─────────────────────────────────────────────────────────
+# ── Analysis utilities ───────────────────────────────────────────────────
 include("analysis.jl")
 
-# ── DSL ────────────────────────────────────────────────────────────────────────
+# ── DSL ──────────────────────────────────────────────────────────────────
 include("dsl.jl")
 
-# ─── Public API ────────────────────────────────────────────────────────────────
+# ─── Public API ─────────────────────────────────────────────────────────────
 
 export
     # Core
@@ -92,7 +88,7 @@ export
     Game, GameState,
     nplayers,
 
-    # Agents (ONNXAgent is exported by the ONNXAgentExt extension when loaded)
+    # Agents
     AbstractAgent, Action,
     FunctionAgent,
     select_action,
@@ -102,14 +98,12 @@ export
     apply_rule!, rule_index,
     fire_auto_rules!,
     Experience,
-    run_game,
 
-    # Schedule
-    GameStep,
-    PlayerStep, AutoStep, Auto,
-    Seq, Cond, WhileStep, ForEachStep,
-    AgentContext, push_context,
-    ScheduledGameDriver, run_schedule!,
+    # Wiring-diagram schedule
+    PlayerRuleApp, GameSched,
+    mk_game_sched, player_migrate,
+    view_sched,
+    run_game_sched!,
 
     # Encoding
     EncodedState, encode_state,
@@ -119,7 +113,7 @@ export
 
     # Migration
     GameMigration,
-    migrate_world, migrate_rules, migrate_game,
+    migrate_world,
 
     # Analysis
     win_rate, episode_length, action_counts,

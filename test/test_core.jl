@@ -3,8 +3,6 @@ using RewriteGames
 
 @testset "Core types" begin
     @testset "RuleEntry" begin
-        # Minimal rule stub (not an actual rewrite rule — avoids AlgebraicRewriting
-        # dependency in the core tests)
         fake_rule = "rule_stub"
         e1 = RuleEntry(fake_rule)
         @test e1.name   == :unnamed
@@ -43,35 +41,26 @@ using RewriteGames
         game = Game(
             nothing;
             players  = [:red, :blue],
-            rules    = Dict(
-                :red  => [RuleEntry("r1"; name=:move)],
-                :blue => [RuleEntry("r2"; name=:build, budget=5)],
-            ),
-            auto     = AutoRule[],
             terminal = (W) -> (false, nothing),
             initial  = () -> nothing,
         )
         @test game.players == [:red, :blue]
-        @test haskey(game.rules, :red)
-        @test haskey(game.rules, :blue)
-        @test game.rules[:blue][1].budget == 5
-        @test isempty(game.auto)
+        @test game.schema  === nothing
     end
 
-    @testset "GameState counters" begin
-        e_limited   = RuleEntry("r"; name=:lim,   budget=4)
-        e_unlimited = RuleEntry("r"; name=:unlim)
-        lib = RuleLibrary([e_limited, e_unlimited])
-        game = Game(
-            nothing;
-            players  = [:p],
-            rules    = Dict(:p => lib),
-            terminal = (W) -> (false, nothing),
-            initial  = () -> nothing,
-        )
-        gs = GameState(nothing, game)
-        @test gs.counters[(:p, 1)] == 4
-        @test !haskey(gs.counters, (:p, 2))
-        @test gs.turn == 1
+    @testset "GameState" begin
+        gs = GameState(nothing, 1)
+        @test gs.world === nothing
+        @test gs.turn  == 1
+
+        gs2 = copy(gs)
+        @test gs2.turn == gs.turn
+    end
+
+    @testset "nplayers" begin
+        game = Game(nothing; players=[:a, :b, :c],
+                    terminal=(W)->(false,nothing), initial=()->nothing)
+        @test nplayers(game) == 3
+        @test length(game) == 3
     end
 end

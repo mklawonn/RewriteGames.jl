@@ -12,7 +12,6 @@ Each record stores:
 - `n_nodes`:       Int32  (number of nodes in the pre-action state)
 - `n_edges`:       Int32  (number of edges in the pre-action state)
 - `node_features`: serialised as a flat Float32 vector (row-major)
-- `rule_counters`: flat Int32 vector
 - `action_rule_name`:  Symbol of chosen rule (stored as String; "nothing" if passed)
 - `done`:          Bool
 - `winner`:        String ("nothing" if no winner)
@@ -29,16 +28,15 @@ function write_experiences(path::String, experiences::Vector{Experience})
         winner_str  = exp.winner === nothing ? "nothing" : String(exp.winner)
 
         (
-            player          = String(exp.player),
-            turn_frac       = es.turn_frac,
-            n_nodes         = Int32(n_nodes),
-            n_feat          = Int32(F),
-            n_edges         = Int32(size(es.edge_index, 2)),
-            node_features   = flat_feat,
-            rule_counters   = copy(es.rule_counters),
+            player           = String(exp.player),
+            turn_frac        = es.turn_frac,
+            n_nodes          = Int32(n_nodes),
+            n_feat           = Int32(F),
+            n_edges          = Int32(size(es.edge_index, 2)),
+            node_features    = flat_feat,
             action_rule_name = action_name,
-            done            = exp.done,
-            winner          = winner_str,
+            done             = exp.done,
+            winner           = winner_str,
         )
     end
 

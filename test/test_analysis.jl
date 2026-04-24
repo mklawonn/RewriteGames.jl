@@ -4,9 +4,8 @@ using Catlab
 using AlgebraicRewriting
 
 @testset "Analysis utilities" begin
-    # Build a small set of experiences to analyse
-    W = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
-    enc = encode_state(W, Dict{Tuple{Symbol,Int},Int}(), 1, 50)
+    W   = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
+    enc = encode_state(W, 1, 50)
 
     rule_stub = RuleEntry("r"; name=:move)
     act = Action(rule_stub, nothing)
@@ -18,8 +17,8 @@ using AlgebraicRewriting
     exps = [exp_mid, exp_win, exp_draw]
 
     @testset "win_rate" begin
-        @test win_rate(exps, :alice) ≈ 0.5   # 1 win out of 2 terminals
-        @test win_rate(exps, :bob)   ≈ 0.0   # 0 wins
+        @test win_rate(exps, :alice) ≈ 0.5
+        @test win_rate(exps, :bob)   ≈ 0.0
         @test win_rate(Experience[], :alice) == 0.0
     end
 
@@ -30,7 +29,7 @@ using AlgebraicRewriting
 
     @testset "action_counts" begin
         counts = action_counts(exps)
-        @test counts[:move] == 2   # exp_mid and exp_win each have action :move
-        @test counts[:pass] == 1   # exp_draw passed
+        @test counts[:move] == 2
+        @test counts[:pass] == 1
     end
 end

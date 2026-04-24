@@ -1,0 +1,308 @@
+---
+title: "Tic-Tac-Toe Gameplay with RewriteGames"
+format:
+  html:
+    theme: cosmo
+    code-fold: false
+    toc: true
+jupyter: julia-1.11
+execute:
+  output: false
+---
+
+## Setup
+
+This notebook assumes you have worked through `AlgebraicRewritingLab.qmd`,
+which defines the Tic-Tac-Toe schema, board constructor, rules, and the
+`x_won_check` / `X_sched` / `O_sched` schedules using the base
+`AlgebraicRewriting` API.  Here we rebuild those same schedules using
+`RewriteGames`'s `PlayerRuleApp` wrapper, which lets the wiring-diagram
+schedule call back into agent code for move selection.
+
+```{julia}
+using Pkg
+Pkg.activate(".")
+
+using Catlab, AlgebraicRewriting
+using RewriteGames
+using Statistics: mean
+using Catlab.Graphics.Graphviz: Attributes, Statement, Node
+import Catlab.Graphics.Graphviz
+```
+
+## Schema and Board
+
+We reuse the Tic-Tac-Toe schema verbatim from `AlgebraicRewritingLab.qmd`.
+
+```{julia}
+@present SchTTT(FreeSchema) begin
+    Sq::Ob; E::Ob; X::Ob; O::Ob
+    xsq::Hom(X, Sq); osq::Hom(O, Sq)
+    src::Hom(E, Sq); tgt::Hom(E, Sq)
+end
+
+@acset_type TicTacToe(SchTTT, index=[:xsq, :osq], part_type=BitSetParts)
+const TTT = TicTacToe
+𝒞 = ACSetCategory(MADVarACSetCat(TTT()))
+
+function create_board()
+    ttt = TTT()
+    add_parts!(ttt, :Sq, 9)
+    for i in 0:2, j in 0:1
+        add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+2)
+    end
+    for i in 0:1, j in 0:2
+        add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+1+3)
+    end
+    return ttt
+end
+```
+
+```{julia}
+# Migration functor: swap X ↔ O
+F = Migrate(
+    𝒞,
+    Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E),
+    Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt),
+    SchTTT, TTT)
+
+# Yoneda representables and Names object
+gSq, gE, gX, gO = ob_generators(FinCat(SchTTT))
+yTTT = yoneda_cache(TTT; clear=true)
+I  = TTT()
+Sq = ob_map(yTTT, gSq)
+E  = ob_map(yTTT, gE)
+X  = ob_map(yTTT, gX)
+O  = ob_map(yTTT, gO)
+N  = Names(Dict("X" => X, "O" => O, "Sq" => Sq, "" => I, "I" => I))
+```
+
+## Rewrite Rules
+
+### Mark-X rule
+
+The `mark_x` rule places an X on any unmarked square.  Two NACs prevent
+firing on an already-marked square.
+
+```{julia}
+id_Sq    = id[𝒞](Sq)
+mark_X_l = id_Sq
+mark_X_r = homomorphism(Sq, X; cat=𝒞)
+
+mark_x = Rule(mark_X_l, mark_X_r;
+              ac=[NAC(homomorphism(Sq, X; cat=𝒞)),
+                  NAC(homomorphism(Sq, O; cat=𝒞))])
+```
+
+### Win-detection rules (no-op identity rules)
+
+```{julia}
+function x_win_pattern(indices::Vector{Int})
+    pat = create_board()
+    for i in indices
+        add_part!(pat, :X, xsq=i)
+    end
+    return pat
+end
+
+win_indices = [[1,2,3],[4,5,6],[7,8,9],[1,4,7],[2,5,8],[3,6,9],[1,5,9],[3,5,7]]
+x_wins = [x_win_pattern(idx) for idx in win_indices]
+
+# Structural patterns that match three-in-a-row via the board graph
+row_col_structural = TTT()
+add_parts!(row_col_structural, :Sq, 3)
+add_part!(row_col_structural, :E, src=1, tgt=2)
+add_part!(row_col_structural, :E, src=2, tgt=3)
+for i in 1:3; add_part!(row_col_structural, :X, xsq=i); end
+
+diag_structural_1 = TTT()
+add_parts!(diag_structural_1, :Sq, 5)
+add_part!(diag_structural_1, :E, src=1, tgt=2); add_part!(diag_structural_1, :E, src=2, tgt=3)
+add_part!(diag_structural_1, :E, src=3, tgt=4); add_part!(diag_structural_1, :E, src=4, tgt=5)
+for i in [1,3,5]; add_part!(diag_structural_1, :X, xsq=i); end
+
+diag_structural_2 = TTT()
+add_parts!(diag_structural_2, :Sq, 5)
+add_part!(diag_structural_2, :E, src=1, tgt=2); add_part!(diag_structural_2, :E, src=3, tgt=2)
+add_part!(diag_structural_2, :E, src=3, tgt=4); add_part!(diag_structural_2, :E, src=5, tgt=4)
+for i in [1,3,5]; add_part!(diag_structural_2, :X, xsq=i); end
+
+x_rows_rule  = Rule(id[𝒞](row_col_structural),  id[𝒞](row_col_structural))
+x_diag1_rule = Rule(id[𝒞](diag_structural_1),   id[𝒞](diag_structural_1))
+x_diag2_rule = Rule(id[𝒞](diag_structural_2),   id[𝒞](diag_structural_2))
+
+x_rows_app  = RuleApp(:x_wins_rows,  x_rows_rule,  I; cat=𝒞)
+x_diag1_app = RuleApp(:x_wins_diag1, x_diag1_rule, I; cat=𝒞)
+x_diag2_app = RuleApp(:x_wins_diag2, x_diag2_rule, I; cat=𝒞)
+```
+
+## Building the GameSched Schedules
+
+### Win-check sub-schedule
+
+`x_won_check_gs` is a `GameSched` that succeeds (port 1) when X has three in
+a row and fails (port 2) otherwise.  It contains only `RuleApp` boxes (no
+player choices), so `run_game_sched!` will execute them deterministically.
+
+```{julia}
+x_won_check_gs = mk_game_sched((;), (init=:I,), N,
+    (r=x_rows_app, d1=x_diag1_app, d2=x_diag2_app, mw=merge_wires(I)),
+    quote
+        won_r,  not_r  = r(init)
+        won_d1, not_d1 = d1(not_r)
+        won_d2, not_d2 = d2(not_d1)
+        won12 = mw(won_r,  won_d1)
+        won   = mw(won12,  won_d2)
+        return won, not_d2
+    end)
+```
+
+```{julia}
+#| output: true
+view_sched(x_won_check_gs; names=N)
+```
+
+### X's turn schedule
+
+`mark_x_app` is a `PlayerRuleApp` tagged with player `:X`.  When
+`run_game_sched!` reaches this box it enumerates all legal mark-X moves,
+asks the `:X` agent to choose one, applies the rewrite, and records an
+`Experience`.
+
+```{julia}
+mark_x_app = PlayerRuleApp(:mark_x, mark_x, I, :X; cat=𝒞)
+
+X_sched_gs = mk_game_sched((;), (init=:I,), N,
+    (mx=mark_x_app, wc=x_won_check_gs),
+    quote
+        moved, tie = mx(init)
+        x_won, cont = wc(moved)
+        return x_won, cont, tie
+    end)
+```
+
+```{julia}
+#| output: true
+view_sched(X_sched_gs; names=N)
+```
+
+### Migrate to get O's schedule
+
+Because every rule and interface ACSet inside `X_sched_gs` is stored
+explicitly, the migration functor `F` (X ↔ O swap) can rebuild the entire
+schedule for player `:O` in one call.  `player_migrate` also re-tags the
+`PlayerRuleApp` box from `:X` to `:O`.
+
+```{julia}
+O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O))
+```
+
+```{julia}
+#| output: true
+view_sched(O_sched_gs; names=N)
+```
+
+### Full game loop
+
+The outer schedule loops: X moves then O moves, repeating until either
+player wins or the board is full.  The first return wire (`o_not`) feeds the
+board back for the next iteration; the second return wire (`game_over`)
+exits the loop.
+
+```{julia}
+game_sched = mk_game_sched(
+    (trace_arg=:I,),
+    (init=:I,),
+    N,
+    (x=X_sched_gs, o=O_sched_gs, mw=merge_wires(I)),
+    quote
+        x_won, x_not, x_tie = x([init, trace_arg])
+        o_won, o_not, o_tie  = o(x_not)
+        game_over = mw(mw(x_won, o_won), mw(x_tie, o_tie))
+        return o_not, game_over
+    end)
+```
+
+```{julia}
+#| output: true
+view_sched(game_sched; names=N)
+```
+
+## Running the Game
+
+### Define a terminal predicate and a Game metadata record
+
+```{julia}
+function ttt_terminal(W)
+    # X wins?
+    for rule in [x_rows_rule, x_diag1_rule, x_diag2_rule]
+        !isempty(get_matches(rule, W)) && return (true, :X)
+    end
+    # O wins? (use F to get O-win rules)
+    o_rows_rule  = F(x_rows_rule)
+    o_diag1_rule = F(x_diag1_rule)
+    o_diag2_rule = F(x_diag2_rule)
+    for rule in [o_rows_rule, o_diag1_rule, o_diag2_rule]
+        !isempty(get_matches(rule, W)) && return (true, :O)
+    end
+    # Draw — board full (9 X+O pieces on 9 squares)?
+    nparts(W, :X) + nparts(W, :O) >= 9 && return (true, nothing)
+    return (false, nothing)
+end
+
+game = Game(SchTTT;
+    players  = [:X, :O],
+    terminal = ttt_terminal,
+    initial  = create_board)
+```
+
+### Random agents
+
+```{julia}
+agents = Dict{Symbol, AbstractAgent}(
+    :X => FunctionAgent((state, actions) -> rand(actions)),
+    :O => FunctionAgent((state, actions) -> rand(actions)),
+)
+```
+
+### Play a single episode
+
+```{julia}
+#| output: true
+exps = run_game_sched!(game_sched, game, agents; T_max=20)
+
+println("Episode length : ", episode_length(exps))
+println("Winner         : ", isempty(exps) ? "N/A" : exps[end].winner)
+println("Done flag      : ", isempty(exps) ? false  : exps[end].done)
+```
+
+### Play 200 episodes and analyse
+
+```{julia}
+#| output: true
+all_exps = [run_game_sched!(game_sched, game, agents; T_max=20) for _ in 1:200]
+
+x_wins  = count(e -> !isempty(e) && e[end].winner === :X, all_exps)
+o_wins  = count(e -> !isempty(e) && e[end].winner === :O, all_exps)
+draws   = count(e -> !isempty(e) && e[end].winner === nothing && e[end].done, all_exps)
+lengths = [episode_length(e) for e in all_exps]
+
+println("X wins  : $x_wins / 200  ($(round(100x_wins/200; digits=1))%)")
+println("O wins  : $o_wins / 200  ($(round(100o_wins/200; digits=1))%)")
+println("Draws   : $draws / 200")
+println("Mean episode length : ", round(mean(lengths); digits=2))
+```
+
+X goes first so it has a slight advantage in random play — expect roughly
+55–60 % win rate for X, 30–35 % for O, and a small fraction of draws.
+
+## Key Takeaways
+
+| Concept | RewriteGames type |
+|---------|-------------------|
+| One player's rule box | `PlayerRuleApp(:name, rule, I, :player; cat=𝒞)` |
+| Build schedule (with agents) | `mk_game_sched(trace_args, init_args, N, boxes, body)` |
+| Visualise schedule | `view_sched(gs; names=N)` |
+| Migrate X→O | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
+| Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
+| Analyse results | `win_rate`, `episode_length`, `action_counts` |

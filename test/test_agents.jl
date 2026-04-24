@@ -3,12 +3,10 @@ using RewriteGames
 using Catlab
 
 @testset "Agent tests" begin
-    # Build a minimal EncodedState for testing
-    W = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
-    enc = encode_state(W, Dict{Tuple{Symbol,Int},Int}(), 1, 50)
+    W   = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
+    enc = encode_state(W, 1, 50)
 
-    # Build minimal Action instances
-    rule = RuleEntry("stub"; name=:test)
+    rule    = RuleEntry("stub"; name=:test)
     actions = [Action(rule, nothing), Action(rule, nothing), Action(rule, nothing)]
 
     @testset "FunctionAgent wraps callable" begin

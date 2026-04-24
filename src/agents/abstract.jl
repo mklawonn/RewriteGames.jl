@@ -21,12 +21,12 @@ function select_action end
 """
     Action
 
-A concrete game action: a reference to a `RuleEntry` and the specific ACSet
-transformation (match morphism) that was found in the current world.
+A concrete game action: a reference to a box (e.g. `PlayerRuleApp`) and the
+specific ACSet transformation (match morphism) found in the current world.
 """
 struct Action
-    entry :: RuleEntry
-    match :: Any        # ACSetTransformation from AlgebraicRewriting
+    entry :: Any    # PlayerRuleApp or RuleEntry
+    match :: Any    # ACSetTransformation from AlgebraicRewriting
 end
 
 Base.:(==)(a::Action, b::Action) = a.entry === b.entry && a.match === b.match
