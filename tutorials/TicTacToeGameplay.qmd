@@ -467,6 +467,11 @@ Like a plain `RuleApp`, a `PlayerRuleApp` has two output ports: **success** (a m
 made) and **failure** (no legal moves exist). If no matches exist (board full), the box routes to its failure
 port, signalling a tie.
 
+Agents can also **pass voluntarily**: returning `nothing` from `select_action` when matches
+are available routes to the same failure port with the world left unchanged, and records
+`action = nothing` in the `Experience`.  The transcript loop below uses exactly this check
+(`exp.action !== nothing`) to distinguish a real move from a pass or no-match turn.
+
 
 ### `GameSched` and `mk_game_sched`
 
