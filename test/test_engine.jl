@@ -19,7 +19,7 @@ using AlgebraicRewriting
     r_adde = ACSetTransformation(I_two_v, R_two_v_one_e; V=[1,2])
     rule_add_edge = Rule(l_adde, r_adde)
 
-    N = Names(Dict("" => I_empty, "I" => I_empty))
+    N = Names(Dict("" => I_empty, "I" => I_empty, "I_two_v" => I_two_v))
 
     done_at_8v_or_6e = (W) -> begin
         done   = nparts(W, :V) >= 8 || nparts(W, :E) >= 6

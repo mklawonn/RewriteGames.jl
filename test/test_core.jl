@@ -1,4 +1,5 @@
 using Test
+using Catlab
 using RewriteGames
 
 @testset "Core types" begin
@@ -49,8 +50,9 @@ using RewriteGames
     end
 
     @testset "GameState" begin
-        gs = GameState(nothing, 1)
-        @test gs.world === nothing
+        empty_graph = Graph()
+        gs = GameState(empty_graph, 1)
+        @test gs.world === empty_graph
         @test gs.turn  == 1
 
         gs2 = copy(gs)

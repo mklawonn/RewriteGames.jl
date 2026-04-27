@@ -29,7 +29,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     end
 
     @testset "PlayerRuleApp with cat keyword" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :bob; cat=𝒞)
         @test pra.player == :bob
         @test pra.cat    === 𝒞
@@ -77,7 +77,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     # ─── mk_game_sched ───────────────────────────────────────────────────────
 
     @testset "mk_game_sched produces a GameSched" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         N = Names(Dict("" => I_empty, "I" => I_empty))
         pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
         gs = mk_game_sched(
@@ -98,7 +98,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     # ─── run_game_sched! ─────────────────────────────────────────────────────
 
     @testset "run_game_sched! terminates and returns experiences" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         N = Names(Dict("" => I_empty, "I" => I_empty))
         pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :p)
         gs = mk_game_sched(
@@ -116,7 +116,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     end
 
     @testset "run_game_sched! player picks from legal actions" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         N = Names(Dict("" => I_empty, "I" => I_empty))
         pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :p)
         # Agent always picks the first action
@@ -138,7 +138,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     end
 
     @testset "run_game_sched! with Game convenience overload" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         N = Names(Dict("" => I_empty, "I" => I_empty))
         game = Game(nothing;
                     players  = [:p],
@@ -160,7 +160,7 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
     # ─── view_sched delegation ────────────────────────────────────────────────
 
     @testset "view_sched(GameSched) delegates to inner schedule" begin
-        𝒞 = ACSetCategory(MADVarACSetCat(Graph()))
+        𝒞 = ACSetCategory(CSetCat(Graph()))
         N = Names(Dict("" => I_empty, "I" => I_empty))
         pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :p)
         gs = mk_game_sched(
