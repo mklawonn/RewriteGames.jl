@@ -4,25 +4,32 @@
 Defines a turn-based game over ACSet world states.
 
 # Fields
-- `players`:   Ordered list of player names (Symbols).
-- `terminal`:  `(W) -> (done::Bool, winner::Union{Symbol,Nothing})` predicate.
-- `initial`:   `() -> ACSet` factory producing fresh world states.
-- `schema`:    The presentation / schema object (optional metadata).
+- `players`:        Ordered list of player names (Symbols).
+- `terminal`:       `(W) -> (done::Bool, winner::Union{Symbol,Nothing})` predicate,
+                    or `nothing` to rely entirely on schedule exit wires.
+- `initial`:        `() -> ACSet` factory producing fresh world states.
+- `schema`:         The presentation / schema object (optional metadata).
+- `win_conditions`: Optional `Dict{Symbol,Any}` mapping exit wire names to the
+                    winner identity (`Symbol` or `nothing` for a draw).  When
+                    provided, `run_game_sched!` uses it to resolve the winner
+                    from the active exit wire instead of calling `terminal`.
 """
 struct Game
-    players  :: Vector{Symbol}
-    terminal :: Function            # W -> (Bool, Union{Symbol,Nothing})
-    initial  :: Function            # () -> ACSet
-    schema   :: Any                 # optional schema metadata
+    players        :: Vector{Symbol}
+    terminal       :: Union{Function, Nothing}  # W -> (Bool, Union{Symbol,Nothing}), or nothing
+    initial        :: Function                  # () -> ACSet
+    schema         :: Any                       # optional schema metadata
+    win_conditions :: Union{Dict{Symbol,Any}, Nothing}
 end
 
 function Game(
     schema = nothing;
-    players  :: Vector{Symbol}    = [:player],
-    terminal :: Function          = (W) -> (false, nothing),
-    initial  :: Function          = () -> error("No initial world factory provided"),
+    players        :: Vector{Symbol}                    = [:player],
+    terminal       :: Union{Function, Nothing}          = nothing,
+    initial        :: Function                          = () -> error("No initial world factory provided"),
+    win_conditions :: Union{Dict{Symbol,Any}, Nothing}  = nothing,
 )
-    Game(players, terminal, initial, schema)
+    Game(players, terminal, initial, schema, win_conditions)
 end
 
 # ─── GameState ────────────────────────────────────────────────────────────────

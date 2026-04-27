@@ -507,12 +507,14 @@ turns).
 
 `view_sched(gs; names=N)` renders any `GameSched` as a Graphviz wiring diagram.
 
-### Win-check sub-schedule
+### Win-check sub-schedules
 
 `x_won_check_gs` succeeds (port 1) when X has three in a row, fails (port 2) otherwise.
 It uses only plain `RuleApp` boxes — no player decisions — so execution is deterministic.
 The three patterns are tested in cascade; two `merge_wires` boxes collect the three
-success paths into one exit wire.
+success paths into a single `won` exit wire.  This sub-schedule is wired into the outer
+game loop (not inside X's turn schedule), so the same component can be placed after X's
+move independently of move logic.
 
 ```{julia}
 #| label: x-won-check
@@ -536,19 +538,18 @@ view_sched(x_won_check_gs; names=N)
 ### X's turn schedule
 
 `mark_x_app` is a `PlayerRuleApp` tagged `:X`.  Port 1 fires after a successful mark;
-port 2 fires if no empty square exists (tie).  After a move the win-check sub-schedule
-determines whether X has just won.
+port 2 fires if no empty square exists (tie).  Win detection is handled separately by
+the outer game loop, so this sub-schedule has only two return wires.
 
 ```{julia}
 #| label: x-sched
 mark_x_app = PlayerRuleApp(:mark_x, mark_x, I, :X; cat=𝒞)
 
 X_sched_gs = mk_game_sched((;), (init=:I,), N,
-    (mx=mark_x_app, wc=x_won_check_gs),
+    (mx=mark_x_app,),
     quote
         moved, tie = mx(init)
-        x_won, cont = wc(moved)
-        return x_won, cont, tie
+        return moved, tie
     end)
 ```
 
@@ -557,10 +558,9 @@ X_sched_gs = mk_game_sched((;), (init=:I,), N,
 view_sched(X_sched_gs; names=N)
 ```
 
-The schedule has three return wires:
+The schedule has two return wires:
 
-- `x_won` — X just won; exit the game.
-- `cont` — game continues; pass the board to O.
+- `moved` — X placed a piece; pass the updated board to the win check.
 - `tie` — board was full when X tried to move; exit as draw.
 
 ### Migrating to O's schedule with `player_migrate`
@@ -595,14 +595,22 @@ view_sched(O_sched_gs; names=N)
 
 The rendered diagram looks identical to X's schedule because `view_sched` uses the
 original display names.  The functional difference is entirely in the rules: the mark
-rule's right-hand side now adds an `O` piece, the win-check rules look for three `O`
-pieces in a row, and the `PlayerRuleApp` player tag has been updated from `:X` to `:O`.
+rule's right-hand side now adds an `O` piece, the `PlayerRuleApp` player tag has been
+updated from `:X` to `:O`.
+
+We also derive O's win-check sub-schedule via the same migration:
+
+```{julia}
+#| label: o-win-check
+o_won_check_gs = player_migrate(F, x_won_check_gs, Dict(:X => :O))
+```
 
 ### Full game loop
 
-The outer schedule loops X then O, repeating until someone wins or the board fills.  The
-`trace_arg` wire loops the continuing board back for the next round; `init` carries the
-fresh board on the first iteration.  Both are merged before entering `X_sched_gs`.
+The outer schedule loops X then O, interleaving each player's move with the
+corresponding win-check sub-schedule.  If a win check succeeds, the world exits on a
+player-specific wire (`x_won` or `o_won`).  If a player has no legal moves the board
+exits on the `tie` wire.  Otherwise `o_cont` feeds back for the next round.
 
 ```{julia}
 #| label: game-sched
@@ -610,12 +618,14 @@ game_sched = mk_game_sched(
     (trace_arg=:I,),
     (init=:I,),
     N,
-    (x=X_sched_gs, o=O_sched_gs, mw=merge_wires(I)),
+    (x=X_sched_gs, o=O_sched_gs, cx=x_won_check_gs, co=o_won_check_gs, mw=merge_wires(I)),
     quote
-        x_won, x_not, x_tie = x([init, trace_arg])
-        o_won, o_not, o_tie  = o(x_not)
-        game_over = mw(mw(x_won, o_won), mw(x_tie, o_tie))
-        return o_not, game_over
+        x_moved, x_tie = x([init, trace_arg])
+        x_won, x_cont  = cx(x_moved)
+        o_moved, o_tie = o(x_cont)
+        o_won, o_cont  = co(o_moved)
+        tie = mw(x_tie, o_tie)
+        return o_cont, x_won, o_won, tie
     end)
 ```
 
@@ -624,8 +634,12 @@ game_sched = mk_game_sched(
 view_sched(game_sched; names=N)
 ```
 
-The first return wire `o_not` is the trace wire (fed back for the next round); the
-second `game_over` is the exit wire.
+Return wires:
+
+- `o_cont` — trace wire; fed back at the start of the next round.
+- `x_won` — X has three in a row; game ends, X wins.
+- `o_won` — O has three in a row; game ends, O wins.
+- `tie` — neither player could move; game ends as a draw.
 
 ---
 
@@ -640,21 +654,24 @@ supply agents for each player, and run episodes.
 
 ```julia
 struct Game
-    players  :: Vector{Symbol}          # ordered list of player names
-    terminal :: Function                # W -> (done::Bool, winner::Union{Symbol,Nothing})
-    initial  :: Function                # () -> ACSet   (fresh starting world)
-    schema   :: Any                     # schema presentation (optional metadata)
+    players        :: Vector{Symbol}
+    terminal       :: Union{Function, Nothing}       # W -> (done, winner), or nothing
+    initial        :: Function                       # () -> ACSet
+    schema         :: Any                            # schema presentation (optional)
+    win_conditions :: Union{Dict{Symbol,Any}, Nothing}
 end
 ```
 
 - `players` declares who participates and in what order.
-- `terminal` is called after every move.  It returns a `(Bool, Symbol|Nothing)` pair:
-  `(true, :X)` means X won, `(true, nothing)` means a draw, `(false, nothing)` means
-  play continues.
+- `terminal` is a legacy callback `W -> (Bool, Symbol|Nothing)` called after every
+  move.  Set to `nothing` (the default) when win conditions are expressed as exit wires.
 - `initial` is a zero-argument factory called once per episode to produce a fresh world
   ACSet.  Keeping it as a callable (rather than a single ACSet) ensures episodes are
   truly independent.
 - `schema` is optional metadata used by `GameMigration`.
+- `win_conditions` maps exit wire names to winner identities.  When non-`nothing`,
+  `run_game_sched!` uses it to resolve the winner from the active exit wire instead of
+  calling `terminal`.  Use `nothing` for draw wires.
 
 ### `FunctionAgent` — the simplest agent type
 
@@ -693,37 +710,18 @@ end
 pre-computed GNN-ready tensors.  Agents that need only the raw world access
 `state.raw.world` directly.
 
-### Terminal predicate
+### Win conditions and game record
 
-`ttt_terminal` is passed to `Game` below as the stopping criterion.  It checks the board
-for any three-in-a-row using the structural rules defined above, applying `F` to derive
-the O-side variants.
-
-```{julia}
-#| label: terminal
-function ttt_terminal(W)
-    for rule in [x_rows_rule, x_diag1_rule, x_diag2_rule]
-        !isempty(get_matches(rule, W)) && return (true, :X)
-    end
-    o_rows_rule  = F(x_rows_rule)
-    o_diag1_rule = F(x_diag1_rule)
-    o_diag2_rule = F(x_diag2_rule)
-    for rule in [o_rows_rule, o_diag1_rule, o_diag2_rule]
-        !isempty(get_matches(rule, W)) && return (true, :O)
-    end
-    nparts(W, :X) + nparts(W, :O) >= 9 && return (true, nothing)
-    return (false, nothing)
-end
-```
-
-### Game record and agents
+Rather than a Julia callback, the game's termination logic is now expressed entirely by
+the exit wires in `game_sched`.  We only need to tell `run_game_sched!` which player
+each exit wire belongs to via `win_conditions`:
 
 ```{julia}
 #| label: game-record
 game = Game(SchTTT;
-    players  = [:X, :O],
-    terminal = ttt_terminal,
-    initial  = create_board)
+    players        = [:X, :O],
+    initial        = create_board,
+    win_conditions = Dict{Symbol, Any}(:x_won => :X, :o_won => :O, :tie => nothing))
 ```
 
 ```{julia}
@@ -812,7 +810,7 @@ X goes first, so it has an advantage under purely random play — expect roughly
 | Schedule construction | `mk_game_sched(trace_args, init_args, N, boxes, body)` |
 | Schedule visualisation | `view_sched(gs; names=N)` |
 | Migrate X→O schedule | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
-| Game metadata | `Game(schema; players, terminal, initial)` |
+| Game metadata | `Game(schema; players, initial, win_conditions=Dict(...))` |
 | Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
 | Inspect final state | `exps[end].next_state.raw.world` → `view_TTT(...)` |
 | Analyse results | `win_rate`, `episode_length`, `action_counts` |

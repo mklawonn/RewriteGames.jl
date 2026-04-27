@@ -94,4 +94,68 @@ using AlgebraicRewriting
         @test !isempty(exps)
     end
 
+    # ── Exit-wire winner detection ────────────────────────────────────────────
+
+    # One-shot schedule: alice adds a vertex then exits.
+    # Port 1 (alice_won) fires on success; port 2 (tie) fires when no moves.
+    alice_wins_sched = mk_game_sched(
+        (;), (init=:I,), N,
+        (a=pra_alice,),
+        quote
+            alice_won, tie = a(init)
+            return alice_won, tie
+        end)
+
+    @testset "winner_wires sets winner on final Experience" begin
+        ww = Dict{Symbol, Union{Symbol,Nothing}}(:alice_won => :alice, :tie => nothing)
+        exps = run_game_sched!(alice_wins_sched, Graph(2), agents;
+                               T_max=10, winner_wires=ww)
+        @test !isempty(exps)
+        @test exps[end].done   === true
+        @test exps[end].winner === :alice
+    end
+
+    @testset "Game.win_conditions used automatically in Game overload" begin
+        game_wc = Game(
+            nothing;
+            players        = [:alice, :bob],
+            initial        = () -> Graph(2),
+            win_conditions = Dict{Symbol, Any}(:alice_won => :alice, :tie => nothing),
+        )
+        exps = run_game_sched!(alice_wins_sched, game_wc, agents; T_max=10)
+        @test !isempty(exps)
+        @test exps[end].done   === true
+        @test exps[end].winner === :alice
+    end
+
+    @testset "terminal kwarg backward compatibility" begin
+        always_alice = (W) -> (true, :alice)
+        exps = run_game_sched!(alice_wins_sched, Graph(2), agents;
+                               T_max=10, terminal=always_alice)
+        @test !isempty(exps)
+        @test exps[end].done   === true
+        @test exps[end].winner === :alice
+    end
+
+    # One-shot schedule where bob tries to add an edge to an empty graph;
+    # rule_add_edge requires 2 existing vertices, so bob always has no matches
+    # and the tie exit wire fires.
+    bob_tries_sched = mk_game_sched(
+        (;), (init=:I,), N,
+        (b=pra_bob,),
+        quote
+            moved, tie = b(init)
+            return moved, tie
+        end)
+
+    @testset "winner_wires: tie exit wire produces winner=nothing" begin
+        ww = Dict{Symbol, Union{Symbol,Nothing}}(:moved => :bob, :tie => nothing)
+        # Graph(0) has no vertices, so rule_add_edge has no matches → tie fires.
+        exps = run_game_sched!(bob_tries_sched, Graph(0), agents;
+                               T_max=10, winner_wires=ww)
+        @test !isempty(exps)
+        @test exps[end].done   === true
+        @test exps[end].winner === nothing
+    end
+
 end

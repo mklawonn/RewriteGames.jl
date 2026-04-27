@@ -6,16 +6,21 @@ clauses (each on its own line, in any order):
 
 ```julia
 @game SchGraph begin
-    players:  alice, bob
-    terminal: (W) -> (nparts(W, :V) >= 10, nothing)
-    initial:  () -> Graph(2)
+    players:        alice, bob
+    terminal:       (W) -> (nparts(W, :V) >= 10, nothing)
+    initial:        () -> Graph(2)
+    win_conditions: Dict(:v_won => :alice, :e_won => :bob, :tie => nothing)
 end
 ```
 
 **Clauses:**
 - `players:` — comma-separated bare player names (symbols); required.
-- `terminal:` — a function `W -> (Bool, Union{Symbol,Nothing})`.
+- `terminal:` — a function `W -> (Bool, Union{Symbol,Nothing})`; optional when
+  `win_conditions` is provided and exit wires determine game outcome.
 - `initial:` — a zero-argument factory `() -> ACSet`.
+- `win_conditions:` — a `Dict{Symbol, Union{Symbol,Nothing}}` mapping exit wire
+  names to winner identities (`nothing` = draw); used by `run_game_sched!`
+  instead of `terminal` when present.
 
 Rules now live inside `PlayerRuleApp` boxes in the wiring-diagram schedule;
 use `mk_game_sched` to build the schedule separately.
@@ -25,8 +30,9 @@ macro game(schema, body)
         error("@game: second argument must be a begin...end block")
 
     players_sym   = nothing
-    terminal_expr = :((W) -> (false, nothing))
+    terminal_expr = nothing
     initial_expr  = :(() -> error("No initial world factory provided"))
+    win_cond_expr = nothing
 
     for stmt in body.args
         stmt isa LineNumberNode && continue
@@ -68,21 +74,27 @@ macro game(schema, body)
             terminal_expr = val
         elseif keysym === :initial
             initial_expr = val
+        elseif keysym === :win_conditions
+            win_cond_expr = val
         else
             error("@game: unrecognised clause key :$keysym. " *
-                  "Valid clauses: players, terminal, initial")
+                  "Valid clauses: players, terminal, initial, win_conditions")
         end
     end
 
     players_sym === nothing &&
         error("@game: missing required 'players:' clause")
 
+    terminal_arg = terminal_expr === nothing ? :nothing : esc(terminal_expr)
+    win_cond_arg = win_cond_expr  === nothing ? :nothing : esc(win_cond_expr)
+
     quote
         Game(
             $(esc(schema));
-            players  = $players_sym,
-            terminal = $(esc(terminal_expr)),
-            initial  = $(esc(initial_expr)),
+            players        = $players_sym,
+            terminal       = $terminal_arg,
+            initial        = $(esc(initial_expr)),
+            win_conditions = $win_cond_arg,
         )
     end
 end

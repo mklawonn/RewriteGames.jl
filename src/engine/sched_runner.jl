@@ -99,7 +99,9 @@ end
 
 """
     run_game_sched!(gs::GameSched, initial_world, agents::Dict;
-                    T_max::Int=1000, terminal::Function=(W)->(false,nothing))
+                    T_max::Int=1000,
+                    terminal::Union{Function,Nothing}=nothing,
+                    winner_wires::Dict{Symbol,Union{Symbol,Nothing}}=Dict())
         -> Vector{Experience}
 
 Execute a complete game episode using the wiring-diagram schedule `gs`.
@@ -112,21 +114,34 @@ Loop structure:
 - The first `length(gs._trace_names)` return wires loop back to the trace
   inputs on subsequent iterations; the rest are exit wires.
 - The episode terminates when an exit wire becomes active, when
-  `terminal(world)` returns `true`, or when `T_max` turns are exhausted.
+  `terminal(world)` returns `true` (if `terminal` is provided), or when
+  `T_max` turns are exhausted.
+
+Winner resolution (in priority order):
+1. If `terminal` is non-`nothing`, it is called after each move and its result
+   populates `Experience.winner` immediately (backward-compatible path).
+2. If `winner_wires` is non-empty and an exit wire fires, the winner is looked
+   up from `winner_wires` and the final `Experience` record is updated.
+3. If `T_max` is reached without an exit wire, `winner = nothing` (draw/timeout).
 """
 function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
                          T_max::Int = 1000,
-                         terminal::Function = (W) -> (false, nothing))
-    all_exps = Experience[]
-    turn     = Ref(1)
-    n_trace  = length(gs._trace_names)
+                         terminal::Union{Function, Nothing} = nothing,
+                         winner_wires::Dict{Symbol, Union{Symbol, Nothing}} = Dict{Symbol, Union{Symbol, Nothing}}())
+    all_exps   = Experience[]
+    turn       = Ref(1)
+    n_trace    = length(gs._trace_names)
+    # Fallback terminal: never done, no winner (used when terminal === nothing)
+    _terminal  = terminal === nothing ? (W) -> (false, nothing) : terminal
 
     # Initialise wires for the first iteration
     wires = _init_wires(gs, initial_world, nothing)
 
+    fired_exit_name = nothing  # name of the exit wire that ended the game
+
     for _ in 1:(T_max + 1)
         round_exps = Experience[]
-        _run_body!(gs._steps, wires, gs._all_boxes, agents, terminal, turn, T_max, round_exps)
+        _run_body!(gs._steps, wires, gs._all_boxes, agents, _terminal, turn, T_max, round_exps)
         append!(all_exps, round_exps)
 
         # Extract trace and exit return values
@@ -137,6 +152,7 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
             w = get(wires, gs._ret_names[i], nothing)
             if w !== nothing
                 exit_world = w
+                fired_exit_name = gs._ret_names[i]
                 break
             end
         end
@@ -155,16 +171,43 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
         wires = _init_wires(gs, nothing, trace_world)
     end
 
+    # Post-process: if winner_wires is provided and an exit wire fired, update
+    # the final Experience with the correct winner and done = true.
+    if !isempty(winner_wires) && fired_exit_name !== nothing && !isempty(all_exps)
+        wire_winner = get(winner_wires, fired_exit_name, nothing)
+        last_exp = all_exps[end]
+        # Only update if terminal() did not already resolve the winner
+        if terminal === nothing || !last_exp.done
+            all_exps[end] = Experience(
+                last_exp.player, last_exp.state, last_exp.legal_actions,
+                last_exp.action, last_exp.next_state,
+                true, wire_winner,
+                last_exp.info, last_exp.schedule_path,
+            )
+        end
+    end
+
     return all_exps
 end
 
 """
-Convenience overload: use `game.initial()` as the starting world and
-`game.terminal` for termination detection.
+Convenience overload: use `game.initial()` as the starting world.
+
+If `game.win_conditions` is non-`nothing`, it is used as `winner_wires` and
+`terminal` is ignored (categorical exit-wire mode).  Otherwise `game.terminal`
+is used as the termination predicate (backward-compatible mode).
 """
 function run_game_sched!(gs::GameSched, game::Game, agents::Dict; T_max::Int = 1000)
-    run_game_sched!(gs, game.initial(), agents;
-                    T_max = T_max, terminal = game.terminal)
+    if game.win_conditions !== nothing
+        run_game_sched!(gs, game.initial(), agents;
+                        T_max         = T_max,
+                        winner_wires  = Dict{Symbol, Union{Symbol, Nothing}}(
+                            k => v for (k, v) in game.win_conditions))
+    else
+        run_game_sched!(gs, game.initial(), agents;
+                        T_max    = T_max,
+                        terminal = game.terminal)
+    end
 end
 
 # ── helpers ───────────────────────────────────────────────────────────────────
