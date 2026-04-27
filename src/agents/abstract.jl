@@ -3,16 +3,18 @@
 
 Supertype for all game-playing agents.  Concrete subtypes must implement:
 
-    select_action(agent, state::EncodedState, legal_actions::Vector{Action}) -> Action
+    select_action(agent, state::GameState, legal_actions::Vector{Action}) -> Action
 """
 abstract type AbstractAgent end
 
 """
-    select_action(agent::AbstractAgent, state::EncodedState,
+    select_action(agent::AbstractAgent, state::GameState,
                   legal_actions::Vector{Action}) -> Action
 
-Choose one action from `legal_actions` given the current encoded state.
-Concrete agent types override this method.
+Choose one action from `legal_actions` given the current game state.
+Concrete agent types override this method.  The raw ACSet world is available
+as `state.world`; call `elements_graph(state)` for the category-of-elements
+representation.
 """
 function select_action end
 

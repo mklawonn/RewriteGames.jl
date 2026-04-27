@@ -71,18 +71,14 @@ using AlgebraicRewriting
         exp = first(exps)
 
         @test exp.player in game.players
-        @test exp.state     isa EncodedState
-        @test exp.next_state isa EncodedState
-        @test exp.state.node_features  isa Matrix{Float32}
-        @test exp.next_state.node_features isa Matrix{Float32}
-        @test size(exp.state.edge_index,    1) == 2
-        @test size(exp.next_state.edge_index, 1) == 2
-        @test size(exp.state.node_features, 2) ==
-              size(exp.next_state.node_features, 2)
+        @test exp.state      isa GameState
+        @test exp.next_state isa GameState
+        @test exp.state.world      !== nothing
+        @test exp.next_state.world !== nothing
+        @test exp.state.turn >= 1
+        @test exp.next_state.turn >= exp.state.turn
         @test exp.legal_actions isa Vector{Action}
         @test exp.action isa Union{Action, Nothing}
-        @test 0.0f0 <= exp.state.turn_frac     <= 1.0f0
-        @test 0.0f0 <= exp.next_state.turn_frac <= 1.0f0
         @test exp.info isa Dict{Symbol, Any}
         @test exp.schedule_path isa Vector{Symbol}
     end

@@ -49,7 +49,7 @@ include("core/auto_rule.jl")
 # ── Game struct ─────────────────────────────────────────────────────────────
 include("core/game.jl")
 
-# ── Encoding (must come before engine so EncodedState is visible) ────────
+# ── Encoding utilities ────────────────────────────────────────────────────
 include("encoding/encoding.jl")
 
 # ── Agent interface ──────────────────────────────────────────────────────
@@ -105,8 +105,8 @@ export
     view_sched,
     run_game_sched!,
 
-    # Encoding
-    EncodedState, encode_state,
+    # Encoding utilities
+    elements_graph,
 
     # Serialization
     write_experiences, read_experiences,

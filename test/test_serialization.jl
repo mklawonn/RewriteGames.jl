@@ -4,8 +4,8 @@ using Catlab
 using AlgebraicRewriting
 
 @testset "Serialization tests" begin
-    W   = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
-    enc = encode_state(W, 1, 50)
+    W     = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
+    state = GameState(W, 1)
 
     I_empty = Graph()
     R_one_v = Graph(1)
@@ -15,10 +15,10 @@ using AlgebraicRewriting
 
     exp = Experience(
         :alice,
-        enc,
+        state,
         Action[],
         nothing,
-        enc,
+        state,
         true,
         :alice,
         Dict{Symbol, Any}(:auto_results => []),
@@ -36,10 +36,10 @@ using AlgebraicRewriting
 
         row = rows[1]
         @test row.player == "alice"
+        @test row.turn   == Int32(1)
         @test row.done   == true
         @test row.winner == "alice"
         @test row.action_rule_name == "nothing"
-        @test row.turn_frac ≈ enc.turn_frac
     end
 
     @testset "multiple experiences" begin

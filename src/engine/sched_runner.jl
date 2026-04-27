@@ -237,20 +237,20 @@ end
 
 function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
                         turn::Ref{Int}, T_max, exps)
-    matches  = collect(get_matches(box.rule, world))
-    actions  = [Action(box, m) for m in matches]
-    enc_pre  = encode_state(world, turn[], T_max)
-    agent    = agents[box.player]
+    matches    = collect(get_matches(box.rule, world))
+    actions    = [Action(box, m) for m in matches]
+    state_pre  = GameState(world, turn[])
+    agent      = agents[box.player]
 
-    chosen = isempty(actions) ? nothing : select_action(agent, enc_pre, actions)
+    chosen = isempty(actions) ? nothing : select_action(agent, state_pre, actions)
 
     if chosen !== nothing
         new_world  = rewrite_match(box.rule, chosen.match)
         done, winner = terminal(new_world)
         turn[] += 1
-        enc_post = encode_state(new_world, turn[], T_max)
-        push!(exps, Experience(box.player, enc_pre, actions, chosen,
-                               enc_post, done || turn[] > T_max, winner,
+        state_post = GameState(new_world, turn[])
+        push!(exps, Experience(box.player, state_pre, actions, chosen,
+                               state_post, done || turn[] > T_max, winner,
                                Dict{Symbol, Any}(), Symbol[]))
         # Route to success port (1) and clear failure port (2)
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
@@ -259,9 +259,9 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         # No matches — route to failure port (2), success port (1) inactive
         done, winner = terminal(world)
         turn[] += 1
-        enc_post = encode_state(world, turn[], T_max)
-        push!(exps, Experience(box.player, enc_pre, actions, nothing,
-                               enc_post, done || turn[] > T_max, winner,
+        state_post = GameState(world, turn[])
+        push!(exps, Experience(box.player, state_pre, actions, nothing,
+                               state_post, done || turn[] > T_max, winner,
                                Dict{Symbol, Any}(), Symbol[]))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = nothing)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = world)
