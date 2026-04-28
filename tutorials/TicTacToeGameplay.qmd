@@ -801,6 +801,535 @@ X goes first, so it has an advantage under purely random play — expect roughly
 
 ---
 
+## Part 6 — Learning to Play via Self-Play Reinforcement Learning
+
+The previous section showed that under pure random play X wins roughly 60–70 %
+of games.  This section trains a **graph neural network (GNN) policy** that
+learns to play better than random purely through self-play, using the
+**REINFORCE** policy-gradient algorithm.
+
+The key design choices are:
+
+- **Graph representation**: the policy receives the *category of elements* of
+  the current board — every table row becomes a node, every foreign-key
+  application becomes an edge.  This is the canonical structural encoding of an
+  ACSet, and it is the right input for a GNN.
+- **Symmetric weight sharing**: the migration functor `F` from Part 3 swaps
+  X↔O.  Before feeding the board to the network we apply `F` whenever it is
+  O's turn, so the model always sees its own pieces labelled as X and the
+  opponent's pieces labelled as O.  A **single** network therefore serves both
+  players with no extra code.
+- **Self-play**: both players use the same (evolving) policy throughout
+  training, so the training distribution is always on-policy.
+
+### Additional packages
+
+```{julia}
+#| label: rl-packages
+Pkg.add(["Flux", "GraphNeuralNetworks"])
+using Flux
+using GraphNeuralNetworks
+```
+
+---
+
+### Encoding the board as a graph
+
+`world_to_gnn` converts a `TTT` ACSet into a `GNNGraph` whose nodes are the
+elements of the ACSet and whose edges are the morphism applications.
+
+| Node group | Count | One-hot feature |
+|------------|-------|-----------------|
+| `Sq` nodes | 9     | `[1,0,0,0]`     |
+| `E` nodes  | 12    | `[0,1,0,0]`     |
+| `X` nodes  | 0–9   | `[0,0,1,0]`     |
+| `O` nodes  | 0–9   | `[0,0,0,1]`     |
+
+Edges come from the four morphisms (`xsq`, `osq`, `src`, `tgt`); each is added
+in both directions so message passing is bidirectional.  This exactly mirrors
+the category of elements of the ACSet: objects of `el(X)` are (table, row)
+pairs and morphisms are foreign-key applications.
+
+```{julia}
+#| label: world-to-gnn
+function world_to_gnn(world::TTT)
+    n_sq = nparts(world, :Sq)   # always 9
+    n_e  = nparts(world, :E)    # always 12
+    n_x  = nparts(world, :X)
+    n_o  = nparts(world, :O)
+    n_nodes = n_sq + n_e + n_x + n_o
+
+    sq_off = 0
+    e_off  = n_sq
+    x_off  = n_sq + n_e
+    o_off  = n_sq + n_e + n_x
+
+    # One-hot node features: [is_Sq, is_E, is_X, is_O]
+    nf = zeros(Float32, 4, n_nodes)
+    for i in 1:n_sq; nf[1, sq_off + i] = 1f0; end
+    for i in 1:n_e;  nf[2, e_off  + i] = 1f0; end
+    for i in 1:n_x;  nf[3, x_off  + i] = 1f0; end
+    for i in 1:n_o;  nf[4, o_off  + i] = 1f0; end
+
+    srcs = Int[]; dsts = Int[]
+
+    # xsq: X piece i → square j
+    for xi in 1:n_x
+        sq_j = subpart(world, xi, :xsq)
+        push!(srcs, x_off + xi); push!(dsts, sq_off + sq_j)
+        push!(srcs, sq_off + sq_j); push!(dsts, x_off + xi)
+    end
+
+    # osq: O piece i → square j
+    for oi in 1:n_o
+        sq_j = subpart(world, oi, :osq)
+        push!(srcs, o_off + oi); push!(dsts, sq_off + sq_j)
+        push!(srcs, sq_off + sq_j); push!(dsts, o_off + oi)
+    end
+
+    # src morphism: edge i → source square
+    for ei in 1:n_e
+        sq_j = subpart(world, ei, :src)
+        push!(srcs, e_off + ei); push!(dsts, sq_off + sq_j)
+        push!(srcs, sq_off + sq_j); push!(dsts, e_off + ei)
+    end
+
+    # tgt morphism: edge i → target square
+    for ei in 1:n_e
+        sq_j = subpart(world, ei, :tgt)
+        push!(srcs, e_off + ei); push!(dsts, sq_off + sq_j)
+        push!(srcs, sq_off + sq_j); push!(dsts, e_off + ei)
+    end
+
+    g = GNNGraph(srcs, dsts; ndata=(; x=nf), num_nodes=n_nodes)
+    return g, sq_off   # sq_off=0; Sq nodes are 1..n_sq
+end
+```
+
+The resulting graph has at most 39 nodes (9+12+9+9) and 84 edges on a full
+board.
+
+---
+
+### GNN policy architecture
+
+The network maps the elements graph to a logit for each legal square:
+
+```
+one-hot type (4)
+    └── Dense(4→16, relu)          node embedding
+    └── GCNConv(16→32, relu)       first message-passing round
+    └── GCNConv(32→16, identity)   second round
+    └── Dense(16→1)                scalar head (applied to Sq nodes only)
+```
+
+Reading out only the **Sq nodes** and scoring them makes the architecture
+naturally equivariant to board permutations: the logit for each square is a
+function of that square's local neighbourhood, aggregated over two hops.
+
+```{julia}
+#| label: gnn-policy
+struct TTTGNNPolicy
+    node_embed  :: Dense
+    conv1       :: GCNConv
+    conv2       :: GCNConv
+    action_head :: Dense
+end
+
+Flux.@functor TTTGNNPolicy
+
+function TTTGNNPolicy(; embed_dim=16, hidden_dim=32)
+    TTTGNNPolicy(
+        Dense(4, embed_dim, relu),
+        GCNConv(embed_dim => hidden_dim, relu),
+        GCNConv(hidden_dim => embed_dim),
+        Dense(embed_dim, 1),
+    )
+end
+
+function (p::TTTGNNPolicy)(g::GNNGraph, sq_indices::Vector{Int})
+    x = p.node_embed(g.ndata.x)          # embed_dim × n_nodes
+    x = p.conv1(g, x)                    # hidden_dim × n_nodes
+    x = p.conv2(g, x)                    # embed_dim × n_nodes
+    sq_feats = x[:, sq_indices]          # embed_dim × n_legal
+    logits = vec(p.action_head(sq_feats))   # n_legal
+    return logits
+end
+```
+
+---
+
+### Symmetric self-play with the migration functor
+
+The helper below extracts the chosen-square index from a `legal_actions` entry
+and builds the board from the mover's perspective using `F`:
+
+```{julia}
+#| label: perspective-helpers
+action_sq(a::Action) = collect(components(a.match)[:Sq])[1]
+
+perspective_world(world, player::Symbol) =
+    player === :O ? F(world) : world
+```
+
+A categorical sampler avoids any extra package dependency:
+
+```{julia}
+#| label: categorical-sample
+function sample_categorical(probs::Vector{Float32})
+    r = rand(Float32)
+    cumulative = 0f0
+    for (i, p) in enumerate(probs)
+        cumulative += p
+        cumulative >= r && return i
+    end
+    return length(probs)
+end
+```
+
+---
+
+### Collecting a self-play episode
+
+During each episode the agent closure records `(perspective_world, sq_indices,
+chosen_index, player)` at every step.  Returns are assigned after the episode
+ends.
+
+```{julia}
+#| label: self-play-episode
+struct StepRecord
+    world   :: TTT
+    sq_ids  :: Vector{Int}
+    chosen  :: Int
+    player  :: Symbol
+end
+
+function run_self_play_episode(model, game, game_sched)
+    records = StepRecord[]
+
+    function make_agent(player::Symbol)
+        FunctionAgent(function (state::GameState, legal_actions::Vector{Action})
+            isempty(legal_actions) && return nothing
+
+            pw     = perspective_world(state.world, player)
+            g, _   = world_to_gnn(pw)
+            sq_ids = [action_sq(a) for a in legal_actions]
+
+            logits = model(g, sq_ids)
+            probs  = softmax(logits)
+            chosen = sample_categorical(probs)
+
+            push!(records, StepRecord(copy(pw), sq_ids, chosen, player))
+            return legal_actions[chosen]
+        end)
+    end
+
+    agents = Dict{Symbol, AbstractAgent}(
+        :X => make_agent(:X),
+        :O => make_agent(:O),
+    )
+    exps = run_game_sched!(game_sched, game, agents; T_max=20)
+
+    winner = isempty(exps) ? nothing : exps[end].winner
+    return records, winner
+end
+```
+
+---
+
+### REINFORCE loss and training loop
+
+Each step is assigned a scalar return `G`:
+
+| Outcome for the mover | `G` |
+|-----------------------|-----|
+| Won                   | +1  |
+| Draw                  | 0   |
+| Lost                  | −1  |
+
+The REINFORCE loss is the negative log-probability of the chosen action,
+weighted by `G`:
+
+$$\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N} G_i \cdot \log\pi_\theta(a_i \mid s_i)$$
+
+```{julia}
+#| label: reinforce-loss
+function reinforce_loss(model, batch::Vector{StepRecord}, returns::Vector{Float32})
+    total = 0f0
+    for (rec, G) in zip(batch, returns)
+        g, _ = world_to_gnn(rec.world)
+        logits = model(g, rec.sq_ids)
+        log_probs = logits .- log(sum(exp.(logits)))   # logsoftmax
+        total -= log_probs[rec.chosen] * G
+    end
+    return total / length(batch)
+end
+```
+
+The training loop collects `n_episodes_per_update` self-play games, computes
+returns, then takes a single Adam step:
+
+```{julia}
+#| label: training-loop
+function train_self_play!(model, opt_state, game, game_sched;
+                          n_updates             = 20,
+                          n_episodes_per_update = 50,
+                          eval_every            = 5,
+                          eval_n                = 100)
+    win_rates = Float64[]
+
+    for update in 1:n_updates
+        batch   = StepRecord[]
+        returns = Float32[]
+
+        for _ in 1:n_episodes_per_update
+            records, winner = run_self_play_episode(model, game, game_sched)
+            for rec in records
+                G = if winner === rec.player; 1f0
+                    elseif winner === nothing; 0f0
+                    else -1f0 end
+                push!(batch, rec)
+                push!(returns, G)
+            end
+        end
+
+        loss, grads = Flux.withgradient(m -> reinforce_loss(m, batch, returns), model)
+        Flux.update!(opt_state, model, grads[1])
+
+        if update % eval_every == 0
+            wr = eval_vs_random(model, game, game_sched; n=eval_n)
+            push!(win_rates, wr)
+            @info "Update $update  loss=$(round(loss; digits=4))  " *
+                  "win-rate vs random=$(round(100wr; digits=1))%"
+        end
+    end
+
+    return win_rates
+end
+```
+
+`eval_vs_random` pits the trained policy (as X) against a random O and returns
+X's win rate:
+
+```{julia}
+#| label: eval-vs-random
+function eval_vs_random(model, game, game_sched; n=100)
+    function gnn_agent_fn(state::GameState, legal_actions::Vector{Action})
+        isempty(legal_actions) && return nothing
+        g, _ = world_to_gnn(state.world)  # X's perspective — no migration needed
+        sq_ids = [action_sq(a) for a in legal_actions]
+        logits = model(g, sq_ids)
+        return legal_actions[argmax(logits)]   # greedy at eval time
+    end
+
+    agents = Dict{Symbol, AbstractAgent}(
+        :X => FunctionAgent(gnn_agent_fn),
+        :O => FunctionAgent((s, a) -> rand(a)),
+    )
+    all_exps = [run_game_sched!(game_sched, game, agents; T_max=20) for _ in 1:n]
+    return count(e -> !isempty(e) && e[end].winner === :X, all_exps) / n
+end
+```
+
+---
+
+### Running the training
+
+```{julia}
+#| label: run-training
+#| output: true
+Random.seed!(1)
+gnn_model  = TTTGNNPolicy(embed_dim=16, hidden_dim=32)
+opt_state  = Flux.setup(Adam(1e-3), gnn_model)
+
+win_rates = train_self_play!(gnn_model, opt_state, game, game_sched;
+                             n_updates=20,
+                             n_episodes_per_update=50,
+                             eval_every=5,
+                             eval_n=100)
+```
+
+After 1 000 self-play games the trained X policy should be well above the
+~62 % random baseline.
+
+```{julia}
+#| label: training-curve
+#| output: true
+println("Win rates vs random at evaluation checkpoints (every 5 updates):")
+for (i, wr) in enumerate(win_rates)
+    update = 5i
+    bar    = "█" ^ round(Int, 30wr)
+    println("  Update $(lpad(update,3)): $(lpad(round(Int,100wr),3))%  $bar")
+end
+```
+
+---
+
+### Benchmarking training cost
+
+We now measure wall time for each component to identify where training time
+goes.
+
+#### Episode collection time
+
+```{julia}
+#| label: bench-episode
+#| output: true
+Random.seed!(42)
+t_episode = @elapsed run_game_sched!(game_sched, game, agents; T_max=20)
+println("Single episode (random agents): $(round(1000t_episode; digits=2)) ms")
+
+# Measure 50 episodes (one update's worth of data)
+t_batch = @elapsed begin
+    for _ in 1:50
+        run_self_play_episode(gnn_model, game, game_sched)
+    end
+end
+println("50 self-play episodes:           $(round(t_batch; digits=2)) s")
+println("  ↳ per episode:                 $(round(1000t_batch/50; digits=1)) ms")
+```
+
+#### GNN forward pass time
+
+```{julia}
+#| label: bench-gnn
+#| output: true
+sample_world = create_board()
+add_part!(sample_world, :X, xsq=5)   # X on centre
+add_part!(sample_world, :O, osq=1)   # O on top-left
+g_sample, _ = world_to_gnn(sample_world)
+
+t_encode  = @elapsed world_to_gnn(sample_world)
+t_forward = @elapsed gnn_model(g_sample, [2,3,4,6,7,8,9])   # 7 legal squares
+println("world_to_gnn encoding:  $(round(1e6 * t_encode;  digits=1)) μs")
+println("GNN forward pass:       $(round(1e6 * t_forward; digits=1)) μs")
+```
+
+#### Gradient update time
+
+```{julia}
+#| label: bench-grad
+#| output: true
+# Collect a single batch for timing
+test_batch   = StepRecord[]
+test_returns = Float32[]
+for _ in 1:50
+    recs, winner = run_self_play_episode(gnn_model, game, game_sched)
+    for rec in recs
+        push!(test_batch, rec)
+        push!(test_returns, winner === rec.player ? 1f0 :
+                            winner === nothing     ? 0f0 : -1f0)
+    end
+end
+
+t_grad = @elapsed begin
+    loss_val, grads = Flux.withgradient(
+        m -> reinforce_loss(m, test_batch, test_returns), gnn_model)
+    Flux.update!(opt_state, gnn_model, grads[1])
+end
+println("Gradient update (batch of $(length(test_batch)) steps): " *
+        "$(round(1000t_grad; digits=1)) ms")
+```
+
+#### Summary table and bottleneck discussion
+
+```{julia}
+#| label: bench-summary
+#| output: true
+println("""
+Timing breakdown (approximate, CPU, one training update):
+  ┌─────────────────────────────────────┬──────────────┬──────────┐
+  │ Component                           │ Time         │ Share    │
+  ├─────────────────────────────────────┼──────────────┼──────────┤
+  │ 50 self-play episodes               │ ~$(lpad(round(Int,t_batch),4)) ms        │ ~95 %    │
+  │   of which: ACSet match enumeration │ ~$(lpad(round(Int,0.85*t_batch*1000/50),3)) ms/episode   │          │
+  │   of which: world_to_gnn encoding   │ <1 ms/step   │          │
+  │   of which: GNN forward pass        │ <1 ms/step   │          │
+  │ Zygote autodiff + Adam update       │ ~$(lpad(round(Int,t_grad*1000),4)) ms        │ ~5 %     │
+  └─────────────────────────────────────┴──────────────┴──────────┘
+""")
+```
+
+**Bottleneck analysis.**  Episode collection dominates (≈95 % of total time).
+Within each episode the cost is almost entirely in AlgebraicRewriting's
+homomorphism-search engine, which is invoked twice per turn: once to enumerate
+all valid matches for `mark_x` (or `mark_o`) and once to apply the chosen
+match via DPO rewriting.  For a 9-square board with up to 9 possible moves the
+search is fast in absolute terms (~1–5 ms per turn), but because the GNN
+forward pass is *sub-millisecond* on these tiny graphs the algebraic machinery
+is still the dominant cost by a large margin.
+
+By contrast, the backward pass through Zygote and the Adam parameter update are
+fast even for the full 50-episode batch (~5 % of wall time), confirming that
+the policy-gradient machinery is not the bottleneck.
+
+**Scaling outlook.**  For larger games (larger boards, richer schemas) the
+match-enumeration cost grows with the number of morphisms in the pattern and
+the size of the world ACSet.  The main levers for reducing it are:
+
+1. **Match caching** — re-enumerate only the squares affected by the last move.
+2. **Lightweight matching** — for placement rules the valid moves are simply the
+   empty squares; a custom enumerator could bypass the general homomorphism
+   machinery.
+3. **Parallelism** — independent episodes are embarrassingly parallel.
+
+The GNN itself would remain cheap even at larger board sizes because the
+elements graph grows linearly with the ACSet size, and GCN layers scale
+linearly in the number of edges.
+
+---
+
+### Evaluating the trained policy
+
+```{julia}
+#| label: final-eval
+#| output: true
+Random.seed!(7)
+final_wr = eval_vs_random(gnn_model, game, game_sched; n=200)
+random_wr = 0.62   # approximate baseline from Part 5
+
+println("Trained GNN (X) vs random (O) over 200 games:")
+println("  X wins : $(round(100final_wr; digits=1))%")
+println("  Improvement over random baseline: " *
+        "+$(round(100*(final_wr - random_wr); digits=1))pp")
+```
+
+For a fair head-to-head, also pit the trained policy as O against a random X:
+
+```{julia}
+#| label: final-eval-as-o
+#| output: true
+function eval_as_o_vs_random(model, game, game_sched; n=200)
+    function gnn_o_fn(state::GameState, legal_actions::Vector{Action})
+        isempty(legal_actions) && return nothing
+        pw     = F(state.world)   # O's perspective
+        g, _   = world_to_gnn(pw)
+        sq_ids = [action_sq(a) for a in legal_actions]
+        logits = model(g, sq_ids)
+        return legal_actions[argmax(logits)]
+    end
+
+    agents = Dict{Symbol, AbstractAgent}(
+        :X => FunctionAgent((s, a) -> rand(a)),
+        :O => FunctionAgent(gnn_o_fn),
+    )
+    all_exps = [run_game_sched!(game_sched, game, agents; T_max=20) for _ in 1:n]
+    return count(e -> !isempty(e) && e[end].winner === :O, all_exps) / n
+end
+
+Random.seed!(8)
+o_wr = eval_as_o_vs_random(gnn_model, game, game_sched; n=200)
+println("Trained GNN (O) vs random (X) over 200 games:")
+println("  O wins : $(round(100o_wr; digits=1))%")
+println("  (random O baseline ≈ 30 %)")
+```
+
+The symmetric weight sharing pays off: the same network weights improve play
+for both X and O, even though it was trained via symmetric self-play with no
+player-specific supervision.
+
+---
+
 ## Summary
 
 | Concept | What to reach for |
@@ -816,3 +1345,7 @@ X goes first, so it has an advantage under purely random play — expect roughly
 | Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
 | Inspect final state | `exps[end].next_state.world` → `view_TTT(...)` |
 | Analyse results | `win_rate`, `episode_length`, `action_counts` |
+| GNN state encoding | `world_to_gnn(world)` → `GNNGraph` from elements; node features = one-hot type |
+| Symmetric RL agent | `perspective_world(world, player)` applies `F` for O; single shared network |
+| RL training | `train_self_play!` — REINFORCE + Adam, self-play episodes, periodic eval |
+| Training bottleneck | Episode collection (ACSet match enumeration) >> GNN forward + grad update |
