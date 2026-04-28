@@ -135,14 +135,16 @@ Traverses all boxes in the schedule:
 - Nested `GameSched` boxes are migrated recursively.
 - Other boxes (plain `RuleApp`, `Schedule`) are migrated by calling `F(box)`.
 """
-function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol})
+function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol};
+                        name_map::Dict{Symbol, Symbol} = Dict{Symbol, Symbol}())
     new_boxes = map(gs._all_boxes) do v
         if v isa PlayerRuleApp
             new_player = get(player_map, v.player, v.player)
-            PlayerRuleApp(v.name, F(v.rule), F(v.init), new_player;
+            new_name   = get(name_map,   v.name,   v.name)
+            PlayerRuleApp(new_name, F(v.rule), F(v.init), new_player;
                           cat = v.cat === nothing ? nothing : v.cat)
         elseif v isa GameSched
-            player_migrate(F, v, player_map)
+            player_migrate(F, v, player_map; name_map)
         else
             F(v)
         end

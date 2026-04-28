@@ -86,11 +86,13 @@ and target squares of each edge:
     Sq::Ob; E::Ob; X::Ob; O::Ob
     xsq::Hom(X, Sq); osq::Hom(O, Sq)
     src::Hom(E, Sq); tgt::Hom(E, Sq)
+    SquareNum::AttrType
+    num::Attr(Sq, SquareNum)
 end
 
 @acset_type TicTacToe(SchTTT, index=[:xsq, :osq])
-const TTT = TicTacToe
-𝒞 = ACSetCategory(CSetCat(TTT()))
+const TTT = TicTacToe{Int}
+𝒞 = ACSetCategory(VarACSetCat(TTT()))
 
 to_graphviz(SchTTT; prog="dot")
 ```
@@ -98,8 +100,9 @@ to_graphviz(SchTTT; prog="dot")
 We index on `:xsq` and `:osq` so that `incident(board, sq_id, :xsq)` — "all X pieces on
 square `sq_id`" — is an O(1) lookup instead of a linear scan.
 
-`ACSetCategory(CSetCat(TTT()))` constructs the category in which all subsequent
-morphisms and rules live.
+`ACSetCategory(VarACSetCat(TTT()))` constructs the category in which all subsequent
+morphisms and rules live.  `VarACSetCat` supports schemas with attributes and handles
+free attribute variables (`AttrVar`) in Yoneda representables.
 
 <!-- ### Why include edges?
 
@@ -128,7 +131,7 @@ in the same row; vertical edges connect squares directly above/below each other.
 #| label: constructor
 function create_board()
     ttt = TTT()
-    add_parts!(ttt, :Sq, 9)
+    add_parts!(ttt, :Sq, 9; num=collect(1:9))
     # Horizontal edges: (1→2), (2→3), (4→5), (5→6), (7→8), (8→9)
     for i in 0:2, j in 0:1
         add_part!(ttt, :E, src=3*i+j+1, tgt=3*i+j+2)
@@ -149,8 +152,9 @@ A small Graphviz helper renders any board state for quick inspection:
 function view_TTT(p::TTT)
     stmts = Statement[]
     for s in parts(p, :Sq)
-        row = div(s-1, 3)
-        col = mod(s-1, 3)
+        n   = let v = subpart(p, s, :num); v isa Integer ? v : s end
+        row = div(n-1, 3)
+        col = mod(n-1, 3)
         x, y = col, 2-row
         label = ""
         xs = incident(p, s, :xsq)
@@ -319,21 +323,24 @@ lines, and the migration functor derives the O-side patterns for free.
 #| label: win-patterns
 # Pattern 1: row or column — Sq1 -E-> Sq2 -E-> Sq3, all marked X
 row_col_structural = TTT()
-add_parts!(row_col_structural, :Sq, 3)
+add_parts!(row_col_structural, :SquareNum, 3)
+add_parts!(row_col_structural, :Sq, 3; num=AttrVar.(1:3))
 add_part!(row_col_structural, :E, src=1, tgt=2)
 add_part!(row_col_structural, :E, src=2, tgt=3)
 for i in 1:3; add_part!(row_col_structural, :X, xsq=i); end
 
 # Pattern 2: main diagonal (1-5-9), hop-skip path: Sq1 -E-> Sq2 -E-> Sq3 -E-> Sq4 -E-> Sq5
 diag_structural_1 = TTT()
-add_parts!(diag_structural_1, :Sq, 5)
+add_parts!(diag_structural_1, :SquareNum, 5)
+add_parts!(diag_structural_1, :Sq, 5; num=AttrVar.(1:5))
 add_part!(diag_structural_1, :E, src=1, tgt=2); add_part!(diag_structural_1, :E, src=2, tgt=3)
 add_part!(diag_structural_1, :E, src=3, tgt=4); add_part!(diag_structural_1, :E, src=4, tgt=5)
 for i in [1,3,5]; add_part!(diag_structural_1, :X, xsq=i); end
 
 # Pattern 3: anti-diagonal (3-5-7), fork/join: edges 1→2, 3→2, 3→4, 5→4
 diag_structural_2 = TTT()
-add_parts!(diag_structural_2, :Sq, 5)
+add_parts!(diag_structural_2, :SquareNum, 5)
+add_parts!(diag_structural_2, :Sq, 5; num=AttrVar.(1:5))
 add_part!(diag_structural_2, :E, src=1, tgt=2); add_part!(diag_structural_2, :E, src=3, tgt=2)
 add_part!(diag_structural_2, :E, src=3, tgt=4); add_part!(diag_structural_2, :E, src=5, tgt=4)
 for i in [1,3,5]; add_part!(diag_structural_2, :X, xsq=i); end
@@ -404,8 +411,8 @@ edge morphisms `src`, `tgt`, `E` unchanged:
 #| label: migration-functor
 F = Migrate(
     𝒞,
-    Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E),
-    Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt),
+    Dict(:X => :O, :O => :X, :Sq => :Sq, :E => :E, :SquareNum => :SquareNum),
+    Dict(:xsq => :osq, :osq => :xsq, :src => :src, :tgt => :tgt, :num => :num),
     SchTTT, TTT)
 ```
 
@@ -574,9 +581,9 @@ player_migrate(F, gs::GameSched, player_map::Dict{Symbol,Symbol}) -> GameSched
 
 It traverses all boxes recursively:
 
-- **`PlayerRuleApp`**: the rule and interface are migrated (`F(v.rule)`, `F(v.init)`) and
-  the player key is remapped.  The display name is preserved (cosmetic only — the
-  functional migration is in the rules themselves).
+- **`PlayerRuleApp`**: the rule and interface are migrated (`F(v.rule)`, `F(v.init)`),
+  the player key is remapped, and the display name is updated via the optional `name_map`
+  keyword argument.
 - **`GameSched`**: migrated recursively.
 - **Other boxes** (`RuleApp`, `merge_wires`): migrated via `F(box)`.
 
@@ -585,7 +592,7 @@ patterns throughout.
 
 ```{julia}
 #| label: o-sched
-O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O))
+O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O); name_map=Dict(:mark_x => :mark_o))
 ```
 
 ```{julia}
@@ -593,10 +600,9 @@ O_sched_gs = player_migrate(F, X_sched_gs, Dict(:X => :O))
 view_sched(O_sched_gs; names=N)
 ```
 
-The rendered diagram looks identical to X's schedule because `view_sched` uses the
-original display names.  The functional difference is entirely in the rules: the mark
-rule's right-hand side now adds an `O` piece, the `PlayerRuleApp` player tag has been
-updated from `:X` to `:O`.
+The `name_map` argument renames the `:mark_x` box to `:mark_o` in the migrated schedule.
+The functional difference is entirely in the rules: the mark rule's right-hand side now
+adds an `O` piece, and the `PlayerRuleApp` player tag has been updated from `:X` to `:O`.
 
 We also derive O's win-check sub-schedule via the same migration:
 
@@ -751,10 +757,9 @@ final_board = exps[end].next_state.world
 view_TTT(final_board)
 ```
 
-**Note:** DPO rewriting may permute square indices as a side-effect of the colimit
-construction.  Win detection uses structural patterns invariant to this permutation, so
-game logic and statistics are correct.  The transcript below shows the actual squares
-chosen by each player.
+**Note:** Each square carries a stable `:num` attribute (1–9) set at board creation and
+never modified by any rewrite rule.  The transcript below reads this attribute to display
+the square number chosen by each player.
 
 Each `Experience` in `exps` records which player moved, which square was chosen (via the
 match morphism), and whether the episode ended:
@@ -764,7 +769,8 @@ match morphism), and whether the episode ended:
 #| output: true
 for (i, exp) in enumerate(exps)
     if exp.action !== nothing
-        sq = collect(components(exp.action.match)[:Sq])[1]
+        sq_idx = collect(components(exp.action.match)[:Sq])[1]
+        sq     = subpart(exp.state.world, sq_idx, :num)
         println("Turn $i: $(exp.player) → square $sq  (done=$(exp.done), winner=$(exp.winner))")
     else
         println("Turn $i: $(exp.player) passed  (done=$(exp.done), winner=$(exp.winner))")
@@ -805,7 +811,7 @@ X goes first, so it has an advantage under purely random play — expect roughly
 | Player decisions | `PlayerRuleApp(:name, rule, I, :player; cat=𝒞)` |
 | Schedule construction | `mk_game_sched(trace_args, init_args, N, boxes, body)` |
 | Schedule visualisation | `view_sched(gs; names=N)` |
-| Migrate X→O schedule | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
+| Migrate X→O schedule | `player_migrate(F, X_sched_gs, Dict(:X => :O); name_map=Dict(:mark_x => :mark_o))` |
 | Game metadata | `Game(schema; players, initial, win_conditions=Dict(...))` |
 | Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
 | Inspect final state | `exps[end].next_state.world` → `view_TTT(...)` |

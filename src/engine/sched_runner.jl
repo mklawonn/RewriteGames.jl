@@ -280,7 +280,7 @@ end
 
 function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
                         turn::Ref{Int}, T_max, exps)
-    matches    = collect(get_matches(box.rule, world))
+    matches    = collect(get_matches(box.rule, world; cat=box.cat))
     actions    = [Action(box, m) for m in matches]
     state_pre  = GameState(world, turn[])
     agent      = agents[box.player]
@@ -342,7 +342,9 @@ end
 # ─── Native RuleApp execution ─────────────────────────────────────────────────
 
 function _exec_native_rule!(step, box, world, wires)
-    matches = collect(get_matches(box.rule, world))
+    _cat    = hasproperty(box, :cat) ? box.cat :
+              infer_acset_cat(codom(left(box.rule)))
+    matches = collect(get_matches(box.rule, world; cat=_cat))
     if !isempty(matches)
         new_world = rewrite_match(box.rule, first(matches))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
