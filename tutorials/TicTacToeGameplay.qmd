@@ -696,19 +696,15 @@ the stopping criterion.  Every `PlayerRuleApp` execution emits one `Experience`:
 ```julia
 struct Experience
     player        :: Symbol
-    state         :: EncodedState            # world before the move
+    state         :: GameState               # world before the move
     legal_actions :: Vector{Action}
     action        :: Union{Action, Nothing}  # nothing = no legal moves (tie)
-    next_state    :: EncodedState            # world after the move
+    next_state    :: GameState               # world after the move
     done          :: Bool
     winner        :: Union{Symbol, Nothing}
     info          :: Dict{Symbol, Any}
 end
 ```
-
-`EncodedState` bundles the raw `GameState` (the ACSet world and turn number) with
-pre-computed GNN-ready tensors.  Agents that need only the raw world access
-`state.raw.world` directly.
 
 ### Win conditions and game record
 
@@ -746,12 +742,12 @@ println("Winner         : ", isempty(exps) ? "N/A" : something(exps[end].winner,
 println("Done flag      : ", isempty(exps) ? false  : exps[end].done)
 ```
 
-After the episode, `exps[end].next_state.raw.world` holds the final board ACSet:
+After the episode, `exps[end].next_state.world` holds the final board ACSet:
 
 ```{julia}
 #| label: final-board
 #| output: true
-final_board = exps[end].next_state.raw.world
+final_board = exps[end].next_state.world
 view_TTT(final_board)
 ```
 
@@ -812,5 +808,5 @@ X goes first, so it has an advantage under purely random play — expect roughly
 | Migrate X→O schedule | `player_migrate(F, X_sched_gs, Dict(:X => :O))` |
 | Game metadata | `Game(schema; players, initial, win_conditions=Dict(...))` |
 | Run an episode | `run_game_sched!(sched, game, agents; T_max=20)` |
-| Inspect final state | `exps[end].next_state.raw.world` → `view_TTT(...)` |
+| Inspect final state | `exps[end].next_state.world` → `view_TTT(...)` |
 | Analyse results | `win_rate`, `episode_length`, `action_counts` |
