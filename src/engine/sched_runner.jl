@@ -95,6 +95,26 @@ function _flatten_call!(steps, call::Expr, out_names::Vector{Symbol}, tmp_ctr::R
     push!(steps, BoxStep(box_sym, in_names, out_names))
 end
 
+# ─── Cache helpers ────────────────────────────────────────────────────────────
+
+"""
+    _collect_player_apps(gs::GameSched) -> Dict{Symbol, PlayerRuleApp}
+
+Recursively collect all `PlayerRuleApp` boxes from a `GameSched` and its
+nested sub-schedules, keyed by `box.name`.
+"""
+function _collect_player_apps(gs::GameSched)
+    result = Dict{Symbol, PlayerRuleApp}()
+    for (_, v) in pairs(gs._all_boxes)
+        if v isa PlayerRuleApp
+            result[v.name] = v
+        elseif v isa GameSched
+            merge!(result, _collect_player_apps(v))
+        end
+    end
+    return result
+end
+
 # ─── Runtime executor ─────────────────────────────────────────────────────────
 
 """
@@ -131,8 +151,16 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     all_exps   = Experience[]
     turn       = Ref(1)
     n_trace    = length(gs._trace_names)
-    # Fallback terminal: never done, no winner (used when terminal === nothing)
     _terminal  = terminal === nothing ? (W) -> (false, nothing) : terminal
+
+    # Build incremental match caches for all PlayerRuleApp boxes that request one
+    cache_dict = Dict{Symbol, MatchCache}()
+    all_pra    = _collect_player_apps(gs)
+    for (name, pra) in all_pra
+        if pra.use_cache && pra.fast_match_fn === nothing
+            cache_dict[name] = MatchCache(pra.rule, pra.cat, initial_world)
+        end
+    end
 
     # Initialise wires for the first iteration
     wires = _init_wires(gs, initial_world, nothing)
@@ -141,7 +169,7 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
 
     for _ in 1:(T_max + 1)
         round_exps = Experience[]
-        _run_body!(gs._steps, wires, gs._all_boxes, agents, _terminal, turn, T_max, round_exps)
+        _run_body!(gs._steps, wires, gs._all_boxes, agents, _terminal, turn, T_max, round_exps, cache_dict)
         append!(all_exps, round_exps)
 
         # Extract trace and exit return values
@@ -226,18 +254,19 @@ end
 # ─── _run_body! ───────────────────────────────────────────────────────────────
 
 """
-    _run_body!(steps, wires, boxes, agents, terminal, turn, T_max, exps)
+    _run_body!(steps, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict)
 
 Execute a parsed body `steps` against the live wire state `wires`.
 
 Dispatches on the concrete box type stored in `boxes`:
 - `PlayerRuleApp` — enumerates matches, calls the agent, applies the chosen
-  rewrite, emits an `Experience`.
+  rewrite, emits an `Experience`, and updates all match caches.
 - `GameSched`     — recurses into the sub-schedule's body.
 - `RuleApp` (AR native) — tries one match; routes to success/failure output.
 - Anything else   — merge semantics: first active input wire → first output.
 """
-function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max, exps)
+function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max, exps,
+                    cache_dict::Dict{Symbol, MatchCache})
     for step in steps
         box = boxes[step.box]
 
@@ -257,10 +286,10 @@ function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max
         end
 
         if box isa PlayerRuleApp
-            _exec_player!(step, box, input_world, wires, agents, terminal, turn, T_max, exps)
+            _exec_player!(step, box, input_world, wires, agents, terminal, turn, T_max, exps, cache_dict)
 
         elseif box isa GameSched
-            _exec_subsched!(step, box, input_world, wires, boxes, agents, terminal, turn, T_max, exps)
+            _exec_subsched!(step, box, input_world, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict)
 
         elseif hasproperty(box, :rule)
             # Native RuleApp (or similar) — try-apply semantics, 2 output ports
@@ -279,16 +308,36 @@ end
 # ─── PlayerRuleApp execution ──────────────────────────────────────────────────
 
 function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
-                        turn::Ref{Int}, T_max, exps)
-    matches    = collect(get_matches(box.rule, world; cat=box.cat))
-    actions    = [Action(box, m) for m in matches]
-    state_pre  = GameState(world, turn[])
-    agent      = agents[box.player]
+                        turn::Ref{Int}, T_max, exps,
+                        cache_dict::Dict{Symbol, MatchCache})
+    # Determine match set: fast_match_fn → cache → full search
+    if box.fast_match_fn !== nothing
+        _cat   = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
+        raw    = box.fast_match_fn(box.rule, world, _cat)
+        actions = [Action(box, m) for m in raw]
+    elseif haskey(cache_dict, box.name)
+        actions = [Action(box, m) for m in cache_dict[box.name].matches]
+    else
+        raw    = collect(get_matches(box.rule, world; cat=box.cat))
+        actions = [Action(box, m) for m in raw]
+    end
+
+    state_pre = GameState(world, turn[])
+    agent     = agents[box.player]
 
     chosen = isempty(actions) ? nothing : select_action(agent, state_pre, actions)
 
     if chosen !== nothing
-        new_world  = rewrite_match(box.rule, chosen.match)
+        # Use rewrite_match_maps to get DPO output needed for cache update
+        _cat  = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
+        maps  = rewrite_match_maps(box.rule, chosen.match; cat=_cat)
+        new_world = codom(maps[:rh])
+
+        # Update ALL caches with the DPO maps from this move
+        for cache in values(cache_dict)
+            update_cache!(cache, maps)
+        end
+
         done, winner = terminal(new_world)
         turn[] += 1
         state_post = GameState(new_world, turn[])
@@ -314,7 +363,8 @@ end
 # ─── Nested GameSched execution ───────────────────────────────────────────────
 
 function _exec_subsched!(step, sub_gs::GameSched, world, wires, _boxes, agents,
-                          terminal, turn::Ref{Int}, T_max, exps)
+                          terminal, turn::Ref{Int}, T_max, exps,
+                          cache_dict::Dict{Symbol, MatchCache})
     # Build sub-wire state: map parent input wires positionally to sub init wires
     sub_wires = Dict{Symbol, Any}()
     for (i, name) in enumerate(sub_gs._init_names)
@@ -326,7 +376,7 @@ function _exec_subsched!(step, sub_gs::GameSched, world, wires, _boxes, agents,
 
     sub_exps = Experience[]
     _run_body!(sub_gs._steps, sub_wires, sub_gs._all_boxes,
-               agents, terminal, turn, T_max, sub_exps)
+               agents, terminal, turn, T_max, sub_exps, cache_dict)
     append!(exps, sub_exps)
 
     # Map sub-schedule return wires (by position) to parent output wires

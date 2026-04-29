@@ -10,26 +10,40 @@ The inner `RuleApp` is stored in `_inner` and forwarded to `mk_sched` /
 `view_sched`; `PlayerRuleApp` itself does not need to subtype `AgentBox`.
 
 # Fields
-- `name`:   Box name (Symbol), used for `view_sched` labels and `Action` display.
-- `rule`:   The AlgebraicRewriting `Rule` to apply.
-- `init`:   Interface ACSet (same role as `RuleApp`'s third argument).
-- `player`: Key into the `agents` dict passed to `run_game_sched!`.
-- `cat`:    AC-category (passed through to the inner `RuleApp`).
-- `_inner`: Inner `RuleApp` forwarded to `mk_sched` / `view_sched`.
+- `name`:          Box name (Symbol), used for labels and `Action` display.
+- `rule`:          The AlgebraicRewriting `Rule` to apply.
+- `init`:          Interface ACSet (same role as `RuleApp`'s third argument).
+- `player`:        Key into the `agents` dict passed to `run_game_sched!`.
+- `cat`:           AC-category (passed through to the inner `RuleApp`).
+- `_inner`:        Inner `RuleApp` forwarded to `mk_sched` / `view_sched`.
+- `fast_match_fn`: Optional user-provided function
+                   `(rule, world, cat) -> Vector{ACSetTransformation}`
+                   that replaces `get_matches` entirely.  Use this when
+                   domain knowledge allows a faster enumeration than the
+                   general homomorphism search (e.g. index lookups).
+                   When set, `use_cache` is ignored.
+- `use_cache`:     When `true`, `run_game_sched!` maintains a `MatchCache`
+                   for this box and updates it incrementally after every DPO
+                   rewrite, avoiding a full re-search each turn.
 """
 struct PlayerRuleApp
-    name   :: Symbol
-    rule   :: Any      # AbsRule
-    init   :: Any      # interface ACSet
-    player :: Symbol
-    cat    :: Any
-    _inner :: Any      # inner RuleApp
+    name          :: Symbol
+    rule          :: Any      # AbsRule
+    init          :: Any      # interface ACSet
+    player        :: Symbol
+    cat           :: Any
+    _inner        :: Any      # inner RuleApp
+    fast_match_fn :: Union{Function, Nothing}
+    use_cache     :: Bool
 end
 
-function PlayerRuleApp(name::Symbol, rule, init, player::Symbol; cat=nothing)
+function PlayerRuleApp(name::Symbol, rule, init, player::Symbol;
+                        cat=nothing,
+                        fast_match_fn::Union{Function,Nothing}=nothing,
+                        use_cache::Bool=false)
     inner = cat === nothing ? RuleApp(name, rule, init) :
                               RuleApp(name, rule, init; cat=cat)
-    PlayerRuleApp(name, rule, init, player, cat, inner)
+    PlayerRuleApp(name, rule, init, player, cat, inner, fast_match_fn, use_cache)
 end
 
 Base.show(io::IO, p::PlayerRuleApp) =
@@ -142,7 +156,9 @@ function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol};
             new_player = get(player_map, v.player, v.player)
             new_name   = get(name_map,   v.name,   v.name)
             PlayerRuleApp(new_name, F(v.rule), F(v.init), new_player;
-                          cat = v.cat === nothing ? nothing : v.cat)
+                          cat           = v.cat === nothing ? nothing : v.cat,
+                          fast_match_fn = v.fast_match_fn,
+                          use_cache     = v.use_cache)
         elseif v isa GameSched
             player_migrate(F, v, player_map; name_map)
         else

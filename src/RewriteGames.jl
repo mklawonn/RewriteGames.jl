@@ -61,6 +61,7 @@ include("agents/function_agent.jl")
 include("engine/matches.jl")
 include("engine/auto.jl")
 include("engine/driver.jl")
+include("engine/match_cache.jl")
 
 # ── Wiring-diagram schedule layer ────────────────────────────────────────────
 # (player_rule_app.jl defines _parse_body used by sched_runner.jl)
@@ -104,6 +105,10 @@ export
     mk_game_sched, player_migrate,
     view_sched,
     run_game_sched!,
+
+    # Incremental match cache
+    MatchCache,
+    update_cache!,
 
     # Encoding utilities
     elements_graph,
