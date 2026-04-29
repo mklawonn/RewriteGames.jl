@@ -1,0 +1,6 @@
+At some point we'll need to address the possibility of multiple moves. Also, how do we handle move budgets currently? Maybe we should just make that the responsibility of the rewrite rule; only match if the budget exists in the world ACSet.
+Are the hom searches efficient enough, and do they work on the diff only (like they should?)
+I still think the topology of the tictactoe board is not what we want. We should only need two rules to check for wins.
+Add the RL back into this tutorial.
+Fix the prose.
+Then adapt LOTR to this framework, potentially with D&D style rules.

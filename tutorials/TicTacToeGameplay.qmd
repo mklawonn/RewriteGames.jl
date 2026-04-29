@@ -8,6 +8,7 @@ format:
 jupyter: julia-1.11
 execute:
   output: false
+  cache: true
 ---
 
 ## Setup

@@ -1,0 +1,1516 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.5.54">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="author" content="RewriteGames.jl contributors">
+<meta name="dcterms.date" content="2026-04-21">
+
+<title>Tic-Tac-Toe with RewriteGames.jl</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="tictactoe_files/libs/clipboard/clipboard.min.js"></script>
+<script src="tictactoe_files/libs/quarto-html/quarto.js"></script>
+<script src="tictactoe_files/libs/quarto-html/popper.min.js"></script>
+<script src="tictactoe_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="tictactoe_files/libs/quarto-html/anchor.min.js"></script>
+<link href="tictactoe_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="tictactoe_files/libs/quarto-html/quarto-syntax-highlighting.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="tictactoe_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="tictactoe_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="tictactoe_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+<script src="tictactoe_files/libs/quarto-diagram/mermaid.min.js"></script>
+<script src="tictactoe_files/libs/quarto-diagram/mermaid-init.js"></script>
+<link href="tictactoe_files/libs/quarto-diagram/mermaid.css" rel="stylesheet">
+
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN") {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
+
+</head>
+
+<body>
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+  <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
+  <li><a href="#part-1-modelling-the-game-in-julia" id="toc-part-1-modelling-the-game-in-julia" class="nav-link" data-scroll-target="#part-1-modelling-the-game-in-julia">Part 1 — Modelling the Game in Julia</a>
+  <ul class="collapse">
+  <li><a href="#schema-design" id="toc-schema-design" class="nav-link" data-scroll-target="#schema-design">Schema design</a></li>
+  <li><a href="#game-schedule" id="toc-game-schedule" class="nav-link" data-scroll-target="#game-schedule">Game schedule</a></li>
+  <li><a href="#rewrite-rules" id="toc-rewrite-rules" class="nav-link" data-scroll-target="#rewrite-rules">Rewrite rules</a></li>
+  <li><a href="#terminal-predicate" id="toc-terminal-predicate" class="nav-link" data-scroll-target="#terminal-predicate">Terminal predicate</a></li>
+  <li><a href="#assembling-the-game-with-game" id="toc-assembling-the-game-with-game" class="nav-link" data-scroll-target="#assembling-the-game-with-game">Assembling the game with <code>@game</code></a></li>
+  <li><a href="#displaying-the-board" id="toc-displaying-the-board" class="nav-link" data-scroll-target="#displaying-the-board">Displaying the board</a></li>
+  <li><a href="#running-a-quick-random-episode" id="toc-running-a-quick-random-episode" class="nav-link" data-scroll-target="#running-a-quick-random-episode">Running a quick random episode</a></li>
+  </ul></li>
+  <li><a href="#part-2-collecting-training-data" id="toc-part-2-collecting-training-data" class="nav-link" data-scroll-target="#part-2-collecting-training-data">Part 2 — Collecting Training Data</a>
+  <ul class="collapse">
+  <li><a href="#feature-extraction" id="toc-feature-extraction" class="nav-link" data-scroll-target="#feature-extraction">Feature extraction</a></li>
+  <li><a href="#custom-experience-writer" id="toc-custom-experience-writer" class="nav-link" data-scroll-target="#custom-experience-writer">Custom experience writer</a></li>
+  </ul></li>
+  <li><a href="#part-3-training-a-policy-network-in-pytorch" id="toc-part-3-training-a-policy-network-in-pytorch" class="nav-link" data-scroll-target="#part-3-training-a-policy-network-in-pytorch">Part 3 — Training a Policy Network in PyTorch</a>
+  <ul class="collapse">
+  <li><a href="#data-loading" id="toc-data-loading" class="nav-link" data-scroll-target="#data-loading">Data loading</a></li>
+  <li><a href="#policy-network" id="toc-policy-network" class="nav-link" data-scroll-target="#policy-network">Policy network</a></li>
+  <li><a href="#reinforce-training-loop" id="toc-reinforce-training-loop" class="nav-link" data-scroll-target="#reinforce-training-loop">REINFORCE training loop</a></li>
+  <li><a href="#evaluating-the-trained-policy" id="toc-evaluating-the-trained-policy" class="nav-link" data-scroll-target="#evaluating-the-trained-policy">Evaluating the trained policy</a></li>
+  <li><a href="#exporting-to-onnx" id="toc-exporting-to-onnx" class="nav-link" data-scroll-target="#exporting-to-onnx">Exporting to ONNX</a></li>
+  </ul></li>
+  <li><a href="#part-4-loading-the-onnx-policy-in-julia" id="toc-part-4-loading-the-onnx-policy-in-julia" class="nav-link" data-scroll-target="#part-4-loading-the-onnx-policy-in-julia">Part 4 — Loading the ONNX Policy in Julia</a>
+  <ul class="collapse">
+  <li><a href="#encodedstate-what-agents-receive" id="toc-encodedstate-what-agents-receive" class="nav-link" data-scroll-target="#encodedstate-what-agents-receive"><code>EncodedState</code> — what agents receive</a></li>
+  <li><a href="#building-the-input-function" id="toc-building-the-input-function" class="nav-link" data-scroll-target="#building-the-input-function">Building the input function</a></li>
+  <li><a href="#a-square-aware-policy-wrapper" id="toc-a-square-aware-policy-wrapper" class="nav-link" data-scroll-target="#a-square-aware-policy-wrapper">A square-aware policy wrapper</a></li>
+  <li><a href="#benchmark-trained-x-vs-random-o" id="toc-benchmark-trained-x-vs-random-o" class="nav-link" data-scroll-target="#benchmark-trained-x-vs-random-o">Benchmark: trained X vs random O</a></li>
+  <li><a href="#watching-a-game" id="toc-watching-a-game" class="nav-link" data-scroll-target="#watching-a-game">Watching a game</a></li>
+  </ul></li>
+  <li><a href="#summary" id="toc-summary" class="nav-link" data-scroll-target="#summary">Summary</a>
+  <ul class="collapse">
+  <li><a href="#going-further" id="toc-going-further" class="nav-link" data-scroll-target="#going-further">Going further</a></li>
+  </ul></li>
+  </ul>
+</nav>
+</div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Tic-Tac-Toe with RewriteGames.jl</h1>
+<p class="subtitle lead">From algebraic rewriting rules to a trained ONNX policy</p>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    <div>
+    <div class="quarto-title-meta-heading">Author</div>
+    <div class="quarto-title-meta-contents">
+             <p>RewriteGames.jl contributors </p>
+          </div>
+  </div>
+    
+    <div>
+    <div class="quarto-title-meta-heading">Published</div>
+    <div class="quarto-title-meta-contents">
+      <p class="date">April 21, 2026</p>
+    </div>
+  </div>
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="overview" class="level2">
+<h2 class="anchored" data-anchor-id="overview">Overview</h2>
+<p><strong>RewriteGames.jl</strong> models game states as <em>attributed C-sets</em> (ACSets) and moves as <em>algebraic rewrite rules</em>. Both concepts come from applied category theory: ACSets are typed relational data structures whose schemas describe objects (tables) and morphisms (foreign keys), and rewrite rules describe how those structures transform under play.</p>
+<p>This choice of representation is deliberately general. Any game whose state can be described as a relational structure — boards, graphs, maps, unit networks — fits naturally into the framework. Because every game shares the same substrate, the engine’s bookkeeping (match enumeration, budget tracking, serialisation) applies uniformly across games without modification.</p>
+<p>Two longer-term goals shape the library’s design, though neither is fully realised yet:</p>
+<ul>
+<li><strong>Modular game composition.</strong> ACSets and rewrite rules support algebraic composition: schemas can be combined, rules can be glued together, and schedules can be nested. The infrastructure for this — <code>GameMigration</code>, compositional schedules — is in place; a library of reusable primitives is forthcoming.</li>
+<li><strong>Cross-game transfer.</strong> Because games share a common representation, a policy trained on one game could, in principle, transfer to another via <em>schema migration</em>. This is ongoing research; the current library provides the representational foundation but not yet the transfer machinery.</li>
+</ul>
+<p>In this tutorial we use <strong>tic-tac-toe</strong> to demonstrate every layer of the framework: simple enough to understand at a glance, rich enough to exercise the full workflow.</p>
+<ol type="1">
+<li>Model the board as an ACSet and the legal moves as algebraic rewrite rules.</li>
+<li>Run self-play episodes and serialise the experience stream to Arrow.</li>
+<li>Train a policy network in <strong>PyTorch</strong> with REINFORCE.</li>
+<li>Export the policy to <strong>ONNX</strong> and load it back into Julia as a drop-in agent.</li>
+</ol>
+<div id="setup" class="cell" data-execution_count="1">
+<div class="sourceCode cell-code" id="cb1"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Catlab</span>, <span class="bu">AlgebraicRewriting</span>, <span class="bu">RewriteGames</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Arrow</span>, <span class="bu">Tables</span>, <span class="bu">Random</span>, <span class="bu">Statistics</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="part-1-modelling-the-game-in-julia" class="level2">
+<h2 class="anchored" data-anchor-id="part-1-modelling-the-game-in-julia">Part 1 — Modelling the Game in Julia</h2>
+<section id="schema-design" class="level3">
+<h3 class="anchored" data-anchor-id="schema-design">Schema design</h3>
+<p>An ACSet (attributed C-set) is a relational data structure whose <em>schema</em> describes the tables and foreign keys. For tic-tac-toe we use three tables:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Table</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>Sq</code></td>
+<td>Board squares (always exactly 9)</td>
+</tr>
+<tr class="even">
+<td><code>X</code></td>
+<td>X pieces placed so far</td>
+</tr>
+<tr class="odd">
+<td><code>O</code></td>
+<td>O pieces placed so far</td>
+</tr>
+</tbody>
+</table>
+<p>Two foreign keys record which square each piece occupies:</p>
+<div id="schema" class="cell" data-execution_count="2">
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="pp">@present</span> <span class="fu">SchTTT</span>(FreeSchema) <span class="cf">begin</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    Sq<span class="op">::</span><span class="dt">Ob</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    X<span class="op">::</span><span class="dt">Ob</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    O<span class="op">::</span><span class="dt">Ob</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    xsq<span class="op">::</span><span class="dt">Hom</span>(X, Sq)</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    osq<span class="op">::</span><span class="dt">Hom</span>(O, Sq)</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="pp">@acset_type</span> <span class="fu">TicTacToe</span>(SchTTT, index<span class="op">=</span>[<span class="op">:</span>xsq, <span class="op">:</span>osq])</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div class="cell" data-layout-align="default">
+<div class="sourceCode cell-code" id="cb3"><pre class="sourceCode default code-with-copy"><code class="sourceCode default"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>graph LR</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    X["X  (pieces)"] --&gt;|xsq| Sq["Sq  (squares)"]</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    O["O  (pieces)"] --&gt;|osq| Sq</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output-display">
+<div id="fig-schema" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-schema-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div>
+
+</div>
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-schema-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Schema for tic-tac-toe: each piece points to the square it occupies.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<p>We index on both foreign keys so that <code>incident(board, sq_id, :xsq)</code> — “all X pieces on square <code>sq_id</code>” — is an O(1) lookup.</p>
+<p>Squares are numbered 1–9 in row-major order:</p>
+<pre><code> 1 │ 2 │ 3
+───┼───┼───
+ 4 │ 5 │ 6
+───┼───┼───
+ 7 │ 8 │ 9</code></pre>
+<p>The initial world has 9 squares and no pieces:</p>
+<div id="initial-board" class="cell" data-execution_count="3">
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">initial_board</span>()</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    b <span class="op">=</span> <span class="fu">TicTacToe</span>()</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="fu">add_parts!</span>(b, <span class="op">:</span>Sq, <span class="fl">9</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> b</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="game-schedule" class="level3">
+<h3 class="anchored" data-anchor-id="game-schedule">Game schedule</h3>
+<p>Every game in RewriteGames is driven by a <strong>schedule</strong> — a tree of <code>GameStep</code> nodes that describes one <em>round</em> of play. The driver executes the tree once per round and loops until the terminal predicate fires or <code>T_max</code> steps are reached.</p>
+<p>The schedule determines <em>who can act and when</em>. Each <code>PlayerStep</code> asks the named player’s agent to pick from their available rewrite rules and apply one. Because the schedule is explicit, turn order, conditional branching, and per-unit actions are all expressible without modifying the engine.</p>
+<p>For tic-tac-toe, one round is simply “X moves, then O moves”:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="fu">Seq</span>(<span class="fu">PlayerStep</span>(<span class="op">:</span>X), <span class="fu">PlayerStep</span>(<span class="op">:</span>O))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p><code>Seq</code> runs its children in order and <strong>short-circuits</strong> as soon as the game ends — if X wins mid-round, O never moves.</p>
+<p>The full set of node types is:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 40%">
+<col style="width: 60%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Type</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>PlayerStep(p)</code></td>
+<td>Player <code>p</code> selects and applies one action</td>
+</tr>
+<tr class="even">
+<td><code>AutoStep()</code></td>
+<td>Fire <code>game.auto</code> rules without player input</td>
+</tr>
+<tr class="odd">
+<td><code>Seq(steps...)</code></td>
+<td>Run children in order; short-circuit on terminal</td>
+</tr>
+<tr class="even">
+<td><code>Cond(pred, branches...)</code></td>
+<td>Branch on <code>pred(W) -&gt; Int</code> (1-based index)</td>
+</tr>
+<tr class="odd">
+<td><code>WhileStep(cond, body)</code></td>
+<td>Repeat <code>body</code> while <code>cond(W)</code> is true</td>
+</tr>
+<tr class="even">
+<td><code>ForEachStep(ob, body)</code></td>
+<td>Iterate over every part of type <code>ob</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each <code>Experience</code> record carries a <code>schedule_path</code> vector that identifies which nodes were active when it was emitted — useful for logging, replay, and attributing steps in multi-agent or hierarchical schedules.</p>
+<div class="callout callout-style-default callout-note callout-titled">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Note
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p><code>PlayerStep</code> does <strong>not</strong> automatically fire auto-rules; that is <code>AutoStep</code>’s responsibility. For games with probabilistic environment events, interleave <code>AutoStep()</code> nodes explicitly in the schedule. Tic-tac-toe has no auto-rules, so the two-node <code>Seq</code> above is the complete schedule.</p>
+</div>
+</div>
+</section>
+<section id="rewrite-rules" class="level3">
+<h3 class="anchored" data-anchor-id="rewrite-rules">Rewrite rules</h3>
+<p>In tic-tac-toe, each player’s only legal move is to place their piece on an <em>empty</em> square. We model this as an algebraic rewrite rule on the board ACSet: find an empty square (the <em>match</em>), then add a piece pointing at it (the <em>rewrite</em>).</p>
+<p>A rewrite rule in AlgebraicRewriting is a <strong>span</strong> <code>L ← I → R</code> of ACSet morphisms:</p>
+<ul>
+<li><strong>L</strong> (left): the pattern that must be found in the current world.</li>
+<li><strong>I</strong> (interface): the sub-pattern of L that is <em>preserved</em> by the rewrite.</li>
+<li><strong>R</strong> (right): what the matched region becomes after the rewrite.</li>
+</ul>
+<p>The engine finds all injective morphisms <code>m : L → G</code> from the pattern <code>L</code> into the current world <code>G</code> that satisfy every attached condition. For each valid match it applies the double-pushout (DPO) construction to produce the updated world <code>G'</code>.</p>
+<section id="pattern-and-interface" class="level4">
+<h4 class="anchored" data-anchor-id="pattern-and-interface">Pattern and interface</h4>
+<p>Both the “place X” and “place O” rules search for the same thing: one bare square. We build the shared pattern and interface once:</p>
+<div id="rules-pattern" class="cell" data-execution_count="4">
+<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Shared pattern and interface: one bare square</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>I_sq <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span> <span class="cf">end</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>L_sq <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span> <span class="cf">end</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>l_sq <span class="op">=</span> <span class="fu">ACSetTransformation</span>(I_sq, L_sq; Sq<span class="op">=</span>[<span class="fl">1</span>])   <span class="co"># identity on Sq</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div class="cell" data-layout-align="default">
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode default code-with-copy"><code class="sourceCode default"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>graph LR</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    subgraph L["L — find a square"]</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>        LSq["Sq"]</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    subgraph I["I — keep the square"]</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>        ISq["Sq"]</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>    subgraph R["R — square + new piece"]</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>        RSq["Sq"]</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>        RX["X  (or O)"]</span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>        RX --&gt;|"xsq"| RSq</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>    ISq -.-&gt;|l| LSq</span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>    ISq -.-&gt;|r| RSq</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output-display">
+<div id="fig-rule-span" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-rule-span-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div>
+
+</div>
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-rule-span-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;2: Span L ← I → R for placing a piece. L and I are a single bare square; R adds a piece pointing at that square.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<p>This span alone would match <em>every</em> square on the board, including occupied ones. We need to restrict matches to squares that are genuinely empty.</p>
+</section>
+<section id="negative-application-conditions" class="level4">
+<h4 class="anchored" data-anchor-id="negative-application-conditions">Negative Application Conditions</h4>
+<p>A <strong>Negative Application Condition</strong> (NAC) is a morphism <code>f : L → N</code> that forbids matches. Formally, a match <code>m : L → G</code> is only legal if there is <em>no</em> morphism <code>n : N → G</code> satisfying <code>n ∘ f = m</code>. In plain English: the engine checks whether the larger pattern <code>N</code> can be embedded in the world consistently with the proposed match. If it can, the match is rejected.</p>
+<p>For tic-tac-toe, <code>N</code> is “a square with a piece already on it”. We build one NAC forbidding X-occupied squares and one forbidding O-occupied squares:</p>
+<div id="rules-nac" class="cell" data-execution_count="5">
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Forbidden patterns: a square that already holds a piece</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>N_x_occ <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span>; X<span class="op">=</span><span class="fl">1</span>; xsq<span class="op">=</span>[<span class="fl">1</span>] <span class="cf">end</span>  <span class="co"># square with an X</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>N_o_occ <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span>; O<span class="op">=</span><span class="fl">1</span>; osq<span class="op">=</span>[<span class="fl">1</span>] <span class="cf">end</span>  <span class="co"># square with an O</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a><span class="co"># Morphisms send the bare L_sq square to the square inside each forbidden pattern</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>nac_f_x <span class="op">=</span> <span class="fu">ACSetTransformation</span>(L_sq, N_x_occ; Sq<span class="op">=</span>[<span class="fl">1</span>])</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>nac_f_o <span class="op">=</span> <span class="fu">ACSetTransformation</span>(L_sq, N_o_occ; Sq<span class="op">=</span>[<span class="fl">1</span>])</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>nac_no_x <span class="op">=</span> <span class="fu">NAC</span>(nac_f_x)   <span class="co"># reject if matched square already holds an X</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>nac_no_o <span class="op">=</span> <span class="fu">NAC</span>(nac_f_o)   <span class="co"># reject if matched square already holds an O</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div class="cell" data-layout-align="default">
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode default code-with-copy"><code class="sourceCode default"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>graph LR</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    subgraph L["L — candidate square"]</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>        LSq["Sq"]</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    subgraph N["N — forbidden: square with X"]</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>        NSq["Sq"]</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>        NX["X"]</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>        NX --&gt;|xsq| NSq</span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>    end</span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>    LSq -.-&gt;|f| NSq</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output-display">
+<div id="fig-nac" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-nac-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div>
+
+</div>
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-nac-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;3: NAC for an X-occupied square. If the candidate match m : L → G extends through f to a morphism n : N → G, the match is rejected.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<p>Attaching both <code>nac_no_x</code> and <code>nac_no_o</code> to a rule means <code>get_matches</code> automatically returns only squares that are empty in both respects. The game engine never sees an illegal move candidate; no post-hoc filtering is needed.</p>
+</section>
+<section id="completing-the-rules" class="level4">
+<h4 class="anchored" data-anchor-id="completing-the-rules">Completing the rules</h4>
+<p>With the shared interface and NACs in hand, building the two rules is straightforward:</p>
+<div id="rules-complete" class="cell" data-execution_count="6">
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Place X on the matched square</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>R_x  <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span>; X<span class="op">=</span><span class="fl">1</span>; xsq<span class="op">=</span>[<span class="fl">1</span>] <span class="cf">end</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>r_x  <span class="op">=</span> <span class="fu">ACSetTransformation</span>(I_sq, R_x; Sq<span class="op">=</span>[<span class="fl">1</span>])</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>rule_place_x <span class="op">=</span> <span class="fu">Rule</span>(l_sq, r_x; ac<span class="op">=</span>[nac_no_x, nac_no_o])</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Place O on the matched square</span></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>R_o  <span class="op">=</span> <span class="pp">@acset</span> TicTacToe <span class="cf">begin</span> Sq<span class="op">=</span><span class="fl">1</span>; O<span class="op">=</span><span class="fl">1</span>; osq<span class="op">=</span>[<span class="fl">1</span>] <span class="cf">end</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>r_o  <span class="op">=</span> <span class="fu">ACSetTransformation</span>(I_sq, R_o; Sq<span class="op">=</span>[<span class="fl">1</span>])</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>rule_place_o <span class="op">=</span> <span class="fu">Rule</span>(l_sq, r_o; ac<span class="op">=</span>[nac_no_x, nac_no_o])</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>Both rules forbid playing on a square that holds <em>either</em> piece — only a square that is empty in both respects produces a valid match.</p>
+</section>
+</section>
+<section id="terminal-predicate" class="level3">
+<h3 class="anchored" data-anchor-id="terminal-predicate">Terminal predicate</h3>
+<p>We check the eight winning lines (3 rows, 3 columns, 2 diagonals):</p>
+<div id="terminal" class="cell" data-execution_count="7">
+<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> WINS <span class="op">=</span> [</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    [<span class="fl">1</span>,<span class="fl">2</span>,<span class="fl">3</span>], [<span class="fl">4</span>,<span class="fl">5</span>,<span class="fl">6</span>], [<span class="fl">7</span>,<span class="fl">8</span>,<span class="fl">9</span>],    <span class="co"># rows</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    [<span class="fl">1</span>,<span class="fl">4</span>,<span class="fl">7</span>], [<span class="fl">2</span>,<span class="fl">5</span>,<span class="fl">8</span>], [<span class="fl">3</span>,<span class="fl">6</span>,<span class="fl">9</span>],    <span class="co"># columns</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>    [<span class="fl">1</span>,<span class="fl">5</span>,<span class="fl">9</span>], [<span class="fl">3</span>,<span class="fl">5</span>,<span class="fl">7</span>],             <span class="co"># diagonals</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>]</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">check_terminal</span>(board)</span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>    xs <span class="op">=</span> <span class="fu">Set</span>(<span class="fu">subpart</span>(board, <span class="fu">parts</span>(board, <span class="op">:</span>X), <span class="op">:</span>xsq))</span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>    os <span class="op">=</span> <span class="fu">Set</span>(<span class="fu">subpart</span>(board, <span class="fu">parts</span>(board, <span class="op">:</span>O), <span class="op">:</span>osq))</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> line <span class="kw">in</span> WINS</span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a>        <span class="fu">all</span>(s <span class="op">∈</span> xs <span class="cf">for</span> s <span class="kw">in</span> line) <span class="op">&amp;&amp;</span> <span class="cf">return</span> (<span class="cn">true</span>, <span class="op">:</span>X)</span>
+<span id="cb12-13"><a href="#cb12-13" aria-hidden="true" tabindex="-1"></a>        <span class="fu">all</span>(s <span class="op">∈</span> os <span class="cf">for</span> s <span class="kw">in</span> line) <span class="op">&amp;&amp;</span> <span class="cf">return</span> (<span class="cn">true</span>, <span class="op">:</span>O)</span>
+<span id="cb12-14"><a href="#cb12-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb12-15"><a href="#cb12-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-16"><a href="#cb12-16" aria-hidden="true" tabindex="-1"></a>    <span class="fu">nparts</span>(board, <span class="op">:</span>X) <span class="op">+</span> <span class="fu">nparts</span>(board, <span class="op">:</span>O) <span class="op">==</span> <span class="fl">9</span> <span class="op">&amp;&amp;</span> <span class="cf">return</span> (<span class="cn">true</span>, <span class="cn">nothing</span>)</span>
+<span id="cb12-17"><a href="#cb12-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> (<span class="cn">false</span>, <span class="cn">nothing</span>)</span>
+<span id="cb12-18"><a href="#cb12-18" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="assembling-the-game-with-game" class="level3">
+<h3 class="anchored" data-anchor-id="assembling-the-game-with-game">Assembling the game with <code>@game</code></h3>
+<p>RewriteGames exports a <code>@game</code> DSL macro that builds a <code>Game</code> from a concise block. Keyword clauses map to the <code>Game(...)</code> constructor arguments:</p>
+<div id="game-macro" class="cell" data-execution_count="8">
+<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># No post_filter needed — the NACs embedded in the rules already ensure that</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="co"># get_matches only returns empty-square matches.</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co">#</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># RuleEntry also accepts an optional `budget=N` keyword that caps how many</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="co"># times the rule may fire per episode.  Tic-tac-toe needs no cap (each player</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a><span class="co"># can place at most 5 pieces naturally), but it is useful for more complex</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># games where rule-use limits encode game semantics.</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>entry_x <span class="op">=</span> <span class="fu">RuleEntry</span>(rule_place_x; name<span class="op">=:</span>place)</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>entry_o <span class="op">=</span> <span class="fu">RuleEntry</span>(rule_place_o; name<span class="op">=:</span>place)</span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>game <span class="op">=</span> <span class="pp">@game</span> <span class="cn">nothing</span> <span class="cf">begin</span></span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>    players<span class="op">:</span>  X, O</span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>    X<span class="op">:</span>        [entry_x]</span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>    O<span class="op">:</span>        [entry_o]</span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>    terminal<span class="op">:</span> check_terminal</span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>    initial<span class="op">:</span>  initial_board</span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>    schedule<span class="op">:</span> <span class="fu">Seq</span>(<span class="fu">PlayerStep</span>(<span class="op">:</span>X), <span class="fu">PlayerStep</span>(<span class="op">:</span>O))</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div class="callout callout-style-default callout-note callout-titled">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Note
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p><code>initial: initial_board</code> passes the function object itself (no parentheses). The engine calls <code>game.initial()</code> at the start of each episode.</p>
+<p><code>schedule: Seq(PlayerStep(:X), PlayerStep(:O))</code> makes the round structure explicit. Without a <code>schedule:</code> clause the engine auto-generates <code>Seq(PlayerStep(p), AutoStep())</code> for each player in order, which is equivalent for this game — but supplying the schedule explicitly is clearer and is the recommended style.</p>
+</div>
+</div>
+</section>
+<section id="displaying-the-board" class="level3">
+<h3 class="anchored" data-anchor-id="displaying-the-board">Displaying the board</h3>
+<p>A quick ASCII helper returns the board as a string:</p>
+<div id="display" class="cell" data-execution_count="9">
+<div class="sourceCode cell-code" id="cb14"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">show_board</span>(board) <span class="op">::</span><span class="dt"> String</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    marks <span class="op">=</span> <span class="fu">fill</span>(<span class="ch">' '</span>, <span class="fl">3</span>, <span class="fl">3</span>)</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> xp <span class="kw">in</span> <span class="fu">parts</span>(board, <span class="op">:</span>X)</span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>        sq <span class="op">=</span> <span class="fu">subpart</span>(board, xp, <span class="op">:</span>xsq)</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>        marks[(sq<span class="op">-</span><span class="fl">1</span>)<span class="op">÷</span><span class="fl">3</span><span class="op">+</span><span class="fl">1</span>, (sq<span class="op">-</span><span class="fl">1</span>)<span class="op">%</span><span class="fl">3</span><span class="op">+</span><span class="fl">1</span>] <span class="op">=</span> <span class="ch">'X'</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> op <span class="kw">in</span> <span class="fu">parts</span>(board, <span class="op">:</span>O)</span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a>        sq <span class="op">=</span> <span class="fu">subpart</span>(board, op, <span class="op">:</span>osq)</span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true" tabindex="-1"></a>        marks[(sq<span class="op">-</span><span class="fl">1</span>)<span class="op">÷</span><span class="fl">3</span><span class="op">+</span><span class="fl">1</span>, (sq<span class="op">-</span><span class="fl">1</span>)<span class="op">%</span><span class="fl">3</span><span class="op">+</span><span class="fl">1</span>] <span class="op">=</span> <span class="ch">'O'</span></span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true" tabindex="-1"></a>    sep <span class="op">=</span> <span class="st">"───┼───┼───"</span></span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true" tabindex="-1"></a>    rows <span class="op">=</span> <span class="dt">String</span>[]</span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (i, row) <span class="kw">in</span> <span class="fu">enumerate</span>(<span class="fu">eachrow</span>(marks))</span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(rows, <span class="st">" "</span> <span class="op">*</span> <span class="fu">join</span>(<span class="fu">string</span>.(row), <span class="st">" │ "</span>))</span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a>        i <span class="op">&lt;</span> <span class="fl">3</span> <span class="op">&amp;&amp;</span> <span class="fu">push!</span>(rows, sep)</span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb14-17"><a href="#cb14-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">join</span>(rows, <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span>
+<span id="cb14-18"><a href="#cb14-18" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="running-a-quick-random-episode" class="level3">
+<h3 class="anchored" data-anchor-id="running-a-quick-random-episode">Running a quick random episode</h3>
+<div id="random-episode" class="cell" data-execution_count="10">
+<div class="sourceCode cell-code" id="cb15"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">42</span>)</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>random_agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">:</span>X <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((state, actions) <span class="op">-&gt;</span> <span class="fu">rand</span>(actions)),</span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">:</span>O <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((state, actions) <span class="op">-&gt;</span> <span class="fu">rand</span>(actions)),</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a>exps <span class="op">=</span> <span class="fu">run_game</span>(game, random_agents; T_max<span class="op">=</span><span class="fl">20</span>)</span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-10"><a href="#cb15-10" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Episode: </span><span class="sc">$</span>(<span class="fu">length</span>(exps))<span class="st"> steps"</span>)</span>
+<span id="cb15-11"><a href="#cb15-11" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Winner:  </span><span class="sc">$</span>(exps[<span class="kw">end</span>].winner)<span class="st">"</span>)</span>
+<span id="cb15-12"><a href="#cb15-12" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>()</span>
+<span id="cb15-13"><a href="#cb15-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-14"><a href="#cb15-14" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(<span class="fu">show_board</span>(exps[<span class="kw">end</span>].next_state.raw.world))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>You should see output like:</p>
+<pre><code>Episode: 9 steps
+Winner:  X
+
+ X │ O │ X
+───┼───┼───
+ O │ X │ O
+───┼───┼───
+   │ O │ X</code></pre>
+<p>We can also compute quick statistics with the analysis helpers:</p>
+<div id="quick-stats" class="cell" data-execution_count="11">
+<div class="sourceCode cell-code" id="cb17"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Pool many episodes</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>all_episodes <span class="op">=</span> [<span class="fu">run_game</span>(game, random_agents; T_max<span class="op">=</span><span class="fl">20</span>) for _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">200</span>]</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>all_exps     <span class="op">=</span> <span class="fu">reduce</span>(vcat, all_episodes)</span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"X win rate:          "</span>, <span class="fu">round</span>(<span class="fu">win_rate</span>(all_exps, <span class="op">:</span>X); digits<span class="op">=</span><span class="fl">3</span>))</span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"O win rate:          "</span>, <span class="fu">round</span>(<span class="fu">win_rate</span>(all_exps, <span class="op">:</span>O); digits<span class="op">=</span><span class="fl">3</span>))</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Mean episode length: "</span>, <span class="fu">round</span>(<span class="fu">mean</span>(episode_length, all_episodes); digits<span class="op">=</span><span class="fl">1</span>))</span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Action counts:       "</span>, <span class="fu">action_counts</span>(all_exps))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+</section>
+<section id="part-2-collecting-training-data" class="level2">
+<h2 class="anchored" data-anchor-id="part-2-collecting-training-data">Part 2 — Collecting Training Data</h2>
+<p>Before training in Python we need to serialise the board state and chosen action for every step.</p>
+<div class="callout callout-style-default callout-note callout-titled">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Built-in vs custom serialisation
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>RewriteGames exports <code>write_experiences</code> / <code>read_experiences</code> (backed by Arrow) that save the <em>generic</em> ACSet encoding from every <code>Experience</code> — <code>node_features</code>, <code>edge_index</code>, rule counters, and the chosen rule name. This is convenient for graph-neural-network policies that consume the raw ACSet graph.</p>
+<p>Here we write a <strong>game-specific</strong> writer instead, because our policy network expects a fixed 27-element one-hot feature vector (9 squares × 3 states) that is cheaper and more interpretable than the generic encoding. Whenever your policy can work with the generic ACSet encoding, prefer <code>write_experiences</code>.</p>
+</div>
+</div>
+<section id="feature-extraction" class="level3">
+<h3 class="anchored" data-anchor-id="feature-extraction">Feature extraction</h3>
+<p>We represent each board as a 9 × 3 one-hot matrix (rows = squares, columns = [empty, X, O]) and flatten it to a 27-element <code>Float32</code> vector:</p>
+<div id="features" class="cell" data-execution_count="12">
+<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">board_features</span>(board) <span class="op">::</span><span class="dt"> Vector{Float32}</span></span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>    feats <span class="op">=</span> <span class="fu">zeros</span>(<span class="dt">Float32</span>, <span class="fl">9</span>, <span class="fl">3</span>)</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>    xs <span class="op">=</span> <span class="fu">Set</span>(<span class="fu">subpart</span>(board, <span class="fu">parts</span>(board, <span class="op">:</span>X), <span class="op">:</span>xsq))</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>    os <span class="op">=</span> <span class="fu">Set</span>(<span class="fu">subpart</span>(board, <span class="fu">parts</span>(board, <span class="op">:</span>O), <span class="op">:</span>osq))</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> sq <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">9</span></span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> sq <span class="op">∈</span> xs</span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a>            feats[sq, <span class="fl">2</span>] <span class="op">=</span> <span class="fl">1f0</span></span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">elseif</span> sq <span class="op">∈</span> os</span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a>            feats[sq, <span class="fl">3</span>] <span class="op">=</span> <span class="fl">1f0</span></span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">else</span></span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a>            feats[sq, <span class="fl">1</span>] <span class="op">=</span> <span class="fl">1f0</span></span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">end</span></span>
+<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">vec</span>(feats)</span>
+<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="custom-experience-writer" class="level3">
+<h3 class="anchored" data-anchor-id="custom-experience-writer">Custom experience writer</h3>
+<p>We collect <code>(features, chosen_square, player, outcome)</code> tuples across many episodes and write them to an Arrow file:</p>
+<div id="data-collection" class="cell" data-execution_count="13">
+<div class="sourceCode cell-code" id="cb19"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> StepRecord</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>    features       <span class="op">::</span><span class="dt"> Vector{Float32}  </span><span class="co"># 27-element board encoding</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>    chosen_square  <span class="op">::</span><span class="dt"> Int32            </span><span class="co"># 1–9; 0 means the player passed</span></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>    player         <span class="op">::</span><span class="dt"> String           </span><span class="co"># "X" or "O"</span></span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>    outcome        <span class="op">::</span><span class="dt"> Float32          </span><span class="co"># +1 win, -1 loss, 0 draw/timeout</span></span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">collect_episodes</span>(game, agents; n_episodes<span class="op">=</span><span class="fl">5_000</span>, T_max<span class="op">=</span><span class="fl">20</span>)</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>    records <span class="op">=</span> StepRecord[]</span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_episodes</span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a>        episode <span class="op">=</span> <span class="fu">run_game</span>(game, agents; T_max<span class="op">=</span>T_max)</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a>        final   <span class="op">=</span> episode[<span class="kw">end</span>]</span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>        winner  <span class="op">=</span> final.winner       <span class="co"># :X, :O, or nothing</span></span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> exp <span class="kw">in</span> episode</span>
+<span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a>            exp.action <span class="op">===</span> <span class="cn">nothing</span> <span class="op">&amp;&amp;</span> <span class="cf">continue</span>   <span class="co"># skip passes</span></span>
+<span id="cb19-18"><a href="#cb19-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-19"><a href="#cb19-19" aria-hidden="true" tabindex="-1"></a>            sq    <span class="op">=</span> <span class="fu">Int32</span>(<span class="fu">components</span>(exp.action.match)[<span class="op">:</span>Sq][<span class="fl">1</span>])</span>
+<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a>            board <span class="op">=</span> exp.state.raw.world</span>
+<span id="cb19-21"><a href="#cb19-21" aria-hidden="true" tabindex="-1"></a>            feats <span class="op">=</span> <span class="fu">board_features</span>(board)</span>
+<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>            out   <span class="op">=</span> <span class="cf">if</span> winner <span class="op">===</span> exp.player; <span class="fl">1f0</span></span>
+<span id="cb19-23"><a href="#cb19-23" aria-hidden="true" tabindex="-1"></a>                    <span class="cf">elseif</span> winner <span class="op">===</span> <span class="cn">nothing</span>;  <span class="fl">0f0</span></span>
+<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>                    <span class="cf">else</span>                       <span class="op">-</span><span class="fl">1f0</span> <span class="cf">end</span></span>
+<span id="cb19-25"><a href="#cb19-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-26"><a href="#cb19-26" aria-hidden="true" tabindex="-1"></a>            <span class="fu">push!</span>(records, <span class="fu">StepRecord</span>(feats, sq, <span class="fu">string</span>(exp.player), out))</span>
+<span id="cb19-27"><a href="#cb19-27" aria-hidden="true" tabindex="-1"></a>        <span class="cf">end</span></span>
+<span id="cb19-28"><a href="#cb19-28" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb19-29"><a href="#cb19-29" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> records</span>
+<span id="cb19-30"><a href="#cb19-30" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>Run the collector with X playing randomly and O playing randomly, then save:</p>
+<div id="save-data" class="cell" data-execution_count="14">
+<div class="sourceCode cell-code" id="cb20"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">0</span>)</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>records <span class="op">=</span> <span class="fu">collect_episodes</span>(game, random_agents; n_episodes<span class="op">=</span><span class="fl">10_000</span>)</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Flatten into columnar Arrow format</span></span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>Arrow.<span class="fu">write</span>(</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a>    <span class="st">"ttt_training.arrow"</span>,</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>    (</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true" tabindex="-1"></a>        features      <span class="op">=</span> [r.features      for r <span class="kw">in</span> records],</span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true" tabindex="-1"></a>        chosen_square <span class="op">=</span> [r.chosen_square for r <span class="kw">in</span> records],</span>
+<span id="cb20-10"><a href="#cb20-10" aria-hidden="true" tabindex="-1"></a>        player        <span class="op">=</span> [r.player        for r <span class="kw">in</span> records],</span>
+<span id="cb20-11"><a href="#cb20-11" aria-hidden="true" tabindex="-1"></a>        outcome       <span class="op">=</span> [r.outcome       for r <span class="kw">in</span> records],</span>
+<span id="cb20-12"><a href="#cb20-12" aria-hidden="true" tabindex="-1"></a>    ),</span>
+<span id="cb20-13"><a href="#cb20-13" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb20-14"><a href="#cb20-14" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Saved </span><span class="sc">$</span>(<span class="fu">length</span>(records))<span class="st"> step records to ttt_training.arrow"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+</section>
+<section id="part-3-training-a-policy-network-in-pytorch" class="level2">
+<h2 class="anchored" data-anchor-id="part-3-training-a-policy-network-in-pytorch">Part 3 — Training a Policy Network in PyTorch</h2>
+<section id="data-loading" class="level3">
+<h3 class="anchored" data-anchor-id="data-loading">Data loading</h3>
+<pre class="{python}"><code>#| label: py-imports
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Categorical
+import pyarrow as pa
+import pyarrow.ipc as ipc</code></pre>
+<pre class="{python}"><code>#| label: py-load-data
+def load_training_data(path: str):
+    """Load the Arrow file written by Julia."""
+    with ipc.open_file(path) as reader:
+        tbl = reader.read_all()
+
+    features = np.stack(tbl["features"].to_pylist()).astype(np.float32)  # (N, 27)
+    squares  = np.array(tbl["chosen_square"].to_pylist(), dtype=np.int64) - 1  # 0-indexed
+    players  = np.array(tbl["player"].to_pylist())
+    outcomes = np.array(tbl["outcome"].to_pylist(), dtype=np.float32)
+
+    return features, squares, players, outcomes
+
+features, squares, players, outcomes = load_training_data("ttt_training.arrow")
+
+print(f"Loaded {len(features)} step records")
+print(f"Feature shape: {features.shape}")
+print(f"X win rate:  {outcomes[players == 'X'].mean():.3f}")
+print(f"O win rate:  {outcomes[players == 'O'].mean():.3f}")</code></pre>
+</section>
+<section id="policy-network" class="level3">
+<h3 class="anchored" data-anchor-id="policy-network">Policy network</h3>
+<p>The network takes the 27-dimensional board encoding and outputs a logit for each of the 9 squares. The agent will <em>mask</em> the illegal squares (already occupied) at inference time — the network never needs to worry about them during training either, since the data only contains legal moves.</p>
+<pre class="{python}"><code>#| label: py-network
+class TicTacToeNet(nn.Module):
+    """MLP policy: board features (27) → square logits (9)."""
+
+    def __init__(self, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(27, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 9),
+        )
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # x: (batch, 27)  →  logits: (batch, 9)
+        return self.net(x)</code></pre>
+</section>
+<section id="reinforce-training-loop" class="level3">
+<h3 class="anchored" data-anchor-id="reinforce-training-loop">REINFORCE training loop</h3>
+<p>We use the Monte Carlo policy-gradient (REINFORCE) algorithm. Every recorded step carries its final outcome as the return signal, so the update is simply:</p>
+<p><span class="math display">\[\nabla_\theta J \approx \sum_t G_t \, \nabla_\theta \log \pi_\theta(a_t \mid s_t)\]</span></p>
+<p>where <span class="math inline">\(G_t \in \{-1, 0, +1\}\)</span> is the game result for the player who moved at step <span class="math inline">\(t\)</span>.</p>
+<pre class="{python}"><code>#| label: py-train
+def train(
+    model: nn.Module,
+    features: np.ndarray,
+    squares: np.ndarray,
+    outcomes: np.ndarray,
+    *,
+    epochs: int = 80,
+    batch_size: int = 512,
+    lr: float = 3e-4,
+    baseline: bool = True,          # subtract a running mean baseline
+):
+    optimiser = torch.optim.Adam(model.parameters(), lr=lr)
+    n = len(features)
+    running_baseline = 0.0
+
+    for epoch in range(epochs):
+        idx = np.random.permutation(n)
+        epoch_loss = 0.0
+        batches    = 0
+
+        for start in range(0, n, batch_size):
+            batch_idx = idx[start : start + batch_size]
+            x   = torch.from_numpy(features[batch_idx])
+            a   = torch.from_numpy(squares [batch_idx])
+            G   = torch.from_numpy(outcomes[batch_idx])
+
+            if baseline:
+                with torch.no_grad():
+                    running_baseline = 0.9 * running_baseline + 0.1 * G.mean().item()
+                G = G - running_baseline
+
+            logits = model(x)                    # (batch, 9)
+            log_prob = F.log_softmax(logits, dim=-1)
+            chosen_lp = log_prob[torch.arange(len(a)), a]  # log π(aₜ | sₜ)
+
+            loss = -(chosen_lp * G).mean()       # negative for gradient ascent
+
+            optimiser.zero_grad()
+            loss.backward()
+            optimiser.step()
+
+            epoch_loss += loss.item()
+            batches    += 1
+
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1:3d}  loss={epoch_loss/batches:.4f}")
+
+    return model
+
+
+torch.manual_seed(0)
+model = TicTacToeNet(hidden=128)
+model = train(model, features, squares, outcomes, epochs=80)</code></pre>
+</section>
+<section id="evaluating-the-trained-policy" class="level3">
+<h3 class="anchored" data-anchor-id="evaluating-the-trained-policy">Evaluating the trained policy</h3>
+<p>We run a quick greedy evaluation against a random opponent, applying the illegality mask:</p>
+<pre class="{python}"><code>#| label: py-eval
+def greedy_move(model, features_np, legal_mask):
+    """Return the argmax-policy square index (0-indexed), masking illegal squares."""
+    x = torch.from_numpy(features_np[None, :])
+    with torch.no_grad():
+        logits = model(x).squeeze(0)            # (9,)
+    logits[~legal_mask] = -1e9                  # mask occupied squares
+    return int(logits.argmax())
+
+
+def evaluate(model, n_games: int = 500, seed: int = 1):
+    """
+    Play `n_games` of X (policy) vs O (random).
+    Returns (x_wins, draws, o_wins).
+    """
+    rng = np.random.default_rng(seed)
+    x_wins = draws = o_wins = 0
+
+    for _ in range(n_games):
+        board = np.zeros(9, dtype=np.int8)   # 0=empty, 1=X, 2=O
+
+        for turn in range(9):
+            player = 1 if turn % 2 == 0 else 2   # X=1, O=2 moves first
+            empty  = np.where(board == 0)[0]
+
+            if player == 1:
+                # one-hot features: col0=empty, col1=X, col2=O
+                feats = np.zeros(27, dtype=np.float32)
+                for sq in range(9):
+                    feats[sq * 3 + board[sq]] = 1.0
+                mask = torch.zeros(9, dtype=torch.bool)
+                mask[empty] = True
+                sq = greedy_move(model, feats, mask)
+            else:
+                sq = int(rng.choice(empty))
+
+            board[sq] = player
+
+            # Check win
+            wins = [(0,1,2),(3,4,5),(6,7,8),
+                    (0,3,6),(1,4,7),(2,5,8),
+                    (0,4,8),(2,4,6)]
+            for a,b,c in wins:
+                if board[a] == board[b] == board[c] == player:
+                    if player == 1: x_wins += 1
+                    else:           o_wins += 1
+                    board = None   # signal game over
+                    break
+            if board is None:
+                break
+        else:
+            draws += 1
+
+    return x_wins, draws, o_wins
+
+
+x_wins, draws, o_wins = evaluate(model, n_games=500)
+print(f"X (policy) wins: {x_wins/5:.1f}%  "
+      f"Draws: {draws/5:.1f}%  "
+      f"O (random) wins: {o_wins/5:.1f}%")</code></pre>
+</section>
+<section id="exporting-to-onnx" class="level3">
+<h3 class="anchored" data-anchor-id="exporting-to-onnx">Exporting to ONNX</h3>
+<pre class="{python}"><code>#| label: py-export-onnx
+import torch.onnx
+
+def export_onnx(model: nn.Module, path: str = "ttt_policy.onnx"):
+    model.eval()
+    dummy = torch.zeros(1, 27)   # single-board batch
+
+    torch.onnx.export(
+        model,
+        dummy,
+        path,
+        export_params   = True,
+        opset_version   = 17,
+        do_constant_folding = True,
+        input_names     = ["board"],
+        output_names    = ["logits"],
+        dynamic_axes    = {"board":  {0: "batch"},
+                           "logits": {0: "batch"}},
+    )
+    print(f"ONNX model written to {path}")
+
+export_onnx(model)</code></pre>
+<p>You can verify the exported graph with <code>onnxruntime</code>:</p>
+<pre class="{python}"><code>#| label: py-verify-onnx
+import onnxruntime as ort
+
+sess    = ort.InferenceSession("ttt_policy.onnx")
+dummy   = np.zeros((1, 27), dtype=np.float32)
+logits, = sess.run(["logits"], {"board": dummy})
+print("Output shape:", logits.shape)   # should be (1, 9)</code></pre>
+<hr>
+</section>
+</section>
+<section id="part-4-loading-the-onnx-policy-in-julia" class="level2">
+<h2 class="anchored" data-anchor-id="part-4-loading-the-onnx-policy-in-julia">Part 4 — Loading the ONNX Policy in Julia</h2>
+<p>Now we load <code>ttt_policy.onnx</code> back into Julia using the <code>ONNXAgentExt</code> package extension. The extension is activated automatically when you load <code>ONNXRunTime</code> alongside <code>RewriteGames</code>.</p>
+<section id="encodedstate-what-agents-receive" class="level3">
+<h3 class="anchored" data-anchor-id="encodedstate-what-agents-receive"><code>EncodedState</code> — what agents receive</h3>
+<p>Every agent’s <code>select_action</code> method receives an <code>EncodedState</code>, which bundles the raw game state with pre-computed tensor encodings:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 30%">
+<col style="width: 26%">
+<col style="width: 43%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Field</th>
+<th>Type</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>raw</code></td>
+<td><code>GameState</code></td>
+<td>Raw world ACSet plus counters and turn number</td>
+</tr>
+<tr class="even">
+<td><code>node_features</code></td>
+<td><code>Matrix{Float32}</code> (n × F)</td>
+<td>One-hot table type + attribute values per (table, row) node</td>
+</tr>
+<tr class="odd">
+<td><code>edge_index</code></td>
+<td><code>Matrix{Int32}</code> (2 × E)</td>
+<td>COO-format foreign-key edges</td>
+</tr>
+<tr class="even">
+<td><code>edge_type</code></td>
+<td><code>Vector{Int8}</code></td>
+<td>Schema morphism index per edge</td>
+</tr>
+<tr class="odd">
+<td><code>rule_counters</code></td>
+<td><code>Vector{Int32}</code></td>
+<td>Remaining budget per rule</td>
+</tr>
+<tr class="even">
+<td><code>turn_frac</code></td>
+<td><code>Float32</code></td>
+<td><code>turn / T_max</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>state.raw.world</code> is the live ACSet. <code>state.node_features</code> and <code>state.edge_index</code> are already in a format suitable for graph neural networks. Simple agents that only need the raw board can access <code>state.raw.world</code> directly and pay no encoding cost.</p>
+</section>
+<section id="building-the-input-function" class="level3">
+<h3 class="anchored" data-anchor-id="building-the-input-function">Building the input function</h3>
+<p><code>ONNXAgent</code> calls <code>input_fn(state::EncodedState)</code> before every inference step. For tic-tac-toe we ignore the generic ACSet encoding and instead build our fixed-size feature vector directly from the raw board:</p>
+<div id="input-fn" class="cell" data-execution_count="15">
+<div class="sourceCode cell-code" id="cb28"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">ttt_input_fn</span>(state<span class="op">::</span><span class="dt">EncodedState</span>)</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>    board <span class="op">=</span> state.raw.world</span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a>    feats <span class="op">=</span> <span class="fu">board_features</span>(board)              <span class="co"># 27-element Float32 vector</span></span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">Dict</span>(<span class="st">"board"</span> <span class="op">=&gt;</span> <span class="fu">reshape</span>(feats, <span class="fl">1</span>, <span class="op">:</span>))  <span class="co"># shape (1, 27) as expected by ONNX</span></span>
+<span id="cb28-5"><a href="#cb28-5" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="a-square-aware-policy-wrapper" class="level3">
+<h3 class="anchored" data-anchor-id="a-square-aware-policy-wrapper">A square-aware policy wrapper</h3>
+<p>RewriteGames exports <code>ONNXAgent</code> as a built-in agent type for models whose output logits align directly with positions in <code>legal_actions</code>. Tic-tac-toe does not fit that pattern because our model outputs one logit per <strong>square</strong> (1–9), while <code>legal_actions</code> is a variable-length vector of only the <em>empty</em> squares. We therefore write a thin <code>FunctionAgent</code> wrapper that translates square logits into the correct <code>Action</code>:</p>
+<div id="onnx-agent" class="cell" data-execution_count="16">
+<div class="sourceCode cell-code" id="cb29"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">ONNXRunTime</span></span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">make_ttt_agent</span>(model_path<span class="op">::</span><span class="dt">String</span>)</span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true" tabindex="-1"></a>    session <span class="op">=</span> ONNXRunTime.<span class="fu">load_inference</span>(model_path)</span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-6"><a href="#cb29-6" aria-hidden="true" tabindex="-1"></a>    policy <span class="op">=</span> <span class="kw">function</span> (state<span class="op">::</span><span class="dt">EncodedState</span>, legal_actions<span class="op">::</span><span class="dt">Vector{Action}</span>)</span>
+<span id="cb29-7"><a href="#cb29-7" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Run ONNX inference</span></span>
+<span id="cb29-8"><a href="#cb29-8" aria-hidden="true" tabindex="-1"></a>        inputs  <span class="op">=</span> <span class="fu">ttt_input_fn</span>(state)</span>
+<span id="cb29-9"><a href="#cb29-9" aria-hidden="true" tabindex="-1"></a>        outputs <span class="op">=</span> <span class="fu">session</span>(inputs)</span>
+<span id="cb29-10"><a href="#cb29-10" aria-hidden="true" tabindex="-1"></a>        logits  <span class="op">=</span> <span class="fu">vec</span>(<span class="fu">first</span>(<span class="fu">values</span>(outputs)))   <span class="co"># length-9 Float32 vector</span></span>
+<span id="cb29-11"><a href="#cb29-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-12"><a href="#cb29-12" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Map each legal action to its square, pick the highest-logit legal square</span></span>
+<span id="cb29-13"><a href="#cb29-13" aria-hidden="true" tabindex="-1"></a>        legal_sq  <span class="op">=</span> [<span class="fu">components</span>(a.match)[<span class="op">:</span>Sq][<span class="fl">1</span>] for a <span class="kw">in</span> legal_actions]</span>
+<span id="cb29-14"><a href="#cb29-14" aria-hidden="true" tabindex="-1"></a>        best_idx  <span class="op">=</span> <span class="fu">argmax</span>([logits[sq] for sq <span class="kw">in</span> legal_sq])</span>
+<span id="cb29-15"><a href="#cb29-15" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> legal_actions[best_idx]</span>
+<span id="cb29-16"><a href="#cb29-16" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span></span>
+<span id="cb29-17"><a href="#cb29-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-18"><a href="#cb29-18" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">FunctionAgent</span>(policy)</span>
+<span id="cb29-19"><a href="#cb29-19" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb29-20"><a href="#cb29-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-21"><a href="#cb29-21" aria-hidden="true" tabindex="-1"></a>trained_X <span class="op">=</span> <span class="fu">make_ttt_agent</span>(<span class="st">"ttt_policy.onnx"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="benchmark-trained-x-vs-random-o" class="level3">
+<h3 class="anchored" data-anchor-id="benchmark-trained-x-vs-random-o">Benchmark: trained X vs random O</h3>
+<div id="benchmark" class="cell" data-execution_count="17">
+<div class="sourceCode cell-code" id="cb30"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">benchmark</span>(game, x_agent, o_agent; n<span class="op">=</span><span class="fl">500</span>, T_max<span class="op">=</span><span class="fl">20</span>, seed<span class="op">=</span><span class="fl">1</span>)</span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">Random</span>.<span class="fu">seed!</span>(seed)</span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a>    agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(<span class="op">:</span>X <span class="op">=&gt;</span> x_agent, <span class="op">:</span>O <span class="op">=&gt;</span> o_agent)</span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>    episodes <span class="op">=</span> [<span class="fu">run_game</span>(game, agents; T_max<span class="op">=</span>T_max) for _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n]</span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a>    all_exps <span class="op">=</span> <span class="fu">reduce</span>(vcat, episodes)</span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb30-7"><a href="#cb30-7" aria-hidden="true" tabindex="-1"></a>    x_wr <span class="op">=</span> <span class="fu">win_rate</span>(all_exps, <span class="op">:</span>X)</span>
+<span id="cb30-8"><a href="#cb30-8" aria-hidden="true" tabindex="-1"></a>    o_wr <span class="op">=</span> <span class="fu">win_rate</span>(all_exps, <span class="op">:</span>O)</span>
+<span id="cb30-9"><a href="#cb30-9" aria-hidden="true" tabindex="-1"></a>    draw <span class="op">=</span> <span class="fl">1</span> <span class="op">-</span> x_wr <span class="op">-</span> o_wr</span>
+<span id="cb30-10"><a href="#cb30-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"Over </span><span class="sc">$</span>n<span class="st"> games:"</span>)</span>
+<span id="cb30-11"><a href="#cb30-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"  X (trained) wins: </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>x_wr; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span>)</span>
+<span id="cb30-12"><a href="#cb30-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"  draws:            </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>draw;  digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span>)</span>
+<span id="cb30-13"><a href="#cb30-13" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"  O (random) wins:  </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>o_wr; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span>)</span>
+<span id="cb30-14"><a href="#cb30-14" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb30-15"><a href="#cb30-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb30-16"><a href="#cb30-16" aria-hidden="true" tabindex="-1"></a><span class="fu">benchmark</span>(game, trained_X, random_agents[<span class="op">:</span>O])</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>Expected output (after sufficient training):</p>
+<pre><code>Over 500 games:
+  X (trained) wins: 74.3%
+  draws:            18.1%
+  O (random) wins:   7.6%</code></pre>
+</section>
+<section id="watching-a-game" class="level3">
+<h3 class="anchored" data-anchor-id="watching-a-game">Watching a game</h3>
+<div id="watch-game" class="cell" data-execution_count="18">
+<div class="sourceCode cell-code" id="cb32"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">7</span>)</span>
+<span id="cb32-2"><a href="#cb32-2" aria-hidden="true" tabindex="-1"></a>demo_exps <span class="op">=</span> <span class="fu">run_game</span>(</span>
+<span id="cb32-3"><a href="#cb32-3" aria-hidden="true" tabindex="-1"></a>    game,</span>
+<span id="cb32-4"><a href="#cb32-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(<span class="op">:</span>X <span class="op">=&gt;</span> trained_X, <span class="op">:</span>O <span class="op">=&gt;</span> random_agents[<span class="op">:</span>O]);</span>
+<span id="cb32-5"><a href="#cb32-5" aria-hidden="true" tabindex="-1"></a>    T_max<span class="op">=</span><span class="fl">20</span>,</span>
+<span id="cb32-6"><a href="#cb32-6" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb32-7"><a href="#cb32-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb32-8"><a href="#cb32-8" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Move-by-move replay</span><span class="sc">\n</span><span class="st">"</span>)</span>
+<span id="cb32-9"><a href="#cb32-9" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i, exp) <span class="kw">in</span> <span class="fu">enumerate</span>(demo_exps)</span>
+<span id="cb32-10"><a href="#cb32-10" aria-hidden="true" tabindex="-1"></a>    sq <span class="op">=</span> exp.action <span class="op">===</span> <span class="cn">nothing</span> ? <span class="st">"–"</span> <span class="op">:</span> <span class="fu">string</span>(<span class="fu">components</span>(exp.action.match)[<span class="op">:</span>Sq][<span class="fl">1</span>])</span>
+<span id="cb32-11"><a href="#cb32-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"Turn </span><span class="sc">$</span>i<span class="st">: </span><span class="sc">$</span>(exp.player)<span class="st"> plays square </span><span class="sc">$</span>sq<span class="st">"</span>)</span>
+<span id="cb32-12"><a href="#cb32-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">print</span>(<span class="fu">show_board</span>(exp.next_state.raw.world))</span>
+<span id="cb32-13"><a href="#cb32-13" aria-hidden="true" tabindex="-1"></a>    exp.done <span class="op">&amp;&amp;</span> <span class="fu">println</span>(<span class="st">"</span><span class="sc">\n</span><span class="st">Result: </span><span class="sc">$</span>(<span class="fu">something</span>(exp.winner, <span class="op">:</span>draw))<span class="st">"</span>)</span>
+<span id="cb32-14"><a href="#cb32-14" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>()</span>
+<span id="cb32-15"><a href="#cb32-15" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+</section>
+<section id="summary" class="level2">
+<h2 class="anchored" data-anchor-id="summary">Summary</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Step</th>
+<th>Tool</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Board state</td>
+<td>ACSet with <code>Sq</code>, <code>X</code>, <code>O</code> objects and two foreign-key morphisms</td>
+</tr>
+<tr class="even">
+<td>Legal moves</td>
+<td><code>rule_place_{x,o}</code> with <code>NAC</code> conditions banning occupied squares</td>
+</tr>
+<tr class="odd">
+<td>Win detection</td>
+<td><code>check_terminal</code> via <code>incident</code> on the indexed foreign keys</td>
+</tr>
+<tr class="even">
+<td>Game loop</td>
+<td><code>run_game</code> + <code>ScheduledGameDriver</code> via <code>Seq(PlayerStep(:X), PlayerStep(:O))</code></td>
+</tr>
+<tr class="odd">
+<td>Data format</td>
+<td>Custom Arrow writer (27-D feature + chosen square + outcome)</td>
+</tr>
+<tr class="even">
+<td>Training</td>
+<td>PyTorch MLP with REINFORCE</td>
+</tr>
+<tr class="odd">
+<td>Bridge</td>
+<td><code>torch.onnx.export</code> → <code>ONNXRunTime.load_inference</code> → <code>FunctionAgent</code></td>
+</tr>
+</tbody>
+</table>
+<p>RewriteGames.jl handles the combinatorial bookkeeping (pattern matching, budgets, auto-rules, serialisation) so you can focus on game semantics and learning algorithms.</p>
+<section id="going-further" class="level3">
+<h3 class="anchored" data-anchor-id="going-further">Going further</h3>
+<ul>
+<li><strong>Self-play curriculum</strong>: use a <code>FunctionAgent</code> that randomly mixes the trained policy with random moves, then progressively reduce the random fraction.</li>
+<li><strong>Value network</strong>: add a value head to the network for actor-critic methods; the <code>EncodedState.node_features</code> tensor from RewriteGames is already GNN-compatible (COO format + node features).</li>
+<li><strong>More complex games</strong>: the same schema pattern extends to hex, go, or any game whose state is naturally a graph — the rewrite-rule formulation handles arbitrary topology changes.</li>
+<li><strong>Rich schedules</strong>: use <code>Cond</code>, <code>WhileStep</code>, or <code>ForEachStep</code> in the schedule tree to model games with variable turn order, per-unit actions (e.g.&nbsp;each piece moves independently), or conditional phases. The <code>schedule_path</code> in each <code>Experience</code> record tells you exactly where in the tree that step was emitted.</li>
+<li><strong>Auto-rules</strong>: wrap any rule in <code>AutoRule(rule; prob_attr=:p)</code> and add it to the <code>auto:</code> clause of <code>@game</code>. Auto-rules fire automatically between player steps via <code>AutoStep()</code> nodes in the schedule, making it easy to model stochastic environment dynamics (weather, spawning, decay).</li>
+<li><strong>Schema migration</strong>: <code>GameMigration</code> lets you apply a Catlab schema functor to an entire game (world, rules, and initial factory) in one call. This is useful when you want to extend a prototype schema with new attributes or objects without rewriting all the rules from scratch.</li>
+</ul>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+window.document.addEventListener("DOMContentLoaded", function (event) {
+  const toggleBodyColorMode = (bsSheetEl) => {
+    const mode = bsSheetEl.getAttribute("data-mode");
+    const bodyEl = window.document.querySelector("body");
+    if (mode === "dark") {
+      bodyEl.classList.add("quarto-dark");
+      bodyEl.classList.remove("quarto-light");
+    } else {
+      bodyEl.classList.add("quarto-light");
+      bodyEl.classList.remove("quarto-dark");
+    }
+  }
+  const toggleBodyColorPrimary = () => {
+    const bsSheetEl = window.document.querySelector("link#quarto-bootstrap");
+    if (bsSheetEl) {
+      toggleBodyColorMode(bsSheetEl);
+    }
+  }
+  toggleBodyColorPrimary();  
+  const icon = "";
+  const anchorJS = new window.AnchorJS();
+  anchorJS.options = {
+    placement: 'right',
+    icon: icon
+  };
+  anchorJS.add('.anchored');
+  const isCodeAnnotation = (el) => {
+    for (const clz of el.classList) {
+      if (clz.startsWith('code-annotation-')) {                     
+        return true;
+      }
+    }
+    return false;
+  }
+  const onCopySuccess = function(e) {
+    // button target
+    const button = e.trigger;
+    // don't keep focus
+    button.blur();
+    // flash "checked"
+    button.classList.add('code-copy-button-checked');
+    var currentTitle = button.getAttribute("title");
+    button.setAttribute("title", "Copied!");
+    let tooltip;
+    if (window.bootstrap) {
+      button.setAttribute("data-bs-toggle", "tooltip");
+      button.setAttribute("data-bs-placement", "left");
+      button.setAttribute("data-bs-title", "Copied!");
+      tooltip = new bootstrap.Tooltip(button, 
+        { trigger: "manual", 
+          customClass: "code-copy-button-tooltip",
+          offset: [0, -8]});
+      tooltip.show();    
+    }
+    setTimeout(function() {
+      if (tooltip) {
+        tooltip.hide();
+        button.removeAttribute("data-bs-title");
+        button.removeAttribute("data-bs-toggle");
+        button.removeAttribute("data-bs-placement");
+      }
+      button.setAttribute("title", currentTitle);
+      button.classList.remove('code-copy-button-checked');
+    }, 1000);
+    // clear code selection
+    e.clearSelection();
+  }
+  const getTextToCopy = function(trigger) {
+      const codeEl = trigger.previousElementSibling.cloneNode(true);
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+  }
+  const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+    text: getTextToCopy
+  });
+  clipboard.on('success', onCopySuccess);
+  if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+    // For code content inside modals, clipBoardJS needs to be initialized with a container option
+    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
+    const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+      text: getTextToCopy,
+      container: window.document.getElementById('quarto-embedded-source-code-modal')
+    });
+    clipboardModal.on('success', onCopySuccess);
+  }
+    var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+    var mailtoRegex = new RegExp(/^mailto:/);
+      var filterRegex = new RegExp('/' + window.location.host + '/');
+    var isInternal = (href) => {
+        return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+    }
+    // Inspect non-navigation links and adorn them if external
+ 	var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+    for (var i=0; i<links.length; i++) {
+      const link = links[i];
+      if (!isInternal(link.href)) {
+        // undo the damage that might have been done by quarto-nav.js in the case of
+        // links that we want to consider external
+        if (link.dataset.originalHref !== undefined) {
+          link.href = link.dataset.originalHref;
+        }
+      }
+    }
+  function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+    const config = {
+      allowHTML: true,
+      maxWidth: 500,
+      delay: 100,
+      arrow: false,
+      appendTo: function(el) {
+          return el.parentElement;
+      },
+      interactive: true,
+      interactiveBorder: 10,
+      theme: 'quarto',
+      placement: 'bottom-start',
+    };
+    if (contentFn) {
+      config.content = contentFn;
+    }
+    if (onTriggerFn) {
+      config.onTrigger = onTriggerFn;
+    }
+    if (onUntriggerFn) {
+      config.onUntrigger = onUntriggerFn;
+    }
+    window.tippy(el, config); 
+  }
+  const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+  for (var i=0; i<noterefs.length; i++) {
+    const ref = noterefs[i];
+    tippyHover(ref, function() {
+      // use id or data attribute instead here
+      let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+      try { href = new URL(href).hash; } catch {}
+      const id = href.replace(/^#\/?/, "");
+      const note = window.document.getElementById(id);
+      if (note) {
+        return note.innerHTML;
+      } else {
+        return "";
+      }
+    });
+  }
+  const xrefs = window.document.querySelectorAll('a.quarto-xref');
+  const processXRef = (id, note) => {
+    // Strip column container classes
+    const stripColumnClz = (el) => {
+      el.classList.remove("page-full", "page-columns");
+      if (el.children) {
+        for (const child of el.children) {
+          stripColumnClz(child);
+        }
+      }
+    }
+    stripColumnClz(note)
+    if (id === null || id.startsWith('sec-')) {
+      // Special case sections, only their first couple elements
+      const container = document.createElement("div");
+      if (note.children && note.children.length > 2) {
+        container.appendChild(note.children[0].cloneNode(true));
+        for (let i = 1; i < note.children.length; i++) {
+          const child = note.children[i];
+          if (child.tagName === "P" && child.innerText === "") {
+            continue;
+          } else {
+            container.appendChild(child.cloneNode(true));
+            break;
+          }
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(container);
+        }
+        return container.innerHTML
+      } else {
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        return note.innerHTML;
+      }
+    } else {
+      // Remove any anchor links if they are present
+      const anchorLink = note.querySelector('a.anchorjs-link');
+      if (anchorLink) {
+        anchorLink.remove();
+      }
+      if (window.Quarto?.typesetMath) {
+        window.Quarto.typesetMath(note);
+      }
+      // TODO in 1.5, we should make sure this works without a callout special case
+      if (note.classList.contains("callout")) {
+        return note.outerHTML;
+      } else {
+        return note.innerHTML;
+      }
+    }
+  }
+  for (var i=0; i<xrefs.length; i++) {
+    const xref = xrefs[i];
+    tippyHover(xref, undefined, function(instance) {
+      instance.disable();
+      let url = xref.getAttribute('href');
+      let hash = undefined; 
+      if (url.startsWith('#')) {
+        hash = url;
+      } else {
+        try { hash = new URL(url).hash; } catch {}
+      }
+      if (hash) {
+        const id = hash.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note !== null) {
+          try {
+            const html = processXRef(id, note.cloneNode(true));
+            instance.setContent(html);
+          } finally {
+            instance.enable();
+            instance.show();
+          }
+        } else {
+          // See if we can fetch this
+          fetch(url.split('#')[0])
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.getElementById(id);
+            if (note !== null) {
+              const html = processXRef(id, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      } else {
+        // See if we can fetch a full url (with no hash to target)
+        // This is a special case and we should probably do some content thinning / targeting
+        fetch(url)
+        .then(res => res.text())
+        .then(html => {
+          const parser = new DOMParser();
+          const htmlDoc = parser.parseFromString(html, "text/html");
+          const note = htmlDoc.querySelector('main.content');
+          if (note !== null) {
+            // This should only happen for chapter cross references
+            // (since there is no id in the URL)
+            // remove the first header
+            if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+              note.children[0].remove();
+            }
+            const html = processXRef(null, note);
+            instance.setContent(html);
+          } 
+        }).finally(() => {
+          instance.enable();
+          instance.show();
+        });
+      }
+    }, function(instance) {
+    });
+  }
+      let selectedAnnoteEl;
+      const selectorForAnnotation = ( cell, annotation) => {
+        let cellAttr = 'data-code-cell="' + cell + '"';
+        let lineAttr = 'data-code-annotation="' +  annotation + '"';
+        const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+        return selector;
+      }
+      const selectCodeLines = (annoteEl) => {
+        const doc = window.document;
+        const targetCell = annoteEl.getAttribute("data-target-cell");
+        const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+        const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+        const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+        const lineIds = lines.map((line) => {
+          return targetCell + "-" + line;
+        })
+        let top = null;
+        let height = null;
+        let parent = null;
+        if (lineIds.length > 0) {
+            //compute the position of the single el (top and bottom and make a div)
+            const el = window.document.getElementById(lineIds[0]);
+            top = el.offsetTop;
+            height = el.offsetHeight;
+            parent = el.parentElement.parentElement;
+          if (lineIds.length > 1) {
+            const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+            const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+            height = bottom - top;
+          }
+          if (top !== null && height !== null && parent !== null) {
+            // cook up a div (if necessary) and position it 
+            let div = window.document.getElementById("code-annotation-line-highlight");
+            if (div === null) {
+              div = window.document.createElement("div");
+              div.setAttribute("id", "code-annotation-line-highlight");
+              div.style.position = 'absolute';
+              parent.appendChild(div);
+            }
+            div.style.top = top - 2 + "px";
+            div.style.height = height + 4 + "px";
+            div.style.left = 0;
+            let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+            if (gutterDiv === null) {
+              gutterDiv = window.document.createElement("div");
+              gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+              gutterDiv.style.position = 'absolute';
+              const codeCell = window.document.getElementById(targetCell);
+              const gutter = codeCell.querySelector('.code-annotation-gutter');
+              gutter.appendChild(gutterDiv);
+            }
+            gutterDiv.style.top = top - 2 + "px";
+            gutterDiv.style.height = height + 4 + "px";
+          }
+          selectedAnnoteEl = annoteEl;
+        }
+      };
+      const unselectCodeLines = () => {
+        const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+        elementsIds.forEach((elId) => {
+          const div = window.document.getElementById(elId);
+          if (div) {
+            div.remove();
+          }
+        });
+        selectedAnnoteEl = undefined;
+      };
+        // Handle positioning of the toggle
+    window.addEventListener(
+      "resize",
+      throttle(() => {
+        elRect = undefined;
+        if (selectedAnnoteEl) {
+          selectCodeLines(selectedAnnoteEl);
+        }
+      }, 10)
+    );
+    function throttle(fn, ms) {
+    let throttle = false;
+    let timer;
+      return (...args) => {
+        if(!throttle) { // first call gets through
+            fn.apply(this, args);
+            throttle = true;
+        } else { // all the others get throttled
+            if(timer) clearTimeout(timer); // cancel #2
+            timer = setTimeout(() => {
+              fn.apply(this, args);
+              timer = throttle = false;
+            }, ms);
+        }
+      };
+    }
+      // Attach click handler to the DT
+      const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+      for (const annoteDlNode of annoteDls) {
+        annoteDlNode.addEventListener('click', (event) => {
+          const clickedEl = event.target;
+          if (clickedEl !== selectedAnnoteEl) {
+            unselectCodeLines();
+            const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+            if (activeEl) {
+              activeEl.classList.remove('code-annotation-active');
+            }
+            selectCodeLines(clickedEl);
+            clickedEl.classList.add('code-annotation-active');
+          } else {
+            // Unselect the line
+            unselectCodeLines();
+            clickedEl.classList.remove('code-annotation-active');
+          }
+        });
+      }
+  const findCites = (el) => {
+    const parentEl = el.parentElement;
+    if (parentEl) {
+      const cites = parentEl.dataset.cites;
+      if (cites) {
+        return {
+          el,
+          cites: cites.split(' ')
+        };
+      } else {
+        return findCites(el.parentElement)
+      }
+    } else {
+      return undefined;
+    }
+  };
+  var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+  for (var i=0; i<bibliorefs.length; i++) {
+    const ref = bibliorefs[i];
+    const citeInfo = findCites(ref);
+    if (citeInfo) {
+      tippyHover(citeInfo.el, function() {
+        var popup = window.document.createElement('div');
+        citeInfo.cites.forEach(function(cite) {
+          var citeDiv = window.document.createElement('div');
+          citeDiv.classList.add('hanging-indent');
+          citeDiv.classList.add('csl-entry');
+          var biblioDiv = window.document.getElementById('ref-' + cite);
+          if (biblioDiv) {
+            citeDiv.innerHTML = biblioDiv.innerHTML;
+          }
+          popup.appendChild(citeDiv);
+        });
+        return popup.innerHTML;
+      });
+    }
+  }
+});
+</script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

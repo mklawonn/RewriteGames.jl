@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.5.54">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>Tic-Tac-Toe Gameplay with RewriteGames</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="TicTacToeGameplay_files/libs/clipboard/clipboard.min.js"></script>
+<script src="TicTacToeGameplay_files/libs/quarto-html/quarto.js"></script>
+<script src="TicTacToeGameplay_files/libs/quarto-html/popper.min.js"></script>
+<script src="TicTacToeGameplay_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="TicTacToeGameplay_files/libs/quarto-html/anchor.min.js"></script>
+<link href="TicTacToeGameplay_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="TicTacToeGameplay_files/libs/quarto-html/quarto-syntax-highlighting.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="TicTacToeGameplay_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="TicTacToeGameplay_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="TicTacToeGameplay_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body>
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+  <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#setup" id="toc-setup" class="nav-link active" data-scroll-target="#setup">Setup</a></li>
+  <li><a href="#overview" id="toc-overview" class="nav-link" data-scroll-target="#overview">Overview</a></li>
+  <li><a href="#part-1-modelling-the-board-as-an-acset" id="toc-part-1-modelling-the-board-as-an-acset" class="nav-link" data-scroll-target="#part-1-modelling-the-board-as-an-acset">Part 1 — Modelling the Board as an ACSet</a>
+  <ul class="collapse">
+  <li><a href="#schema-design" id="toc-schema-design" class="nav-link" data-scroll-target="#schema-design">Schema design</a></li>
+  <li><a href="#board-constructor-and-visualisation" id="toc-board-constructor-and-visualisation" class="nav-link" data-scroll-target="#board-constructor-and-visualisation">Board constructor and visualisation</a></li>
+  </ul></li>
+  <li><a href="#part-2-rewrite-rules" id="toc-part-2-rewrite-rules" class="nav-link" data-scroll-target="#part-2-rewrite-rules">Part 2 — Rewrite Rules</a>
+  <ul class="collapse">
+  <li><a href="#rewrite-rules-as-spans" id="toc-rewrite-rules-as-spans" class="nav-link" data-scroll-target="#rewrite-rules-as-spans">Rewrite rules as spans</a></li>
+  <li><a href="#the-mark_x-rule" id="toc-the-mark_x-rule" class="nav-link" data-scroll-target="#the-mark_x-rule">The <code>mark_x</code> rule</a></li>
+  <li><a href="#win-detection-rules" id="toc-win-detection-rules" class="nav-link" data-scroll-target="#win-detection-rules">Win-detection rules</a></li>
+  <li><a href="#ruleapp-and-its-two-output-ports" id="toc-ruleapp-and-its-two-output-ports" class="nav-link" data-scroll-target="#ruleapp-and-its-two-output-ports"><code>RuleApp</code> and its two output ports</a></li>
+  </ul></li>
+  <li><a href="#part-3-schema-symmetry-and-data-migrations" id="toc-part-3-schema-symmetry-and-data-migrations" class="nav-link" data-scroll-target="#part-3-schema-symmetry-and-data-migrations">Part 3 — Schema Symmetry and Data Migrations</a>
+  <ul class="collapse">
+  <li><a href="#the-x-o-symmetry" id="toc-the-x-o-symmetry" class="nav-link" data-scroll-target="#the-x-o-symmetry">The X ↔︎ O symmetry</a></li>
+  <li><a href="#the-migrate-functor-in-algebraicjulia" id="toc-the-migrate-functor-in-algebraicjulia" class="nav-link" data-scroll-target="#the-migrate-functor-in-algebraicjulia">The <code>Migrate</code> functor in AlgebraicJulia</a></li>
+  </ul></li>
+  <li><a href="#part-4-building-the-schedules" id="toc-part-4-building-the-schedules" class="nav-link" data-scroll-target="#part-4-building-the-schedules">Part 4 — Building the Schedules</a>
+  <ul class="collapse">
+  <li><a href="#playerruleapp-tagging-a-rule-with-a-player" id="toc-playerruleapp-tagging-a-rule-with-a-player" class="nav-link" data-scroll-target="#playerruleapp-tagging-a-rule-with-a-player"><code>PlayerRuleApp</code> — tagging a rule with a player</a></li>
+  <li><a href="#gamesched-and-mk_game_sched" id="toc-gamesched-and-mk_game_sched" class="nav-link" data-scroll-target="#gamesched-and-mk_game_sched"><code>GameSched</code> and <code>mk_game_sched</code></a></li>
+  <li><a href="#win-check-sub-schedules" id="toc-win-check-sub-schedules" class="nav-link" data-scroll-target="#win-check-sub-schedules">Win-check sub-schedules</a></li>
+  <li><a href="#xs-turn-schedule" id="toc-xs-turn-schedule" class="nav-link" data-scroll-target="#xs-turn-schedule">X’s turn schedule</a></li>
+  <li><a href="#migrating-to-os-schedule-with-player_migrate" id="toc-migrating-to-os-schedule-with-player_migrate" class="nav-link" data-scroll-target="#migrating-to-os-schedule-with-player_migrate">Migrating to O’s schedule with <code>player_migrate</code></a></li>
+  <li><a href="#full-game-loop" id="toc-full-game-loop" class="nav-link" data-scroll-target="#full-game-loop">Full game loop</a></li>
+  </ul></li>
+  <li><a href="#part-5-running-the-game" id="toc-part-5-running-the-game" class="nav-link" data-scroll-target="#part-5-running-the-game">Part 5 — Running the Game</a>
+  <ul class="collapse">
+  <li><a href="#game-metadata-record" id="toc-game-metadata-record" class="nav-link" data-scroll-target="#game-metadata-record"><code>Game</code> metadata record</a></li>
+  <li><a href="#functionagent-the-simplest-agent-type" id="toc-functionagent-the-simplest-agent-type" class="nav-link" data-scroll-target="#functionagent-the-simplest-agent-type"><code>FunctionAgent</code> — the simplest agent type</a></li>
+  <li><a href="#run_game_sched-and-experience" id="toc-run_game_sched-and-experience" class="nav-link" data-scroll-target="#run_game_sched-and-experience"><code>run_game_sched!</code> and <code>Experience</code></a></li>
+  <li><a href="#win-conditions-and-game-record" id="toc-win-conditions-and-game-record" class="nav-link" data-scroll-target="#win-conditions-and-game-record">Win conditions and game record</a></li>
+  <li><a href="#single-episode-and-final-board-state" id="toc-single-episode-and-final-board-state" class="nav-link" data-scroll-target="#single-episode-and-final-board-state">Single episode and final board state</a></li>
+  <li><a href="#statistics-over-many-episodes" id="toc-statistics-over-many-episodes" class="nav-link" data-scroll-target="#statistics-over-many-episodes">Statistics over many episodes</a></li>
+  </ul></li>
+  <li><a href="#summary" id="toc-summary" class="nav-link" data-scroll-target="#summary">Summary</a></li>
+  </ul>
+</nav>
+</div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Tic-Tac-Toe Gameplay with RewriteGames</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="setup" class="level2">
+<h2 class="anchored" data-anchor-id="setup">Setup</h2>
+<div id="79b94215" class="cell" data-execution_count="1">
+<div class="sourceCode cell-code" id="cb1"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Pkg</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="bu">Pkg</span>.<span class="fu">activate</span>(<span class="st">".."</span>)</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Catlab</span>, <span class="bu">AlgebraicRewriting</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">RewriteGames</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Random</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Statistics</span>: mean</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Catlab.Graphics.Graphviz</span>: Attributes, Statement, Node</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> <span class="bu">Catlab.Graphics.Graphviz</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="overview" class="level2">
+<h2 class="anchored" data-anchor-id="overview">Overview</h2>
+<p><strong>RewriteGames.jl</strong> models game states as <em>attributed C-sets</em> (ACSets) and moves as <em>algebraic rewrite rules</em>. Both concepts come from applied category theory: ACSets are relational data structures whose schemas describe objects (tables) and morphisms (foreign keys), and rewrite rules describe how those structures transform under play.</p>
+<p>This choice of representation is deliberately general. Any game whose state can be described as a relational structure — boards, graphs, maps, unit networks — fits naturally into the framework. Because every game shares the same substrate, the engine’s bookkeeping (match enumeration, budget tracking, serialisation) applies uniformly across games without modification.</p>
+<p>Two longer-term goals shape the library’s design, though neither is fully realised yet:</p>
+<ul>
+<li><strong>Modular game composition.</strong> ACSets and rewrite rules support algebraic composition: schemas can be combined, rules can be glued together, and schedules can be nested. The infrastructure for this — <code>GameMigration</code>, compositional schedules — is in place.</li>
+<li><strong>Cross-game transfer.</strong> Because games share a common representation, a policy trained on one game could, in principle, transfer to another. This is ongoing research; the current library provides the representational foundation but not yet the transfer machinery.</li>
+</ul>
+<p>In this tutorial we use <strong>tic-tac-toe</strong> to demonstrate every layer of the framework: simple enough to understand at a glance, rich enough to exercise the full workflow.</p>
+<ol type="1">
+<li>Model the board as an ACSet and legal moves as rewrite rules.</li>
+<li>Build wiring-diagram schedules that express turn order and win detection.</li>
+<li>Use a <em>data migration functor</em> to derive O’s schedule automatically from X’s — avoiding duplicated code and guaranteeing structural symmetry.</li>
+<li>Run self-play episodes and inspect the final board state.</li>
+</ol>
+<hr>
+</section>
+<section id="part-1-modelling-the-board-as-an-acset" class="level2">
+<h2 class="anchored" data-anchor-id="part-1-modelling-the-board-as-an-acset">Part 1 — Modelling the Board as an ACSet</h2>
+<section id="schema-design" class="level3">
+<h3 class="anchored" data-anchor-id="schema-design">Schema design</h3>
+<p>An ACSet’s <em>schema</em> declares the tables (objects) and foreign keys (morphisms) that make up a world state. For tic-tac-toe we need:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Object</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>Sq</code></td>
+<td>Board squares (always exactly 9)</td>
+</tr>
+<tr class="even">
+<td><code>E</code></td>
+<td>Edges encoding the board’s graph topology</td>
+</tr>
+<tr class="odd">
+<td><code>X</code></td>
+<td>X pieces placed so far</td>
+</tr>
+<tr class="even">
+<td><code>O</code></td>
+<td>O pieces placed so far</td>
+</tr>
+</tbody>
+</table>
+<p>Two foreign keys record which square each piece occupies, and two more record the source and target squares of each edge:</p>
+<div id="cell-schema" class="cell" data-execution_count="2">
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="pp">@present</span> <span class="fu">SchTTT</span>(FreeSchema) <span class="cf">begin</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    Sq<span class="op">::</span><span class="dt">Ob</span>; E<span class="op">::</span><span class="dt">Ob</span>; X<span class="op">::</span><span class="dt">Ob</span>; O<span class="op">::</span><span class="dt">Ob</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    xsq<span class="op">::</span><span class="dt">Hom</span>(X, Sq); osq<span class="op">::</span><span class="dt">Hom</span>(O, Sq)</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    src<span class="op">::</span><span class="dt">Hom</span>(E, Sq); tgt<span class="op">::</span><span class="dt">Hom</span>(E, Sq)</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    SquareNum<span class="op">::</span><span class="dt">AttrType</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    num<span class="op">::</span><span class="dt">Attr</span>(Sq, SquareNum)</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="pp">@acset_type</span> <span class="fu">TicTacToe</span>(SchTTT, index<span class="op">=</span>[<span class="op">:</span>xsq, <span class="op">:</span>osq])</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> TTT <span class="op">=</span> TicTacToe{<span class="dt">Int</span>}</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>𝒞 <span class="op">=</span> <span class="fu">ACSetCategory</span>(<span class="fu">VarACSetCat</span>(<span class="fu">TTT</span>()))</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="fu">to_graphviz</span>(SchTTT; prog<span class="op">=</span><span class="st">"dot"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="3">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/schema-output-1.svg" id="schema" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>We index on <code>:xsq</code> and <code>:osq</code> so that <code>incident(board, sq_id, :xsq)</code> — “all X pieces on square <code>sq_id</code>” — is an O(1) lookup instead of a linear scan.</p>
+<p><code>ACSetCategory(VarACSetCat(TTT()))</code> constructs the category in which all subsequent morphisms and rules live. <code>VarACSetCat</code> supports schemas with attributes and handles free attribute variables (<code>AttrVar</code>) in Yoneda representables.</p>
+<!-- ### Why include edges?
+
+The edge table `E` with `src` and `tgt` morphisms embeds the board's graph topology
+directly into every world state.  The primary payoff is for win detection:
+
+- **Structural win patterns**: We can define "three in a row" as an ACSet homomorphism
+  problem rather than hardcoding the eight winning index-sets.  A pattern with three X
+  pieces connected by edges matches any three-in-a-row configuration automatically.
+
+<!-- Downstream-learning justification removed pending a cleaner story.
+     EncodedState encodes all foreign-key edges uniformly by morphism index, which is
+     fine when every edge in the schema carries the same semantic role.  For richer
+     games with multiple distinct graph structures (adjacency, attack range, movement
+     graph, …) a policy needs to distinguish edge types.  A future direction is to let
+     game designers annotate morphisms with semantic roles and expose those tags in the
+     EncodedState edge_type vector so GNN policies can attend selectively.
+-->
+</section>
+<section id="board-constructor-and-visualisation" class="level3">
+<h3 class="anchored" data-anchor-id="board-constructor-and-visualisation">Board constructor and visualisation</h3>
+<p>Squares are numbered 1–9 in row-major order. Horizontal edges connect adjacent squares in the same row; vertical edges connect squares directly above/below each other.</p>
+<div id="constructor" class="cell" data-execution_count="3">
+<div class="sourceCode cell-code" id="cb3"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">create_board</span>()</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    ttt <span class="op">=</span> <span class="fu">TTT</span>()</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    <span class="fu">add_parts!</span>(ttt, <span class="op">:</span>Sq, <span class="fl">9</span>; num<span class="op">=</span><span class="fu">collect</span>(<span class="fl">1</span><span class="op">:</span><span class="fl">9</span>))</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Horizontal edges: (1→2), (2→3), (4→5), (5→6), (7→8), (8→9)</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">0</span><span class="op">:</span><span class="fl">2</span>, j <span class="kw">in</span> <span class="fl">0</span><span class="op">:</span><span class="fl">1</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>        <span class="fu">add_part!</span>(ttt, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">3</span><span class="op">*</span>i<span class="op">+</span>j<span class="op">+</span><span class="fl">1</span>, tgt<span class="op">=</span><span class="fl">3</span><span class="op">*</span>i<span class="op">+</span>j<span class="op">+</span><span class="fl">2</span>)</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Vertical edges: (1→4), (2→5), (3→6), (4→7), (5→8), (6→9)</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">0</span><span class="op">:</span><span class="fl">1</span>, j <span class="kw">in</span> <span class="fl">0</span><span class="op">:</span><span class="fl">2</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>        <span class="fu">add_part!</span>(ttt, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">3</span><span class="op">*</span>i<span class="op">+</span>j<span class="op">+</span><span class="fl">1</span>, tgt<span class="op">=</span><span class="fl">3</span><span class="op">*</span>i<span class="op">+</span>j<span class="op">+</span><span class="fl">1</span><span class="op">+</span><span class="fl">3</span>)</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> ttt</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>A small Graphviz helper renders any board state for quick inspection:</p>
+<div id="cell-view-board" class="cell" data-execution_count="4">
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">view_TTT</span>(p<span class="op">::</span><span class="dt">TTT</span>)</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    stmts <span class="op">=</span> Statement[]</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> s <span class="kw">in</span> <span class="fu">parts</span>(p, <span class="op">:</span>Sq)</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>        n   <span class="op">=</span> <span class="kw">let</span> v <span class="op">=</span> <span class="fu">subpart</span>(p, s, <span class="op">:</span>num); v isa <span class="dt">Integer</span> ? v <span class="op">:</span> s <span class="cf">end</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>        row <span class="op">=</span> <span class="fu">div</span>(n<span class="op">-</span><span class="fl">1</span>, <span class="fl">3</span>)</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>        col <span class="op">=</span> <span class="fu">mod</span>(n<span class="op">-</span><span class="fl">1</span>, <span class="fl">3</span>)</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>        x, y <span class="op">=</span> col, <span class="fl">2</span><span class="op">-</span>row</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>        label <span class="op">=</span> <span class="st">""</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>        xs <span class="op">=</span> <span class="fu">incident</span>(p, s, <span class="op">:</span>xsq)</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>        os <span class="op">=</span> <span class="fu">incident</span>(p, s, <span class="op">:</span>osq)</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> !<span class="fu">isempty</span>(xs)</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>            label <span class="op">=</span> <span class="st">"X"</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>        <span class="cf">elseif</span> !<span class="fu">isempty</span>(os)</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>            label <span class="op">=</span> <span class="st">"O"</span></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>        <span class="cf">end</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(stmts, <span class="fu">Node</span>(<span class="st">"v</span><span class="sc">$</span>s<span class="st">"</span>, <span class="fu">Attributes</span>(</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>label <span class="op">=&gt;</span> label,</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>shape <span class="op">=&gt;</span> <span class="st">"square"</span>,</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>width <span class="op">=&gt;</span> <span class="st">"0.5"</span>,</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>height <span class="op">=&gt;</span> <span class="st">"0.5"</span>,</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>pos <span class="op">=&gt;</span> <span class="st">"</span><span class="sc">$</span>(x)<span class="st">,</span><span class="sc">$</span>(y)<span class="st">!"</span>,</span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>            <span class="op">:</span>fixedsize <span class="op">=&gt;</span> <span class="st">"true"</span></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a>        )))</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span></span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a>    Graphviz.<span class="fu">Digraph</span>(<span class="st">"TTT"</span>, stmts; prog<span class="op">=</span><span class="st">"neato"</span>)</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(<span class="fu">create_board</span>())</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="5">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/view-board-output-1.svg" id="view-board" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<hr>
+</section>
+</section>
+<section id="part-2-rewrite-rules" class="level2">
+<h2 class="anchored" data-anchor-id="part-2-rewrite-rules">Part 2 — Rewrite Rules</h2>
+<p>Everything a player can do in a game — place a piece, move a unit, build a structure — is represented in RewriteGames as an <strong>algebraic rewrite rule</strong>. Because the framework inherits its match-finding and rule-application machinery from AlgebraicRewriting, any rule you write automatically comes with legal-move enumeration, NAC enforcement, and the ability to be migrated to a different player or schema. You describe <em>what</em> a move looks like, and the engine handles <em>when</em> and <em>how</em> to apply it.</p>
+<p>For our TicTacToe game, we will build X’s rules first. Once those are in place, Part 3 shows how a single migration functor derives O’s entire ruleset — including move rules, win-detection rules, and schedule structure — without writing any additional rule code.</p>
+<p>Before we write rules, it will be convenient to have the Yoneda representables and the <code>Names</code> object that AlgebraicRewriting uses to construct and label morphisms:</p>
+<div id="yoneda" class="cell" data-execution_count="5">
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>gSq, gE, gX, gO <span class="op">=</span> <span class="fu">ob_generators</span>(<span class="fu">FinCat</span>(SchTTT))</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>yTTT <span class="op">=</span> <span class="fu">yoneda_cache</span>(TTT; clear<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>I  <span class="op">=</span> <span class="fu">TTT</span>()          <span class="co"># the empty ACSet (initial object)</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>Sq <span class="op">=</span> <span class="fu">ob_map</span>(yTTT, gSq)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>E  <span class="op">=</span> <span class="fu">ob_map</span>(yTTT, gE)</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>X  <span class="op">=</span> <span class="fu">ob_map</span>(yTTT, gX)</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>O  <span class="op">=</span> <span class="fu">ob_map</span>(yTTT, gO)</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>N  <span class="op">=</span> <span class="fu">Names</span>(<span class="fu">Dict</span>(<span class="st">"X"</span> <span class="op">=&gt;</span> X, <span class="st">"O"</span> <span class="op">=&gt;</span> O, <span class="st">"Sq"</span> <span class="op">=&gt;</span> Sq, <span class="st">""</span> <span class="op">=&gt;</span> I, <span class="st">"I"</span> <span class="op">=&gt;</span> I))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>The representable for each schema object is the unique (up to isomorphism) ACSet with exactly one element of that type, plus the minimum number of elements of every other type required to satisfy the foreign-key constraints. Think of it as the “atom” for that type.</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Variable</th>
+<th>Object</th>
+<th><code>Sq</code></th>
+<th><code>E</code></th>
+<th><code>X</code></th>
+<th><code>O</code></th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>Sq</code></td>
+<td><code>Sq</code></td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>A single bare square</td>
+</tr>
+<tr class="even">
+<td><code>E</code></td>
+<td><code>E</code></td>
+<td>2</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>Two squares connected by one edge</td>
+</tr>
+<tr class="odd">
+<td><code>X</code></td>
+<td><code>X</code></td>
+<td>1</td>
+<td>0</td>
+<td>1</td>
+<td>0</td>
+<td>One X piece on one square</td>
+</tr>
+<tr class="even">
+<td><code>O</code></td>
+<td><code>O</code></td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>1</td>
+<td>One O piece on one square</td>
+</tr>
+</tbody>
+</table>
+<p>The representables for <code>X</code> and <code>O</code> look like single-square boards with a piece already placed:</p>
+<div id="cell-view-x-rep" class="cell" data-execution_count="6">
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(X)   <span class="co"># representable for X: one square with an X piece</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="7">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/view-x-rep-output-1.svg" id="view-x-rep" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<div id="cell-view-o-rep" class="cell" data-execution_count="7">
+<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(O)   <span class="co"># representable for O: one square with an O piece</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="8">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/view-o-rep-output-1.svg" id="view-o-rep" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p><code>yoneda_cache</code> computes all representables once and caches them. <code>Names</code> maps human-readable strings to representables; <code>mk_sched</code> and <code>view_sched</code> use it to label wires in the wiring diagram.</p>
+<section id="rewrite-rules-as-spans" class="level3">
+<h3 class="anchored" data-anchor-id="rewrite-rules-as-spans">Rewrite rules as spans</h3>
+<p>A rewrite rule in AlgebraicRewriting is a <strong>span</strong> <code>L ← K → R</code> of ACSet morphisms:</p>
+<ul>
+<li><strong>L</strong> (left pattern): the sub-structure that must be <em>found</em> in the current world.</li>
+<li><strong>K</strong> (interface): the part preserved by the rewrite (appears in both L and R).</li>
+<li><strong>R</strong> (right pattern): what the matched region looks like <em>after</em> the rewrite.</li>
+</ul>
+<p>The engine finds all injective morphisms <code>m : L → G</code> satisfying the attached conditions, then applies <strong>double-pushout (DPO)</strong> rewriting to produce the updated world. The next section walks through this for <code>mark_x</code>.</p>
+<!-- TODO: span visualization placeholder -->
+</section>
+<section id="the-mark_x-rule" class="level3">
+<h3 class="anchored" data-anchor-id="the-mark_x-rule">The <code>mark_x</code> rule</h3>
+<p>The <code>mark_x</code> rule places an X on any <em>unmarked</em> square. The interface K is the representable <code>Sq</code> (one bare square). The left leg is the identity on <code>Sq</code> (find any square), and the right leg is the unique morphism <code>Sq → X</code> (which maps that square into the representable for X, effectively adding an X piece).</p>
+<p>The span for <code>mark_x</code> has three components:</p>
+<ul>
+<li><strong>L = K = <code>Sq</code></strong> — a single bare square; the rule looks for any square in the board.</li>
+<li><strong>R = <code>X</code></strong> — a square with an X piece on it; what that square becomes after the rule fires.</li>
+</ul>
+<p>The left leg <code>K → L</code> is the identity on <code>Sq</code> (nothing is deleted). The right leg <code>K → R</code> is <code>mark_X_r</code>, the unique morphism from <code>Sq</code> into the X representable — which “attaches” an X piece to the bare square.</p>
+<div id="cell-view-span-L" class="cell" data-execution_count="8">
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(Sq)   <span class="co"># L = K: a bare square (the sub-structure to find in the board)</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="9">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/view-span-l-output-1.svg" id="view-span-l" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<div id="cell-view-span-R" class="cell" data-execution_count="9">
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(X)    <span class="co"># R: a square with an X piece (the result after the rewrite)</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="10">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/view-span-r-output-1.svg" id="view-span-r" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p><code>Rule(l, r; ac)</code> encodes this span directly: the first argument <code>l</code> is the left leg <code>K → L</code>, the second <code>r</code> is the right leg <code>K → R</code>, and <code>ac</code> is the list of application conditions. For <code>mark_x</code>, <code>l = id(Sq)</code> and <code>r = mark_X_r</code>.</p>
+<p>Two <strong>Negative Application Conditions</strong> (NACs) prevent the rule from firing on an already occupied square. A NAC is a morphism <code>f : L → N</code> specifying a <em>forbidden extension</em>: a match <code>m : L → G</code> is rejected whenever there exists a morphism <code>n : N → G</code> such that <code>n ∘ f = m</code>. In plain English, the engine checks whether the larger forbidden pattern <code>N</code> can be embedded in the world consistently with the proposed match; if it can, the match is rejected.</p>
+<p>For <code>mark_x</code>, the two NACs are:</p>
+<!-- TODO: NAC diagram placeholder -->
+<p>A proposed match <code>m : Sq → G</code> is rejected if either NAC can be extended consistently to the board — i.e., if the matched square already holds any piece.</p>
+<div id="mark-x-rule" class="cell" data-execution_count="10">
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>id_Sq    <span class="op">=</span> id[𝒞](Sq)</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>mark_X_l <span class="op">=</span> id_Sq</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>mark_X_r <span class="op">=</span> <span class="fu">homomorphism</span>(Sq, X; cat<span class="op">=</span>𝒞)</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>mark_x <span class="op">=</span> <span class="fu">Rule</span>(mark_X_l, mark_X_r; monic<span class="op">=</span><span class="cn">true</span>,</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>              ac<span class="op">=</span>[<span class="fu">NAC</span>(<span class="fu">homomorphism</span>(Sq, X; cat<span class="op">=</span>𝒞)),</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>                  <span class="fu">NAC</span>(<span class="fu">homomorphism</span>(Sq, O; cat<span class="op">=</span>𝒞))])</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="win-detection-rules" class="level3">
+<h3 class="anchored" data-anchor-id="win-detection-rules">Win-detection rules</h3>
+<p>Win detection re-uses the same homomorphism-search machinery as move rules. A “win” is just an ACSet pattern that can be embedded in the current board. <strong>No-op rules</strong> (where <code>L = K = R = pattern</code>) leave the board unchanged but fire their success wire whenever the pattern matches, letting the schedule branch on whether X has won.</p>
+<p>Rather than enumerating all eight winning lines explicitly, we describe each winning configuration structurally: three squares connected by two successive edges (rows and columns), or connected via an edge fork/join (diagonals). Three patterns cover all eight lines, and the migration functor derives the O-side patterns for free.</p>
+<div id="win-patterns" class="cell" data-execution_count="11">
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Pattern 1: row or column — Sq1 -E-&gt; Sq2 -E-&gt; Sq3, all marked X</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>row_col_structural <span class="op">=</span> <span class="fu">TTT</span>()</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(row_col_structural, <span class="op">:</span>SquareNum, <span class="fl">3</span>)</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(row_col_structural, <span class="op">:</span>Sq, <span class="fl">3</span>; num<span class="op">=</span><span class="fu">AttrVar</span>.(<span class="fl">1</span><span class="op">:</span><span class="fl">3</span>))</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(row_col_structural, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">1</span>, tgt<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(row_col_structural, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">2</span>, tgt<span class="op">=</span><span class="fl">3</span>)</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">3</span>; <span class="fu">add_part!</span>(row_col_structural, <span class="op">:</span>X, xsq<span class="op">=</span>i); <span class="cf">end</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a><span class="co"># Pattern 2: main diagonal (1-5-9), hop-skip path: Sq1 -E-&gt; Sq2 -E-&gt; Sq3 -E-&gt; Sq4 -E-&gt; Sq5</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>diag_structural_1 <span class="op">=</span> <span class="fu">TTT</span>()</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(diag_structural_1, <span class="op">:</span>SquareNum, <span class="fl">5</span>)</span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(diag_structural_1, <span class="op">:</span>Sq, <span class="fl">5</span>; num<span class="op">=</span><span class="fu">AttrVar</span>.(<span class="fl">1</span><span class="op">:</span><span class="fl">5</span>))</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(diag_structural_1, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">1</span>, tgt<span class="op">=</span><span class="fl">2</span>); <span class="fu">add_part!</span>(diag_structural_1, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">2</span>, tgt<span class="op">=</span><span class="fl">3</span>)</span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(diag_structural_1, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">3</span>, tgt<span class="op">=</span><span class="fl">4</span>); <span class="fu">add_part!</span>(diag_structural_1, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">4</span>, tgt<span class="op">=</span><span class="fl">5</span>)</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> [<span class="fl">1</span>,<span class="fl">3</span>,<span class="fl">5</span>]; <span class="fu">add_part!</span>(diag_structural_1, <span class="op">:</span>X, xsq<span class="op">=</span>i); <span class="cf">end</span></span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true" tabindex="-1"></a><span class="co"># Pattern 3: anti-diagonal (3-5-7), fork/join: edges 1→2, 3→2, 3→4, 5→4</span></span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true" tabindex="-1"></a>diag_structural_2 <span class="op">=</span> <span class="fu">TTT</span>()</span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(diag_structural_2, <span class="op">:</span>SquareNum, <span class="fl">5</span>)</span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true" tabindex="-1"></a><span class="fu">add_parts!</span>(diag_structural_2, <span class="op">:</span>Sq, <span class="fl">5</span>; num<span class="op">=</span><span class="fu">AttrVar</span>.(<span class="fl">1</span><span class="op">:</span><span class="fl">5</span>))</span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(diag_structural_2, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">1</span>, tgt<span class="op">=</span><span class="fl">2</span>); <span class="fu">add_part!</span>(diag_structural_2, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">3</span>, tgt<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(diag_structural_2, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">3</span>, tgt<span class="op">=</span><span class="fl">4</span>); <span class="fu">add_part!</span>(diag_structural_2, <span class="op">:</span>E, src<span class="op">=</span><span class="fl">5</span>, tgt<span class="op">=</span><span class="fl">4</span>)</span>
+<span id="cb11-23"><a href="#cb11-23" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> i <span class="kw">in</span> [<span class="fl">1</span>,<span class="fl">3</span>,<span class="fl">5</span>]; <span class="fu">add_part!</span>(diag_structural_2, <span class="op">:</span>X, xsq<span class="op">=</span>i); <span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>Each pattern becomes a no-op rule; injective (<code>monic=true</code>) matching ensures distinct pattern squares always map to distinct board squares, preventing spurious wins.</p>
+<div id="win-rules" class="cell" data-execution_count="12">
+<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>x_rows_rule  <span class="op">=</span> <span class="fu">Rule</span>(id[𝒞](row_col_structural),  id[𝒞](row_col_structural); monic<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>x_diag1_rule <span class="op">=</span> <span class="fu">Rule</span>(id[𝒞](diag_structural_1),   id[𝒞](diag_structural_1);  monic<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>x_diag2_rule <span class="op">=</span> <span class="fu">Rule</span>(id[𝒞](diag_structural_2),   id[𝒞](diag_structural_2);  monic<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>x_rows_app  <span class="op">=</span> <span class="fu">RuleApp</span>(<span class="op">:</span>x_wins_rows,  x_rows_rule,  I; cat<span class="op">=</span>𝒞)</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>x_diag1_app <span class="op">=</span> <span class="fu">RuleApp</span>(<span class="op">:</span>x_wins_diag1, x_diag1_rule, I; cat<span class="op">=</span>𝒞)</span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>x_diag2_app <span class="op">=</span> <span class="fu">RuleApp</span>(<span class="op">:</span>x_wins_diag2, x_diag2_rule, I; cat<span class="op">=</span>𝒞)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="ruleapp-and-its-two-output-ports" class="level3">
+<h3 class="anchored" data-anchor-id="ruleapp-and-its-two-output-ports"><code>RuleApp</code> and its two output ports</h3>
+<p>A <code>RuleApp</code> wraps a <code>Rule</code> into a <em>schedulable box</em>. When execution reaches a <code>RuleApp</code> the engine applies the rule automatically — it picks a match on its own (or signals failure when none exists) — <strong>without consulting any player or agent</strong>. This makes <code>RuleApp</code> appropriate for mechanical checks such as win detection, where there is no decision to be made.</p>
+<p>For moves that require a player decision use <code>PlayerRuleApp</code> instead (introduced in Part 4). A <code>PlayerRuleApp</code> pauses execution, enumerates all legal matches, asks the registered agent to select one, and then applies the chosen match.</p>
+<p>The key property shared by both is <strong>two output wires</strong>:</p>
+<ul>
+<li><strong>Port 1</strong> (success): carries the rewritten world when a match was found and the rule applied.</li>
+<li><strong>Port 2</strong> (failure): carries the original world unchanged when no match existed.</li>
+</ul>
+<p>This two-port structure lets schedules branch based on whether a rule could fire — which is exactly what we need for win detection and tie detection.</p>
+<hr>
+</section>
+</section>
+<section id="part-3-schema-symmetry-and-data-migrations" class="level2">
+<h2 class="anchored" data-anchor-id="part-3-schema-symmetry-and-data-migrations">Part 3 — Schema Symmetry and Data Migrations</h2>
+<section id="the-x-o-symmetry" class="level3">
+<h3 class="anchored" data-anchor-id="the-x-o-symmetry">The X ↔︎ O symmetry</h3>
+<p>Tic-tac-toe is symmetric between X and O in everything except turn order. Both players have the same move type (mark an empty square), and both have the same win condition (three in a row). Any rule or schedule built for X can be mechanically converted to its O counterpart by swapping every occurrence of <code>X</code> for <code>O</code>, <code>xsq</code> for <code>osq</code>, and vice versa.</p>
+<p>Doing this swap by hand is tedious and error-prone. AlgebraicJulia provides a better tool: the <code>Migrate</code> functor.</p>
+</section>
+<section id="the-migrate-functor-in-algebraicjulia" class="level3">
+<h3 class="anchored" data-anchor-id="the-migrate-functor-in-algebraicjulia">The <code>Migrate</code> functor in AlgebraicJulia</h3>
+<p><code>Migrate</code> encodes a <strong>schema morphism</strong> as a Julia object that can be applied to any ACSet instance, ACSet morphism, or even an entire rewrite rule. Formally, if two schemas <code>S</code> and <code>T</code> are related by a functor <code>F : S → T</code>, then any <code>T</code>-instance can be <em>restricted</em> (pulled back) along <code>F</code> to produce an <code>S</code>-instance.</p>
+<p>In our case both the source and target schema are <code>SchTTT</code>, but we define a non-trivial self-map of the schema that swaps <code>X ↔︎ O</code> and <code>xsq ↔︎ osq</code> while leaving <code>Sq</code> and the edge morphisms <code>src</code>, <code>tgt</code>, <code>E</code> unchanged:</p>
+<div id="migration-functor" class="cell" data-execution_count="13">
+<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>F <span class="op">=</span> <span class="fu">Migrate</span>(</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    𝒞,</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Dict</span>(<span class="op">:</span>X <span class="op">=&gt;</span> <span class="op">:</span>O, <span class="op">:</span>O <span class="op">=&gt;</span> <span class="op">:</span>X, <span class="op">:</span>Sq <span class="op">=&gt;</span> <span class="op">:</span>Sq, <span class="op">:</span>E <span class="op">=&gt;</span> <span class="op">:</span>E, <span class="op">:</span>SquareNum <span class="op">=&gt;</span> <span class="op">:</span>SquareNum),</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Dict</span>(<span class="op">:</span>xsq <span class="op">=&gt;</span> <span class="op">:</span>osq, <span class="op">:</span>osq <span class="op">=&gt;</span> <span class="op">:</span>xsq, <span class="op">:</span>src <span class="op">=&gt;</span> <span class="op">:</span>src, <span class="op">:</span>tgt <span class="op">=&gt;</span> <span class="op">:</span>tgt, <span class="op">:</span>num <span class="op">=&gt;</span> <span class="op">:</span>num),</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    SchTTT, TTT)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>The first <code>Dict</code> maps <strong>objects</strong> (tables) and the second maps <strong>morphisms</strong> (foreign keys). Every object and every morphism in the schema must appear exactly once as a key.</p>
+<p>Once <code>F</code> is built, you can apply it to:</p>
+<ul>
+<li><strong>ACSet instances</strong>: <code>F(board)</code> returns a new board with all X pieces turned into O pieces and vice versa.</li>
+<li><strong>ACSet morphisms</strong>: <code>F(h)</code> pushes a homomorphism forward through the schema map.</li>
+<li><strong>Rules</strong>: <code>F(rule)</code> migrates the left pattern, the right pattern, the interface, and every application condition (NAC) of the rule.</li>
+<li><strong>Entire schedules</strong>: <code>F(sched)</code> (for AlgebraicRewriting <code>Schedule</code> objects) migrates every rule inside the schedule.</li>
+</ul>
+<p>This single functor definition is all we need to derive O’s entire ruleset from X’s without repeating any code.</p>
+<hr>
+</section>
+</section>
+<section id="part-4-building-the-schedules" class="level2">
+<h2 class="anchored" data-anchor-id="part-4-building-the-schedules">Part 4 — Building the Schedules</h2>
+<p>With moves defined as rewrite rules, the next step is to arrange them into a <em>schedule</em>: a wiring diagram that specifies whose turn it is, what happens when a win condition is met, and how play loops from round to round. A schedule is itself a composable object — sub-schedules for individual players can be defined independently and then wired together into a full game loop.</p>
+<p>Two RewriteGames primitives build on AlgebraicRewriting’s scheduling machinery:</p>
+<ul>
+<li><strong><code>PlayerRuleApp</code></strong> wraps a <code>Rule</code> and tags it with a player identity. When execution reaches this box the engine asks the player to choose a move rather than applying one automatically.</li>
+<li><strong><code>GameSched</code></strong> is a schedule with extra bookkeeping: it tracks which boxes belong to which player and retains enough information to rebuild the schedule after a schema migration.</li>
+</ul>
+<section id="playerruleapp-tagging-a-rule-with-a-player" class="level3">
+<h3 class="anchored" data-anchor-id="playerruleapp-tagging-a-rule-with-a-player"><code>PlayerRuleApp</code> — tagging a rule with a player</h3>
+<p><code>PlayerRuleApp</code> extends <code>RuleApp</code> by tagging the rule with a <em>player identity</em>:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>mark_x_app <span class="op">=</span> <span class="fu">PlayerRuleApp</span>(<span class="op">:</span>mark_x, mark_x, I, <span class="op">:</span>X; cat<span class="op">=</span>𝒞)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>Arguments: - <code>:mark_x</code> — the display name used by <code>view_sched</code> and stored in <code>Action</code> records. - <code>mark_x</code> — the AlgebraicRewriting <code>Rule</code>. - <code>I</code> — the interface ACSet (same role as the third argument to <code>RuleApp</code>). - <code>:X</code> — the player key; must match a key in the <code>agents</code> dict passed to <code>run_game_sched!</code>.</p>
+<p>When <code>run_game_sched!</code> reaches a <code>PlayerRuleApp</code> box, it enumerates all valid matches (legal moves), asks the registered agent to pick one, applies the chosen match, and records an <code>Experience</code>.</p>
+<p>Like a plain <code>RuleApp</code>, a <code>PlayerRuleApp</code> has two output ports: <strong>success</strong> (a move was made) and <strong>failure</strong> (no legal moves exist). If no matches exist (board full), the box routes to its failure port, signalling a tie.</p>
+<p>Agents can also <strong>pass voluntarily</strong>: returning <code>nothing</code> from <code>select_action</code> when matches are available routes to the same failure port with the world left unchanged, and records <code>action = nothing</code> in the <code>Experience</code>. The transcript loop below uses exactly this check (<code>exp.action !== nothing</code>) to distinguish a real move from a pass or no-match turn.</p>
+</section>
+<section id="gamesched-and-mk_game_sched" class="level3">
+<h3 class="anchored" data-anchor-id="gamesched-and-mk_game_sched"><code>GameSched</code> and <code>mk_game_sched</code></h3>
+<p>You construct a <code>GameSched</code> with <code>mk_game_sched</code>, which shares its signature with AlgebraicRewriting’s <code>mk_sched</code>:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="fu">mk_game_sched</span>(trace_args, init_args, N, boxes, body) <span class="op">-&gt;</span> GameSched</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<ul>
+<li><code>trace_args</code> — a <code>NamedTuple</code> declaring wires that loop back from the last return wire(s) to feed subsequent iterations.</li>
+<li><code>init_args</code> — a <code>NamedTuple</code> declaring wires active only on the first iteration.</li>
+<li><code>N</code> — the <code>Names</code> object for wire-type labels.</li>
+<li><code>boxes</code> — a <code>NamedTuple</code> of <code>PlayerRuleApp</code>, <code>GameSched</code>, bare <code>RuleApp</code>, <code>merge_wires(I)</code>, or any other <code>AgentBox</code>.</li>
+<li><code>body</code> — a <code>quote</code> block written in the wire-assignment DSL.</li>
+</ul>
+<p>The body DSL:</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="kw">quote</span></span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    out1, out2 <span class="op">=</span> <span class="fu">box_name</span>(in_wire)        <span class="co"># box with one input, two outputs</span></span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    merged_out <span class="op">=</span> <span class="fu">merge_box</span>(out1, out3)    <span class="co"># merge_wires: first active input wins</span></span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    out3, out4 <span class="op">=</span> <span class="fu">box2</span>([wire_a, wire_b])   <span class="co"># first active of wire_a/wire_b enters box2</span></span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> trace_wire, exit_wire          <span class="co"># first length(trace_args) wires loop back</span></span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p><code>[wire_a, wire_b]</code> passes the first active (non-<code>nothing</code>) wire into the box — the standard way to merge the <code>init</code> wire (first turn) with the <code>trace_arg</code> wire (later turns).</p>
+<p><code>view_sched(gs; names=N)</code> renders any <code>GameSched</code> as a Graphviz wiring diagram.</p>
+</section>
+<section id="win-check-sub-schedules" class="level3">
+<h3 class="anchored" data-anchor-id="win-check-sub-schedules">Win-check sub-schedules</h3>
+<p><code>x_won_check_gs</code> succeeds (port 1) when X has three in a row, fails (port 2) otherwise. It uses only plain <code>RuleApp</code> boxes — no player decisions — so execution is deterministic. The three patterns are tested in cascade; two <code>merge_wires</code> boxes collect the three success paths into a single <code>won</code> exit wire. This sub-schedule is wired into the outer game loop (not inside X’s turn schedule), so the same component can be placed after X’s move independently of move logic.</p>
+<div id="x-won-check" class="cell" data-execution_count="14">
+<div class="sourceCode cell-code" id="cb17"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>x_won_check_gs <span class="op">=</span> <span class="fu">mk_game_sched</span>((;), (init<span class="op">=:</span>I,), N,</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    (r<span class="op">=</span>x_rows_app, d1<span class="op">=</span>x_diag1_app, d2<span class="op">=</span>x_diag2_app, mw<span class="op">=</span><span class="fu">merge_wires</span>(I)),</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">quote</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>        won_r,  not_r  <span class="op">=</span> <span class="fu">r</span>(init)</span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>        won_d1, not_d1 <span class="op">=</span> <span class="fu">d1</span>(not_r)</span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>        won_d2, not_d2 <span class="op">=</span> <span class="fu">d2</span>(not_d1)</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>        won12 <span class="op">=</span> <span class="fu">mw</span>(won_r,  won_d1)</span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>        won   <span class="op">=</span> <span class="fu">mw</span>(won12,  won_d2)</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> won, not_d2</span>
+<span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div id="a7e6c76c" class="cell" data-execution_count="15">
+<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(x_won_check_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="16">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/cell-16-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="xs-turn-schedule" class="level3">
+<h3 class="anchored" data-anchor-id="xs-turn-schedule">X’s turn schedule</h3>
+<p><code>mark_x_app</code> is a <code>PlayerRuleApp</code> tagged <code>:X</code>. Port 1 fires after a successful mark; port 2 fires if no empty square exists (tie). Win detection is handled separately by the outer game loop, so this sub-schedule has only two return wires.</p>
+<div id="x-sched" class="cell" data-execution_count="16">
+<div class="sourceCode cell-code" id="cb19"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>mark_x_app <span class="op">=</span> <span class="fu">PlayerRuleApp</span>(<span class="op">:</span>mark_x, mark_x, I, <span class="op">:</span>X; cat<span class="op">=</span>𝒞)</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>X_sched_gs <span class="op">=</span> <span class="fu">mk_game_sched</span>((;), (init<span class="op">=:</span>I,), N,</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>    (mx<span class="op">=</span>mark_x_app,),</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">quote</span></span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>        moved, tie <span class="op">=</span> <span class="fu">mx</span>(init)</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> moved, tie</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div id="8796bdc1" class="cell" data-execution_count="17">
+<div class="sourceCode cell-code" id="cb20"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(X_sched_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="18">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/cell-18-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>The schedule has two return wires:</p>
+<ul>
+<li><code>moved</code> — X placed a piece; pass the updated board to the win check.</li>
+<li><code>tie</code> — board was full when X tried to move; exit as draw.</li>
+</ul>
+</section>
+<section id="migrating-to-os-schedule-with-player_migrate" class="level3">
+<h3 class="anchored" data-anchor-id="migrating-to-os-schedule-with-player_migrate">Migrating to O’s schedule with <code>player_migrate</code></h3>
+<p><code>player_migrate</code> applies the schema functor <code>F</code> to every box in a <code>GameSched</code> and remaps player identities:</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="fu">player_migrate</span>(F, gs<span class="op">::</span><span class="dt">GameSched</span>, player_map<span class="op">::</span><span class="dt">Dict{Symbol,Symbol}</span>) <span class="op">-&gt;</span> GameSched</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>It traverses all boxes recursively:</p>
+<ul>
+<li><strong><code>PlayerRuleApp</code></strong>: the rule and interface are migrated (<code>F(v.rule)</code>, <code>F(v.init)</code>), the player key is remapped, and the display name is updated via the optional <code>name_map</code> keyword argument.</li>
+<li><strong><code>GameSched</code></strong>: migrated recursively.</li>
+<li><strong>Other boxes</strong> (<code>RuleApp</code>, <code>merge_wires</code>): migrated via <code>F(box)</code>.</li>
+</ul>
+<p>The rebuilt schedule has the same wiring topology but with all X patterns swapped for O patterns throughout.</p>
+<div id="o-sched" class="cell" data-execution_count="18">
+<div class="sourceCode cell-code" id="cb22"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>O_sched_gs <span class="op">=</span> <span class="fu">player_migrate</span>(F, X_sched_gs, <span class="fu">Dict</span>(<span class="op">:</span>X <span class="op">=&gt;</span> <span class="op">:</span>O); name_map<span class="op">=</span><span class="fu">Dict</span>(<span class="op">:</span>mark_x <span class="op">=&gt;</span> <span class="op">:</span>mark_o))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div id="7cc8a7c1" class="cell" data-execution_count="19">
+<div class="sourceCode cell-code" id="cb23"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(O_sched_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="20">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/cell-20-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>The <code>name_map</code> argument renames the <code>:mark_x</code> box to <code>:mark_o</code> in the migrated schedule. The functional difference is entirely in the rules: the mark rule’s right-hand side now adds an <code>O</code> piece, and the <code>PlayerRuleApp</code> player tag has been updated from <code>:X</code> to <code>:O</code>.</p>
+<p>We also derive O’s win-check sub-schedule via the same migration:</p>
+<div id="o-win-check" class="cell" data-execution_count="20">
+<div class="sourceCode cell-code" id="cb24"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>o_won_check_gs <span class="op">=</span> <span class="fu">player_migrate</span>(F, x_won_check_gs, <span class="fu">Dict</span>(<span class="op">:</span>X <span class="op">=&gt;</span> <span class="op">:</span>O))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="full-game-loop" class="level3">
+<h3 class="anchored" data-anchor-id="full-game-loop">Full game loop</h3>
+<p>The outer schedule loops X then O, interleaving each player’s move with the corresponding win-check sub-schedule. If a win check succeeds, the world exits on a player-specific wire (<code>x_won</code> or <code>o_won</code>). If a player has no legal moves the board exits on the <code>tie</code> wire. Otherwise <code>o_cont</code> feeds back for the next round.</p>
+<div id="game-sched" class="cell" data-execution_count="21">
+<div class="sourceCode cell-code" id="cb25"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>game_sched <span class="op">=</span> <span class="fu">mk_game_sched</span>(</span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a>    (trace_arg<span class="op">=:</span>I,),</span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true" tabindex="-1"></a>    (init<span class="op">=:</span>I,),</span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true" tabindex="-1"></a>    N,</span>
+<span id="cb25-5"><a href="#cb25-5" aria-hidden="true" tabindex="-1"></a>    (x<span class="op">=</span>X_sched_gs, o<span class="op">=</span>O_sched_gs, cx<span class="op">=</span>x_won_check_gs, co<span class="op">=</span>o_won_check_gs, mw<span class="op">=</span><span class="fu">merge_wires</span>(I)),</span>
+<span id="cb25-6"><a href="#cb25-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">quote</span></span>
+<span id="cb25-7"><a href="#cb25-7" aria-hidden="true" tabindex="-1"></a>        x_moved, x_tie <span class="op">=</span> <span class="fu">x</span>([init, trace_arg])</span>
+<span id="cb25-8"><a href="#cb25-8" aria-hidden="true" tabindex="-1"></a>        x_won, x_cont  <span class="op">=</span> <span class="fu">cx</span>(x_moved)</span>
+<span id="cb25-9"><a href="#cb25-9" aria-hidden="true" tabindex="-1"></a>        o_moved, o_tie <span class="op">=</span> <span class="fu">o</span>(x_cont)</span>
+<span id="cb25-10"><a href="#cb25-10" aria-hidden="true" tabindex="-1"></a>        o_won, o_cont  <span class="op">=</span> <span class="fu">co</span>(o_moved)</span>
+<span id="cb25-11"><a href="#cb25-11" aria-hidden="true" tabindex="-1"></a>        tie <span class="op">=</span> <span class="fu">mw</span>(x_tie, o_tie)</span>
+<span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> o_cont, x_won, o_won, tie</span>
+<span id="cb25-13"><a href="#cb25-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div id="594898ba" class="cell" data-execution_count="22">
+<div class="sourceCode cell-code" id="cb26"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(game_sched; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="23">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/cell-23-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Return wires:</p>
+<ul>
+<li><code>o_cont</code> — trace wire; fed back at the start of the next round.</li>
+<li><code>x_won</code> — X has three in a row; game ends, X wins.</li>
+<li><code>o_won</code> — O has three in a row; game ends, O wins.</li>
+<li><code>tie</code> — neither player could move; game ends as a draw.</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="part-5-running-the-game" class="level2">
+<h2 class="anchored" data-anchor-id="part-5-running-the-game">Part 5 — Running the Game</h2>
+<p>With the schedule built, the final step is to package everything into a <code>Game</code> record, supply agents for each player, and run episodes.</p>
+<section id="game-metadata-record" class="level3">
+<h3 class="anchored" data-anchor-id="game-metadata-record"><code>Game</code> metadata record</h3>
+<p><code>Game</code> is a lightweight struct that bundles the metadata describing a game:</p>
+<div class="sourceCode" id="cb27"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> Game</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>    players        <span class="op">::</span><span class="dt"> Vector{Symbol}</span></span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>    terminal       <span class="op">::</span><span class="dt"> Union{Function, Nothing}       </span><span class="co"># W -&gt; (done, winner), or nothing</span></span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a>    initial        <span class="op">::</span><span class="dt"> Function                       </span><span class="co"># () -&gt; ACSet</span></span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a>    schema         <span class="op">::</span><span class="dt"> Any                            </span><span class="co"># schema presentation (optional)</span></span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a>    win_conditions <span class="op">::</span><span class="dt"> Union{Dict{Symbol,Any}, Nothing}</span></span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<ul>
+<li><code>players</code> declares who participates and in what order.</li>
+<li><code>terminal</code> is a legacy callback <code>W -&gt; (Bool, Symbol|Nothing)</code> called after every move. Set to <code>nothing</code> (the default) when win conditions are expressed as exit wires.</li>
+<li><code>initial</code> is a zero-argument factory called once per episode to produce a fresh world ACSet. Keeping it as a callable (rather than a single ACSet) ensures episodes are truly independent.</li>
+<li><code>schema</code> is optional metadata used by <code>GameMigration</code>.</li>
+<li><code>win_conditions</code> maps exit wire names to winner identities. When non-<code>nothing</code>, <code>run_game_sched!</code> uses it to resolve the winner from the active exit wire instead of calling <code>terminal</code>. Use <code>nothing</code> for draw wires.</li>
+</ul>
+</section>
+<section id="functionagent-the-simplest-agent-type" class="level3">
+<h3 class="anchored" data-anchor-id="functionagent-the-simplest-agent-type"><code>FunctionAgent</code> — the simplest agent type</h3>
+<div class="sourceCode" id="cb28"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="fu">FunctionAgent</span>((state, actions) <span class="op">-&gt;</span> <span class="fu">rand</span>(actions))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>A <code>FunctionAgent</code> wraps any Julia function with signature <code>(EncodedState, Vector{Action}) -&gt; Action</code> into an <code>AbstractAgent</code>. It is the workhorse for random baselines and hand-coded heuristics.</p>
+</section>
+<section id="run_game_sched-and-experience" class="level3">
+<h3 class="anchored" data-anchor-id="run_game_sched-and-experience"><code>run_game_sched!</code> and <code>Experience</code></h3>
+<div class="sourceCode" id="cb29"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="fu">run_game_sched!</span>(gs<span class="op">::</span><span class="dt">GameSched</span>, game<span class="op">::</span><span class="dt">Game</span>, agents<span class="op">::</span><span class="dt">Dict</span>; T_max<span class="op">=</span><span class="fl">1000</span>)</span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a>    <span class="op">-&gt;</span> <span class="dt">Vector</span>{Experience}</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>The runner calls <code>game.initial()</code> to create the starting world and <code>game.terminal</code> as the stopping criterion. Every <code>PlayerRuleApp</code> execution emits one <code>Experience</code>:</p>
+<div class="sourceCode" id="cb30"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> Experience</span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>    player        <span class="op">::</span><span class="dt"> Symbol</span></span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a>    state         <span class="op">::</span><span class="dt"> GameState               </span><span class="co"># world before the move</span></span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>    legal_actions <span class="op">::</span><span class="dt"> Vector{Action}</span></span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a>    action        <span class="op">::</span><span class="dt"> Union{Action, Nothing}  </span><span class="co"># nothing = no legal moves (tie)</span></span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a>    next_state    <span class="op">::</span><span class="dt"> GameState               </span><span class="co"># world after the move</span></span>
+<span id="cb30-7"><a href="#cb30-7" aria-hidden="true" tabindex="-1"></a>    done          <span class="op">::</span><span class="dt"> Bool</span></span>
+<span id="cb30-8"><a href="#cb30-8" aria-hidden="true" tabindex="-1"></a>    winner        <span class="op">::</span><span class="dt"> Union{Symbol, Nothing}</span></span>
+<span id="cb30-9"><a href="#cb30-9" aria-hidden="true" tabindex="-1"></a>    info          <span class="op">::</span><span class="dt"> Dict{Symbol, Any}</span></span>
+<span id="cb30-10"><a href="#cb30-10" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</section>
+<section id="win-conditions-and-game-record" class="level3">
+<h3 class="anchored" data-anchor-id="win-conditions-and-game-record">Win conditions and game record</h3>
+<p>Rather than a Julia callback, the game’s termination logic is now expressed entirely by the exit wires in <code>game_sched</code>. We only need to tell <code>run_game_sched!</code> which player each exit wire belongs to via <code>win_conditions</code>:</p>
+<div id="game-record" class="cell" data-execution_count="23">
+<div class="sourceCode cell-code" id="cb31"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>game <span class="op">=</span> <span class="fu">Game</span>(SchTTT;</span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true" tabindex="-1"></a>    players        <span class="op">=</span> [<span class="op">:</span>X, <span class="op">:</span>O],</span>
+<span id="cb31-3"><a href="#cb31-3" aria-hidden="true" tabindex="-1"></a>    initial        <span class="op">=</span> create_board,</span>
+<span id="cb31-4"><a href="#cb31-4" aria-hidden="true" tabindex="-1"></a>    win_conditions <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, Any}</span>(<span class="op">:</span>x_won <span class="op">=&gt;</span> <span class="op">:</span>X, <span class="op">:</span>o_won <span class="op">=&gt;</span> <span class="op">:</span>O, <span class="op">:</span>tie <span class="op">=&gt;</span> <span class="cn">nothing</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<div id="agents" class="cell" data-execution_count="24">
+<div class="sourceCode cell-code" id="cb32"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">42</span>)</span>
+<span id="cb32-2"><a href="#cb32-2" aria-hidden="true" tabindex="-1"></a>agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(</span>
+<span id="cb32-3"><a href="#cb32-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">:</span>X <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((state, actions) <span class="op">-&gt;</span> <span class="fu">rand</span>(actions)),</span>
+<span id="cb32-4"><a href="#cb32-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">:</span>O <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((state, actions) <span class="op">-&gt;</span> <span class="fu">rand</span>(actions)),</span>
+<span id="cb32-5"><a href="#cb32-5" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="single-episode-and-final-board-state" class="level3">
+<h3 class="anchored" data-anchor-id="single-episode-and-final-board-state">Single episode and final board state</h3>
+<div id="single-episode" class="cell" data-execution_count="25">
+<div class="sourceCode cell-code" id="cb33"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">42</span>)</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a>exps <span class="op">=</span> <span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>)</span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Episode length : "</span>, <span class="fu">episode_length</span>(exps))</span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Winner         : "</span>, <span class="fu">isempty</span>(exps) ? <span class="st">"N/A"</span> <span class="op">:</span> <span class="fu">something</span>(exps[<span class="kw">end</span>].winner, <span class="st">"draw"</span>))</span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Done flag      : "</span>, <span class="fu">isempty</span>(exps) ? <span class="cn">false</span>  <span class="op">:</span> exps[<span class="kw">end</span>].done)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Episode length : 7
+Winner         : X
+Done flag      : true</code></pre>
+</div>
+</div>
+<p>After the episode, <code>exps[end].next_state.world</code> holds the final board ACSet:</p>
+<div id="cell-final-board" class="cell" data-execution_count="26">
+<div class="sourceCode cell-code" id="cb35"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a>final_board <span class="op">=</span> exps[<span class="kw">end</span>].next_state.world</span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a><span class="fu">view_TTT</span>(final_board)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display" data-execution_count="27">
+<div>
+<figure class="figure">
+<p><img src="TicTacToeGameplay_files/figure-html/final-board-output-1.svg" id="final-board" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p><strong>Note:</strong> Each square carries a stable <code>:num</code> attribute (1–9) set at board creation and never modified by any rewrite rule. The transcript below reads this attribute to display the square number chosen by each player.</p>
+<p>Each <code>Experience</code> in <code>exps</code> records which player moved, which square was chosen (via the match morphism), and whether the episode ended:</p>
+<div id="transcript" class="cell" data-execution_count="27">
+<div class="sourceCode cell-code" id="cb36"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i, exp) <span class="kw">in</span> <span class="fu">enumerate</span>(exps)</span>
+<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> exp.action <span class="op">!==</span> <span class="cn">nothing</span></span>
+<span id="cb36-3"><a href="#cb36-3" aria-hidden="true" tabindex="-1"></a>        sq_idx <span class="op">=</span> <span class="fu">collect</span>(<span class="fu">components</span>(exp.action.match)[<span class="op">:</span>Sq])[<span class="fl">1</span>]</span>
+<span id="cb36-4"><a href="#cb36-4" aria-hidden="true" tabindex="-1"></a>        sq     <span class="op">=</span> <span class="fu">subpart</span>(exp.state.world, sq_idx, <span class="op">:</span>num)</span>
+<span id="cb36-5"><a href="#cb36-5" aria-hidden="true" tabindex="-1"></a>        <span class="fu">println</span>(<span class="st">"Turn </span><span class="sc">$</span>i<span class="st">: </span><span class="sc">$</span>(exp.player)<span class="st"> → square </span><span class="sc">$</span>sq<span class="st">  (done=</span><span class="sc">$</span>(exp.done)<span class="st">, winner=</span><span class="sc">$</span>(exp.winner)<span class="st">)"</span>)</span>
+<span id="cb36-6"><a href="#cb36-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span></span>
+<span id="cb36-7"><a href="#cb36-7" aria-hidden="true" tabindex="-1"></a>        <span class="fu">println</span>(<span class="st">"Turn </span><span class="sc">$</span>i<span class="st">: </span><span class="sc">$</span>(exp.player)<span class="st"> passed  (done=</span><span class="sc">$</span>(exp.done)<span class="st">, winner=</span><span class="sc">$</span>(exp.winner)<span class="st">)"</span>)</span>
+<span id="cb36-8"><a href="#cb36-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb36-9"><a href="#cb36-9" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Turn 1: X → square 6  (done=false, winner=nothing)
+Turn 2: O → square 4  (done=false, winner=nothing)
+Turn 3: X → square 5  (done=false, winner=nothing)
+Turn 4: O → square 8  (done=false, winner=nothing)
+Turn 5: X → square 7  (done=false, winner=nothing)
+Turn 6: O → square 1  (done=false, winner=nothing)
+Turn 7: X → square 3  (done=true, winner=X)</code></pre>
+</div>
+</div>
+</section>
+<section id="statistics-over-many-episodes" class="level3">
+<h3 class="anchored" data-anchor-id="statistics-over-many-episodes">Statistics over many episodes</h3>
+<div id="statistics" class="cell" data-execution_count="28">
+<div class="sourceCode cell-code" id="cb38"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a>all_exps <span class="op">=</span> [<span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>) for _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">200</span>]</span>
+<span id="cb38-2"><a href="#cb38-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-3"><a href="#cb38-3" aria-hidden="true" tabindex="-1"></a>x_wins  <span class="op">=</span> <span class="fu">count</span>(<span class="cn">e</span> <span class="op">-&gt;</span> !<span class="fu">isempty</span>(<span class="cn">e</span>) <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].winner <span class="op">===</span> <span class="op">:</span>X, all_exps)</span>
+<span id="cb38-4"><a href="#cb38-4" aria-hidden="true" tabindex="-1"></a>o_wins  <span class="op">=</span> <span class="fu">count</span>(<span class="cn">e</span> <span class="op">-&gt;</span> !<span class="fu">isempty</span>(<span class="cn">e</span>) <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].winner <span class="op">===</span> <span class="op">:</span>O, all_exps)</span>
+<span id="cb38-5"><a href="#cb38-5" aria-hidden="true" tabindex="-1"></a>draws   <span class="op">=</span> <span class="fu">count</span>(<span class="cn">e</span> <span class="op">-&gt;</span> !<span class="fu">isempty</span>(<span class="cn">e</span>) <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].winner <span class="op">===</span> <span class="cn">nothing</span> <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].done, all_exps)</span>
+<span id="cb38-6"><a href="#cb38-6" aria-hidden="true" tabindex="-1"></a>lengths <span class="op">=</span> [<span class="fu">episode_length</span>(<span class="cn">e</span>) for <span class="cn">e</span> <span class="kw">in</span> all_exps]</span>
+<span id="cb38-7"><a href="#cb38-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-8"><a href="#cb38-8" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"X wins  : </span><span class="sc">$</span>x_wins<span class="st"> / 200  (</span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>x_wins<span class="op">/</span><span class="fl">200</span>; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%)"</span>)</span>
+<span id="cb38-9"><a href="#cb38-9" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"O wins  : </span><span class="sc">$</span>o_wins<span class="st"> / 200  (</span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>o_wins<span class="op">/</span><span class="fl">200</span>; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%)"</span>)</span>
+<span id="cb38-10"><a href="#cb38-10" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Draws   : </span><span class="sc">$</span>draws<span class="st"> / 200"</span>)</span>
+<span id="cb38-11"><a href="#cb38-11" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Mean episode length : "</span>, <span class="fu">round</span>(<span class="fu">mean</span>(lengths); digits<span class="op">=</span><span class="fl">2</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>X wins  : 131 / 200  (65.5%)
+O wins  : 55 / 200  (27.5%)
+Draws   : 14 / 200
+Mean episode length : 7.12</code></pre>
+</div>
+</div>
+<p>X goes first, so it has an advantage under purely random play — expect roughly 60–70 % for X, 25–30 % for O, and ~7 % draws.</p>
+<hr>
+</section>
+</section>
+<section id="summary" class="level2">
+<h2 class="anchored" data-anchor-id="summary">Summary</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 32%">
+<col style="width: 67%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Concept</th>
+<th>What to reach for</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>World representation</td>
+<td>ACSet with schema objects and morphisms</td>
+</tr>
+<tr class="even">
+<td>Schema symmetry</td>
+<td><code>Migrate</code> functor — apply once, derives X↔︎O swap for free</td>
+</tr>
+<tr class="odd">
+<td>Legal moves</td>
+<td><code>Rule</code> with <code>NAC</code> conditions; <code>RuleApp</code> for two-port scheduling</td>
+</tr>
+<tr class="even">
+<td>Player decisions</td>
+<td><code>PlayerRuleApp(:name, rule, I, :player; cat=𝒞)</code></td>
+</tr>
+<tr class="odd">
+<td>Schedule construction</td>
+<td><code>mk_game_sched(trace_args, init_args, N, boxes, body)</code></td>
+</tr>
+<tr class="even">
+<td>Schedule visualisation</td>
+<td><code>view_sched(gs; names=N)</code></td>
+</tr>
+<tr class="odd">
+<td>Migrate X→O schedule</td>
+<td><code>player_migrate(F, X_sched_gs, Dict(:X =&gt; :O); name_map=Dict(:mark_x =&gt; :mark_o))</code></td>
+</tr>
+<tr class="even">
+<td>Game metadata</td>
+<td><code>Game(schema; players, initial, win_conditions=Dict(...))</code></td>
+</tr>
+<tr class="odd">
+<td>Run an episode</td>
+<td><code>run_game_sched!(sched, game, agents; T_max=20)</code></td>
+</tr>
+<tr class="even">
+<td>Inspect final state</td>
+<td><code>exps[end].next_state.world</code> → <code>view_TTT(...)</code></td>
+</tr>
+<tr class="odd">
+<td>Analyse results</td>
+<td><code>win_rate</code>, <code>episode_length</code>, <code>action_counts</code></td>
+</tr>
+</tbody>
+</table>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+window.document.addEventListener("DOMContentLoaded", function (event) {
+  const toggleBodyColorMode = (bsSheetEl) => {
+    const mode = bsSheetEl.getAttribute("data-mode");
+    const bodyEl = window.document.querySelector("body");
+    if (mode === "dark") {
+      bodyEl.classList.add("quarto-dark");
+      bodyEl.classList.remove("quarto-light");
+    } else {
+      bodyEl.classList.add("quarto-light");
+      bodyEl.classList.remove("quarto-dark");
+    }
+  }
+  const toggleBodyColorPrimary = () => {
+    const bsSheetEl = window.document.querySelector("link#quarto-bootstrap");
+    if (bsSheetEl) {
+      toggleBodyColorMode(bsSheetEl);
+    }
+  }
+  toggleBodyColorPrimary();  
+  const icon = "";
+  const anchorJS = new window.AnchorJS();
+  anchorJS.options = {
+    placement: 'right',
+    icon: icon
+  };
+  anchorJS.add('.anchored');
+  const isCodeAnnotation = (el) => {
+    for (const clz of el.classList) {
+      if (clz.startsWith('code-annotation-')) {                     
+        return true;
+      }
+    }
+    return false;
+  }
+  const onCopySuccess = function(e) {
+    // button target
+    const button = e.trigger;
+    // don't keep focus
+    button.blur();
+    // flash "checked"
+    button.classList.add('code-copy-button-checked');
+    var currentTitle = button.getAttribute("title");
+    button.setAttribute("title", "Copied!");
+    let tooltip;
+    if (window.bootstrap) {
+      button.setAttribute("data-bs-toggle", "tooltip");
+      button.setAttribute("data-bs-placement", "left");
+      button.setAttribute("data-bs-title", "Copied!");
+      tooltip = new bootstrap.Tooltip(button, 
+        { trigger: "manual", 
+          customClass: "code-copy-button-tooltip",
+          offset: [0, -8]});
+      tooltip.show();    
+    }
+    setTimeout(function() {
+      if (tooltip) {
+        tooltip.hide();
+        button.removeAttribute("data-bs-title");
+        button.removeAttribute("data-bs-toggle");
+        button.removeAttribute("data-bs-placement");
+      }
+      button.setAttribute("title", currentTitle);
+      button.classList.remove('code-copy-button-checked');
+    }, 1000);
+    // clear code selection
+    e.clearSelection();
+  }
+  const getTextToCopy = function(trigger) {
+      const codeEl = trigger.previousElementSibling.cloneNode(true);
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+  }
+  const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+    text: getTextToCopy
+  });
+  clipboard.on('success', onCopySuccess);
+  if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+    // For code content inside modals, clipBoardJS needs to be initialized with a container option
+    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
+    const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+      text: getTextToCopy,
+      container: window.document.getElementById('quarto-embedded-source-code-modal')
+    });
+    clipboardModal.on('success', onCopySuccess);
+  }
+    var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+    var mailtoRegex = new RegExp(/^mailto:/);
+      var filterRegex = new RegExp('/' + window.location.host + '/');
+    var isInternal = (href) => {
+        return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+    }
+    // Inspect non-navigation links and adorn them if external
+ 	var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+    for (var i=0; i<links.length; i++) {
+      const link = links[i];
+      if (!isInternal(link.href)) {
+        // undo the damage that might have been done by quarto-nav.js in the case of
+        // links that we want to consider external
+        if (link.dataset.originalHref !== undefined) {
+          link.href = link.dataset.originalHref;
+        }
+      }
+    }
+  function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+    const config = {
+      allowHTML: true,
+      maxWidth: 500,
+      delay: 100,
+      arrow: false,
+      appendTo: function(el) {
+          return el.parentElement;
+      },
+      interactive: true,
+      interactiveBorder: 10,
+      theme: 'quarto',
+      placement: 'bottom-start',
+    };
+    if (contentFn) {
+      config.content = contentFn;
+    }
+    if (onTriggerFn) {
+      config.onTrigger = onTriggerFn;
+    }
+    if (onUntriggerFn) {
+      config.onUntrigger = onUntriggerFn;
+    }
+    window.tippy(el, config); 
+  }
+  const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+  for (var i=0; i<noterefs.length; i++) {
+    const ref = noterefs[i];
+    tippyHover(ref, function() {
+      // use id or data attribute instead here
+      let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+      try { href = new URL(href).hash; } catch {}
+      const id = href.replace(/^#\/?/, "");
+      const note = window.document.getElementById(id);
+      if (note) {
+        return note.innerHTML;
+      } else {
+        return "";
+      }
+    });
+  }
+  const xrefs = window.document.querySelectorAll('a.quarto-xref');
+  const processXRef = (id, note) => {
+    // Strip column container classes
+    const stripColumnClz = (el) => {
+      el.classList.remove("page-full", "page-columns");
+      if (el.children) {
+        for (const child of el.children) {
+          stripColumnClz(child);
+        }
+      }
+    }
+    stripColumnClz(note)
+    if (id === null || id.startsWith('sec-')) {
+      // Special case sections, only their first couple elements
+      const container = document.createElement("div");
+      if (note.children && note.children.length > 2) {
+        container.appendChild(note.children[0].cloneNode(true));
+        for (let i = 1; i < note.children.length; i++) {
+          const child = note.children[i];
+          if (child.tagName === "P" && child.innerText === "") {
+            continue;
+          } else {
+            container.appendChild(child.cloneNode(true));
+            break;
+          }
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(container);
+        }
+        return container.innerHTML
+      } else {
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        return note.innerHTML;
+      }
+    } else {
+      // Remove any anchor links if they are present
+      const anchorLink = note.querySelector('a.anchorjs-link');
+      if (anchorLink) {
+        anchorLink.remove();
+      }
+      if (window.Quarto?.typesetMath) {
+        window.Quarto.typesetMath(note);
+      }
+      // TODO in 1.5, we should make sure this works without a callout special case
+      if (note.classList.contains("callout")) {
+        return note.outerHTML;
+      } else {
+        return note.innerHTML;
+      }
+    }
+  }
+  for (var i=0; i<xrefs.length; i++) {
+    const xref = xrefs[i];
+    tippyHover(xref, undefined, function(instance) {
+      instance.disable();
+      let url = xref.getAttribute('href');
+      let hash = undefined; 
+      if (url.startsWith('#')) {
+        hash = url;
+      } else {
+        try { hash = new URL(url).hash; } catch {}
+      }
+      if (hash) {
+        const id = hash.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note !== null) {
+          try {
+            const html = processXRef(id, note.cloneNode(true));
+            instance.setContent(html);
+          } finally {
+            instance.enable();
+            instance.show();
+          }
+        } else {
+          // See if we can fetch this
+          fetch(url.split('#')[0])
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.getElementById(id);
+            if (note !== null) {
+              const html = processXRef(id, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      } else {
+        // See if we can fetch a full url (with no hash to target)
+        // This is a special case and we should probably do some content thinning / targeting
+        fetch(url)
+        .then(res => res.text())
+        .then(html => {
+          const parser = new DOMParser();
+          const htmlDoc = parser.parseFromString(html, "text/html");
+          const note = htmlDoc.querySelector('main.content');
+          if (note !== null) {
+            // This should only happen for chapter cross references
+            // (since there is no id in the URL)
+            // remove the first header
+            if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+              note.children[0].remove();
+            }
+            const html = processXRef(null, note);
+            instance.setContent(html);
+          } 
+        }).finally(() => {
+          instance.enable();
+          instance.show();
+        });
+      }
+    }, function(instance) {
+    });
+  }
+      let selectedAnnoteEl;
+      const selectorForAnnotation = ( cell, annotation) => {
+        let cellAttr = 'data-code-cell="' + cell + '"';
+        let lineAttr = 'data-code-annotation="' +  annotation + '"';
+        const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+        return selector;
+      }
+      const selectCodeLines = (annoteEl) => {
+        const doc = window.document;
+        const targetCell = annoteEl.getAttribute("data-target-cell");
+        const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+        const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+        const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+        const lineIds = lines.map((line) => {
+          return targetCell + "-" + line;
+        })
+        let top = null;
+        let height = null;
+        let parent = null;
+        if (lineIds.length > 0) {
+            //compute the position of the single el (top and bottom and make a div)
+            const el = window.document.getElementById(lineIds[0]);
+            top = el.offsetTop;
+            height = el.offsetHeight;
+            parent = el.parentElement.parentElement;
+          if (lineIds.length > 1) {
+            const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+            const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+            height = bottom - top;
+          }
+          if (top !== null && height !== null && parent !== null) {
+            // cook up a div (if necessary) and position it 
+            let div = window.document.getElementById("code-annotation-line-highlight");
+            if (div === null) {
+              div = window.document.createElement("div");
+              div.setAttribute("id", "code-annotation-line-highlight");
+              div.style.position = 'absolute';
+              parent.appendChild(div);
+            }
+            div.style.top = top - 2 + "px";
+            div.style.height = height + 4 + "px";
+            div.style.left = 0;
+            let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+            if (gutterDiv === null) {
+              gutterDiv = window.document.createElement("div");
+              gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+              gutterDiv.style.position = 'absolute';
+              const codeCell = window.document.getElementById(targetCell);
+              const gutter = codeCell.querySelector('.code-annotation-gutter');
+              gutter.appendChild(gutterDiv);
+            }
+            gutterDiv.style.top = top - 2 + "px";
+            gutterDiv.style.height = height + 4 + "px";
+          }
+          selectedAnnoteEl = annoteEl;
+        }
+      };
+      const unselectCodeLines = () => {
+        const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+        elementsIds.forEach((elId) => {
+          const div = window.document.getElementById(elId);
+          if (div) {
+            div.remove();
+          }
+        });
+        selectedAnnoteEl = undefined;
+      };
+        // Handle positioning of the toggle
+    window.addEventListener(
+      "resize",
+      throttle(() => {
+        elRect = undefined;
+        if (selectedAnnoteEl) {
+          selectCodeLines(selectedAnnoteEl);
+        }
+      }, 10)
+    );
+    function throttle(fn, ms) {
+    let throttle = false;
+    let timer;
+      return (...args) => {
+        if(!throttle) { // first call gets through
+            fn.apply(this, args);
+            throttle = true;
+        } else { // all the others get throttled
+            if(timer) clearTimeout(timer); // cancel #2
+            timer = setTimeout(() => {
+              fn.apply(this, args);
+              timer = throttle = false;
+            }, ms);
+        }
+      };
+    }
+      // Attach click handler to the DT
+      const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+      for (const annoteDlNode of annoteDls) {
+        annoteDlNode.addEventListener('click', (event) => {
+          const clickedEl = event.target;
+          if (clickedEl !== selectedAnnoteEl) {
+            unselectCodeLines();
+            const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+            if (activeEl) {
+              activeEl.classList.remove('code-annotation-active');
+            }
+            selectCodeLines(clickedEl);
+            clickedEl.classList.add('code-annotation-active');
+          } else {
+            // Unselect the line
+            unselectCodeLines();
+            clickedEl.classList.remove('code-annotation-active');
+          }
+        });
+      }
+  const findCites = (el) => {
+    const parentEl = el.parentElement;
+    if (parentEl) {
+      const cites = parentEl.dataset.cites;
+      if (cites) {
+        return {
+          el,
+          cites: cites.split(' ')
+        };
+      } else {
+        return findCites(el.parentElement)
+      }
+    } else {
+      return undefined;
+    }
+  };
+  var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+  for (var i=0; i<bibliorefs.length; i++) {
+    const ref = bibliorefs[i];
+    const citeInfo = findCites(ref);
+    if (citeInfo) {
+      tippyHover(citeInfo.el, function() {
+        var popup = window.document.createElement('div');
+        citeInfo.cites.forEach(function(cite) {
+          var citeDiv = window.document.createElement('div');
+          citeDiv.classList.add('hanging-indent');
+          citeDiv.classList.add('csl-entry');
+          var biblioDiv = window.document.getElementById('ref-' + cite);
+          if (biblioDiv) {
+            citeDiv.innerHTML = biblioDiv.innerHTML;
+          }
+          popup.appendChild(citeDiv);
+        });
+        return popup.innerHTML;
+      });
+    }
+  }
+});
+</script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
