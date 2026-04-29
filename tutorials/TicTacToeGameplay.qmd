@@ -1054,10 +1054,9 @@ $$\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N} G_i \cdot \log\pi_\theta(a_i \mid s_i
 
 ```{julia}
 #| label: reinforce-loss
-function reinforce_loss(model, batch::Vector{StepRecord}, returns::Vector{Float32})
+function reinforce_loss(model, batch::Vector{StepRecord}, returns::Vector{Float32}, graphs::Vector{GNNGraph})
     total = 0f0
-    for (rec, G) in zip(batch, returns)
-        g, _ = world_to_gnn(rec.world)
+    for (rec, G, g) in zip(batch, returns, graphs)
         logits = model(g, rec.sq_ids)
         log_probs = logits .- log(sum(exp.(logits)))   # logsoftmax
         total -= log_probs[rec.chosen] * G
@@ -1093,7 +1092,8 @@ function train_self_play!(model, opt_state, game, game_sched;
             end
         end
 
-        loss, grads = Flux.withgradient(m -> reinforce_loss(m, batch, returns), model)
+        graphs = GNNGraph[world_to_gnn(rec.world)[1] for rec in batch]
+        loss, grads = Flux.withgradient(m -> reinforce_loss(m, batch, returns, graphs), model)
         Flux.update!(opt_state, model, grads[1])
 
         if update % eval_every == 0
@@ -1223,8 +1223,9 @@ for _ in 1:50
 end
 
 t_grad = @elapsed begin
+    test_graphs = GNNGraph[world_to_gnn(rec.world)[1] for rec in test_batch]
     loss_val, grads = Flux.withgradient(
-        m -> reinforce_loss(m, test_batch, test_returns), gnn_model)
+        m -> reinforce_loss(m, test_batch, test_returns, test_graphs), gnn_model)
     Flux.update!(opt_state, gnn_model, grads[1])
 end
 println("Gradient update (batch of $(length(test_batch)) steps): " *
