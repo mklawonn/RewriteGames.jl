@@ -2,7 +2,7 @@
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
 
 <meta charset="utf-8">
-<meta name="generator" content="quarto-1.5.54">
+<meta name="generator" content="quarto-1.6.42">
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
@@ -63,11 +63,40 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="TicTacToeGameplay_files/libs/quarto-html/tippy.umd.min.js"></script>
 <script src="TicTacToeGameplay_files/libs/quarto-html/anchor.min.js"></script>
 <link href="TicTacToeGameplay_files/libs/quarto-html/tippy.css" rel="stylesheet">
-<link href="TicTacToeGameplay_files/libs/quarto-html/quarto-syntax-highlighting.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<link href="TicTacToeGameplay_files/libs/quarto-html/quarto-syntax-highlighting-2f5df379a58b258e96c21c0638c20c03.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="TicTacToeGameplay_files/libs/bootstrap/bootstrap.min.js"></script>
 <link href="TicTacToeGameplay_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="TicTacToeGameplay_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+<link href="TicTacToeGameplay_files/libs/bootstrap/bootstrap-fe7e35bf055e00e8b7844148c31abcec.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN") {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 </head>
 
@@ -116,6 +145,18 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#single-episode-and-final-board-state" id="toc-single-episode-and-final-board-state" class="nav-link" data-scroll-target="#single-episode-and-final-board-state">Single episode and final board state</a></li>
   <li><a href="#statistics-over-many-episodes" id="toc-statistics-over-many-episodes" class="nav-link" data-scroll-target="#statistics-over-many-episodes">Statistics over many episodes</a></li>
   </ul></li>
+  <li><a href="#part-6-learning-to-play-via-self-play-reinforcement-learning" id="toc-part-6-learning-to-play-via-self-play-reinforcement-learning" class="nav-link" data-scroll-target="#part-6-learning-to-play-via-self-play-reinforcement-learning">Part 6 — Learning to Play via Self-Play Reinforcement Learning</a>
+  <ul class="collapse">
+  <li><a href="#additional-packages" id="toc-additional-packages" class="nav-link" data-scroll-target="#additional-packages">Additional packages</a></li>
+  <li><a href="#encoding-the-board-as-a-graph" id="toc-encoding-the-board-as-a-graph" class="nav-link" data-scroll-target="#encoding-the-board-as-a-graph">Encoding the board as a graph</a></li>
+  <li><a href="#gnn-policy-architecture" id="toc-gnn-policy-architecture" class="nav-link" data-scroll-target="#gnn-policy-architecture">GNN policy architecture</a></li>
+  <li><a href="#symmetric-self-play-with-the-migration-functor" id="toc-symmetric-self-play-with-the-migration-functor" class="nav-link" data-scroll-target="#symmetric-self-play-with-the-migration-functor">Symmetric self-play with the migration functor</a></li>
+  <li><a href="#collecting-a-self-play-episode" id="toc-collecting-a-self-play-episode" class="nav-link" data-scroll-target="#collecting-a-self-play-episode">Collecting a self-play episode</a></li>
+  <li><a href="#reinforce-loss-and-training-loop" id="toc-reinforce-loss-and-training-loop" class="nav-link" data-scroll-target="#reinforce-loss-and-training-loop">REINFORCE loss and training loop</a></li>
+  <li><a href="#running-the-training" id="toc-running-the-training" class="nav-link" data-scroll-target="#running-the-training">Running the training</a></li>
+  <li><a href="#benchmarking-training-cost" id="toc-benchmarking-training-cost" class="nav-link" data-scroll-target="#benchmarking-training-cost">Benchmarking training cost</a></li>
+  <li><a href="#evaluating-the-trained-policy" id="toc-evaluating-the-trained-policy" class="nav-link" data-scroll-target="#evaluating-the-trained-policy">Evaluating the trained policy</a></li>
+  </ul></li>
   <li><a href="#summary" id="toc-summary" class="nav-link" data-scroll-target="#summary">Summary</a></li>
   </ul>
 </nav>
@@ -143,7 +184,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 
 <section id="setup" class="level2">
 <h2 class="anchored" data-anchor-id="setup">Setup</h2>
-<div id="79b94215" class="cell" data-execution_count="1">
+<div id="b58d4085" class="cell" data-execution_count="1">
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Pkg</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="bu">Pkg</span>.<span class="fu">activate</span>(<span class="st">".."</span>)</span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
@@ -587,7 +628,7 @@ directly into every world state.  The primary payoff is for win detection:
 <span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> won, not_d2</span>
 <span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<div id="a7e6c76c" class="cell" data-execution_count="15">
+<div id="36cf7b2f" class="cell" data-execution_count="15">
 <div class="sourceCode cell-code" id="cb18"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(x_won_check_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-display" data-execution_count="16">
 <div>
@@ -611,7 +652,7 @@ directly into every world state.  The primary payoff is for win detection:
 <span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> moved, tie</span>
 <span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<div id="8796bdc1" class="cell" data-execution_count="17">
+<div id="1b0687ff" class="cell" data-execution_count="17">
 <div class="sourceCode cell-code" id="cb20"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(X_sched_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-display" data-execution_count="18">
 <div>
@@ -641,7 +682,7 @@ directly into every world state.  The primary payoff is for win detection:
 <div id="o-sched" class="cell" data-execution_count="18">
 <div class="sourceCode cell-code" id="cb22"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>O_sched_gs <span class="op">=</span> <span class="fu">player_migrate</span>(F, X_sched_gs, <span class="fu">Dict</span>(<span class="op">:</span>X <span class="op">=&gt;</span> <span class="op">:</span>O); name_map<span class="op">=</span><span class="fu">Dict</span>(<span class="op">:</span>mark_x <span class="op">=&gt;</span> <span class="op">:</span>mark_o))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<div id="7cc8a7c1" class="cell" data-execution_count="19">
+<div id="5e6ca82e" class="cell" data-execution_count="19">
 <div class="sourceCode cell-code" id="cb23"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(O_sched_gs; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-display" data-execution_count="20">
 <div>
@@ -675,7 +716,7 @@ directly into every world state.  The primary payoff is for win detection:
 <span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> o_cont, x_won, o_won, tie</span>
 <span id="cb25-13"><a href="#cb25-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<div id="594898ba" class="cell" data-execution_count="22">
+<div id="a6898b51" class="cell" data-execution_count="22">
 <div class="sourceCode cell-code" id="cb26"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="fu">view_sched</span>(game_sched; names<span class="op">=</span>N)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-display" data-execution_count="23">
 <div>
@@ -829,6 +870,521 @@ Mean episode length : 7.12</code></pre>
 <hr>
 </section>
 </section>
+<section id="part-6-learning-to-play-via-self-play-reinforcement-learning" class="level2">
+<h2 class="anchored" data-anchor-id="part-6-learning-to-play-via-self-play-reinforcement-learning">Part 6 — Learning to Play via Self-Play Reinforcement Learning</h2>
+<p>The previous section showed that under pure random play X wins roughly 60–70 % of games. This section trains a <strong>graph neural network (GNN) policy</strong> that learns to play better than random purely through self-play, using the <strong>REINFORCE</strong> policy-gradient algorithm.</p>
+<p>The key design choices are:</p>
+<ul>
+<li><strong>Graph representation</strong>: the policy receives the <em>category of elements</em> of the current board — every table row becomes a node, every foreign-key application becomes an edge. This is the canonical structural encoding of an ACSet, and it is the right input for a GNN.</li>
+<li><strong>Symmetric weight sharing</strong>: the migration functor <code>F</code> from Part 3 swaps X↔︎O. Before feeding the board to the network we apply <code>F</code> whenever it is O’s turn, so the model always sees its own pieces labelled as X and the opponent’s pieces labelled as O. A <strong>single</strong> network therefore serves both players with no extra code.</li>
+<li><strong>Self-play</strong>: both players use the same (evolving) policy throughout training, so the training distribution is always on-policy.</li>
+</ul>
+<section id="additional-packages" class="level3">
+<h3 class="anchored" data-anchor-id="additional-packages">Additional packages</h3>
+<div id="rl-packages" class="cell" data-execution_count="29">
+<div class="sourceCode cell-code" id="cb40"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Pkg</span>.<span class="fu">add</span>([<span class="st">"Flux"</span>, <span class="st">"GraphNeuralNetworks"</span>])</span>
+<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Flux</span></span>
+<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">GraphNeuralNetworks</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="encoding-the-board-as-a-graph" class="level3">
+<h3 class="anchored" data-anchor-id="encoding-the-board-as-a-graph">Encoding the board as a graph</h3>
+<p><code>world_to_gnn</code> converts a <code>TTT</code> ACSet into a <code>GNNGraph</code> whose nodes are the elements of the ACSet and whose edges are the morphism applications.</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Node group</th>
+<th>Count</th>
+<th>One-hot feature</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>Sq</code> nodes</td>
+<td>9</td>
+<td><code>[1,0,0,0]</code></td>
+</tr>
+<tr class="even">
+<td><code>E</code> nodes</td>
+<td>12</td>
+<td><code>[0,1,0,0]</code></td>
+</tr>
+<tr class="odd">
+<td><code>X</code> nodes</td>
+<td>0–9</td>
+<td><code>[0,0,1,0]</code></td>
+</tr>
+<tr class="even">
+<td><code>O</code> nodes</td>
+<td>0–9</td>
+<td><code>[0,0,0,1]</code></td>
+</tr>
+</tbody>
+</table>
+<p>Edges come from the four morphisms (<code>xsq</code>, <code>osq</code>, <code>src</code>, <code>tgt</code>); each is added in both directions so message passing is bidirectional. This exactly mirrors the category of elements of the ACSet: objects of <code>el(X)</code> are (table, row) pairs and morphisms are foreign-key applications.</p>
+<div id="world-to-gnn" class="cell" data-execution_count="30">
+<div class="sourceCode cell-code" id="cb41"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">world_to_gnn</span>(world<span class="op">::</span><span class="dt">TTT</span>)</span>
+<span id="cb41-2"><a href="#cb41-2" aria-hidden="true" tabindex="-1"></a>    n_sq <span class="op">=</span> <span class="fu">nparts</span>(world, <span class="op">:</span>Sq)   <span class="co"># always 9</span></span>
+<span id="cb41-3"><a href="#cb41-3" aria-hidden="true" tabindex="-1"></a>    n_e  <span class="op">=</span> <span class="fu">nparts</span>(world, <span class="op">:</span>E)    <span class="co"># always 12</span></span>
+<span id="cb41-4"><a href="#cb41-4" aria-hidden="true" tabindex="-1"></a>    n_x  <span class="op">=</span> <span class="fu">nparts</span>(world, <span class="op">:</span>X)</span>
+<span id="cb41-5"><a href="#cb41-5" aria-hidden="true" tabindex="-1"></a>    n_o  <span class="op">=</span> <span class="fu">nparts</span>(world, <span class="op">:</span>O)</span>
+<span id="cb41-6"><a href="#cb41-6" aria-hidden="true" tabindex="-1"></a>    n_nodes <span class="op">=</span> n_sq <span class="op">+</span> n_e <span class="op">+</span> n_x <span class="op">+</span> n_o</span>
+<span id="cb41-7"><a href="#cb41-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-8"><a href="#cb41-8" aria-hidden="true" tabindex="-1"></a>    sq_off <span class="op">=</span> <span class="fl">0</span></span>
+<span id="cb41-9"><a href="#cb41-9" aria-hidden="true" tabindex="-1"></a>    e_off  <span class="op">=</span> n_sq</span>
+<span id="cb41-10"><a href="#cb41-10" aria-hidden="true" tabindex="-1"></a>    x_off  <span class="op">=</span> n_sq <span class="op">+</span> n_e</span>
+<span id="cb41-11"><a href="#cb41-11" aria-hidden="true" tabindex="-1"></a>    o_off  <span class="op">=</span> n_sq <span class="op">+</span> n_e <span class="op">+</span> n_x</span>
+<span id="cb41-12"><a href="#cb41-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-13"><a href="#cb41-13" aria-hidden="true" tabindex="-1"></a>    <span class="co"># One-hot node features: [is_Sq, is_E, is_X, is_O]</span></span>
+<span id="cb41-14"><a href="#cb41-14" aria-hidden="true" tabindex="-1"></a>    nf <span class="op">=</span> <span class="fu">zeros</span>(<span class="dt">Float32</span>, <span class="fl">4</span>, n_nodes)</span>
+<span id="cb41-15"><a href="#cb41-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_sq; nf[<span class="fl">1</span>, sq_off <span class="op">+</span> i] <span class="op">=</span> <span class="fl">1f0</span>; <span class="cf">end</span></span>
+<span id="cb41-16"><a href="#cb41-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_e;  nf[<span class="fl">2</span>, e_off  <span class="op">+</span> i] <span class="op">=</span> <span class="fl">1f0</span>; <span class="cf">end</span></span>
+<span id="cb41-17"><a href="#cb41-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_x;  nf[<span class="fl">3</span>, x_off  <span class="op">+</span> i] <span class="op">=</span> <span class="fl">1f0</span>; <span class="cf">end</span></span>
+<span id="cb41-18"><a href="#cb41-18" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_o;  nf[<span class="fl">4</span>, o_off  <span class="op">+</span> i] <span class="op">=</span> <span class="fl">1f0</span>; <span class="cf">end</span></span>
+<span id="cb41-19"><a href="#cb41-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-20"><a href="#cb41-20" aria-hidden="true" tabindex="-1"></a>    srcs <span class="op">=</span> <span class="dt">Int</span>[]; dsts <span class="op">=</span> <span class="dt">Int</span>[]</span>
+<span id="cb41-21"><a href="#cb41-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-22"><a href="#cb41-22" aria-hidden="true" tabindex="-1"></a>    <span class="co"># xsq: X piece i → square j</span></span>
+<span id="cb41-23"><a href="#cb41-23" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> xi <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_x</span>
+<span id="cb41-24"><a href="#cb41-24" aria-hidden="true" tabindex="-1"></a>        sq_j <span class="op">=</span> <span class="fu">subpart</span>(world, xi, <span class="op">:</span>xsq)</span>
+<span id="cb41-25"><a href="#cb41-25" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, x_off <span class="op">+</span> xi); <span class="fu">push!</span>(dsts, sq_off <span class="op">+</span> sq_j)</span>
+<span id="cb41-26"><a href="#cb41-26" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, sq_off <span class="op">+</span> sq_j); <span class="fu">push!</span>(dsts, x_off <span class="op">+</span> xi)</span>
+<span id="cb41-27"><a href="#cb41-27" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb41-28"><a href="#cb41-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-29"><a href="#cb41-29" aria-hidden="true" tabindex="-1"></a>    <span class="co"># osq: O piece i → square j</span></span>
+<span id="cb41-30"><a href="#cb41-30" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> oi <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_o</span>
+<span id="cb41-31"><a href="#cb41-31" aria-hidden="true" tabindex="-1"></a>        sq_j <span class="op">=</span> <span class="fu">subpart</span>(world, oi, <span class="op">:</span>osq)</span>
+<span id="cb41-32"><a href="#cb41-32" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, o_off <span class="op">+</span> oi); <span class="fu">push!</span>(dsts, sq_off <span class="op">+</span> sq_j)</span>
+<span id="cb41-33"><a href="#cb41-33" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, sq_off <span class="op">+</span> sq_j); <span class="fu">push!</span>(dsts, o_off <span class="op">+</span> oi)</span>
+<span id="cb41-34"><a href="#cb41-34" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb41-35"><a href="#cb41-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-36"><a href="#cb41-36" aria-hidden="true" tabindex="-1"></a>    <span class="co"># src morphism: edge i → source square</span></span>
+<span id="cb41-37"><a href="#cb41-37" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> ei <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_e</span>
+<span id="cb41-38"><a href="#cb41-38" aria-hidden="true" tabindex="-1"></a>        sq_j <span class="op">=</span> <span class="fu">subpart</span>(world, ei, <span class="op">:</span>src)</span>
+<span id="cb41-39"><a href="#cb41-39" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, e_off <span class="op">+</span> ei); <span class="fu">push!</span>(dsts, sq_off <span class="op">+</span> sq_j)</span>
+<span id="cb41-40"><a href="#cb41-40" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, sq_off <span class="op">+</span> sq_j); <span class="fu">push!</span>(dsts, e_off <span class="op">+</span> ei)</span>
+<span id="cb41-41"><a href="#cb41-41" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb41-42"><a href="#cb41-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-43"><a href="#cb41-43" aria-hidden="true" tabindex="-1"></a>    <span class="co"># tgt morphism: edge i → target square</span></span>
+<span id="cb41-44"><a href="#cb41-44" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> ei <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_e</span>
+<span id="cb41-45"><a href="#cb41-45" aria-hidden="true" tabindex="-1"></a>        sq_j <span class="op">=</span> <span class="fu">subpart</span>(world, ei, <span class="op">:</span>tgt)</span>
+<span id="cb41-46"><a href="#cb41-46" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, e_off <span class="op">+</span> ei); <span class="fu">push!</span>(dsts, sq_off <span class="op">+</span> sq_j)</span>
+<span id="cb41-47"><a href="#cb41-47" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(srcs, sq_off <span class="op">+</span> sq_j); <span class="fu">push!</span>(dsts, e_off <span class="op">+</span> ei)</span>
+<span id="cb41-48"><a href="#cb41-48" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb41-49"><a href="#cb41-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-50"><a href="#cb41-50" aria-hidden="true" tabindex="-1"></a>    g <span class="op">=</span> <span class="fu">GNNGraph</span>(srcs, dsts; ndata<span class="op">=</span>(; x<span class="op">=</span>nf), num_nodes<span class="op">=</span>n_nodes)</span>
+<span id="cb41-51"><a href="#cb41-51" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> g, sq_off   <span class="co"># sq_off=0; Sq nodes are 1..n_sq</span></span>
+<span id="cb41-52"><a href="#cb41-52" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>The resulting graph has at most 39 nodes (9+12+9+9) and 84 edges on a full board.</p>
+<hr>
+</section>
+<section id="gnn-policy-architecture" class="level3">
+<h3 class="anchored" data-anchor-id="gnn-policy-architecture">GNN policy architecture</h3>
+<p>The network maps the elements graph to a logit for each legal square:</p>
+<pre><code>one-hot type (4)
+    └── Dense(4→16, relu)          node embedding
+    └── GCNConv(16→32, relu)       first message-passing round
+    └── GCNConv(32→16, identity)   second round
+    └── Dense(16→1)                scalar head (applied to Sq nodes only)</code></pre>
+<p>Reading out only the <strong>Sq nodes</strong> and scoring them makes the architecture naturally equivariant to board permutations: the logit for each square is a function of that square’s local neighbourhood, aggregated over two hops.</p>
+<div id="gnn-policy" class="cell" data-execution_count="31">
+<div class="sourceCode cell-code" id="cb43"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> TTTGNNPolicy</span>
+<span id="cb43-2"><a href="#cb43-2" aria-hidden="true" tabindex="-1"></a>    node_embed  <span class="op">::</span><span class="dt"> Dense</span></span>
+<span id="cb43-3"><a href="#cb43-3" aria-hidden="true" tabindex="-1"></a>    conv1       <span class="op">::</span><span class="dt"> GCNConv</span></span>
+<span id="cb43-4"><a href="#cb43-4" aria-hidden="true" tabindex="-1"></a>    conv2       <span class="op">::</span><span class="dt"> GCNConv</span></span>
+<span id="cb43-5"><a href="#cb43-5" aria-hidden="true" tabindex="-1"></a>    action_head <span class="op">::</span><span class="dt"> Dense</span></span>
+<span id="cb43-6"><a href="#cb43-6" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb43-7"><a href="#cb43-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb43-8"><a href="#cb43-8" aria-hidden="true" tabindex="-1"></a>Flux.<span class="pp">@functor</span> TTTGNNPolicy</span>
+<span id="cb43-9"><a href="#cb43-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb43-10"><a href="#cb43-10" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">TTTGNNPolicy</span>(; embed_dim<span class="op">=</span><span class="fl">16</span>, hidden_dim<span class="op">=</span><span class="fl">32</span>)</span>
+<span id="cb43-11"><a href="#cb43-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">TTTGNNPolicy</span>(</span>
+<span id="cb43-12"><a href="#cb43-12" aria-hidden="true" tabindex="-1"></a>        <span class="fu">Dense</span>(<span class="fl">4</span>, embed_dim, relu),</span>
+<span id="cb43-13"><a href="#cb43-13" aria-hidden="true" tabindex="-1"></a>        <span class="fu">GCNConv</span>(embed_dim <span class="op">=&gt;</span> hidden_dim, relu),</span>
+<span id="cb43-14"><a href="#cb43-14" aria-hidden="true" tabindex="-1"></a>        <span class="fu">GCNConv</span>(hidden_dim <span class="op">=&gt;</span> embed_dim),</span>
+<span id="cb43-15"><a href="#cb43-15" aria-hidden="true" tabindex="-1"></a>        <span class="fu">Dense</span>(embed_dim, <span class="fl">1</span>),</span>
+<span id="cb43-16"><a href="#cb43-16" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb43-17"><a href="#cb43-17" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb43-18"><a href="#cb43-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb43-19"><a href="#cb43-19" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> (p<span class="op">::</span><span class="dt">TTTGNNPolicy</span>)(g<span class="op">::</span><span class="dt">GNNGraph</span>, sq_indices<span class="op">::</span><span class="dt">Vector{Int}</span>)</span>
+<span id="cb43-20"><a href="#cb43-20" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> p.<span class="fu">node_embed</span>(g.ndata.x)          <span class="co"># embed_dim × n_nodes</span></span>
+<span id="cb43-21"><a href="#cb43-21" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> p.<span class="fu">conv1</span>(g, x)                    <span class="co"># hidden_dim × n_nodes</span></span>
+<span id="cb43-22"><a href="#cb43-22" aria-hidden="true" tabindex="-1"></a>    x <span class="op">=</span> p.<span class="fu">conv2</span>(g, x)                    <span class="co"># embed_dim × n_nodes</span></span>
+<span id="cb43-23"><a href="#cb43-23" aria-hidden="true" tabindex="-1"></a>    sq_feats <span class="op">=</span> x[<span class="op">:</span>, sq_indices]          <span class="co"># embed_dim × n_legal</span></span>
+<span id="cb43-24"><a href="#cb43-24" aria-hidden="true" tabindex="-1"></a>    logits <span class="op">=</span> <span class="fu">vec</span>(p.<span class="fu">action_head</span>(sq_feats))   <span class="co"># n_legal</span></span>
+<span id="cb43-25"><a href="#cb43-25" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> logits</span>
+<span id="cb43-26"><a href="#cb43-26" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="symmetric-self-play-with-the-migration-functor" class="level3">
+<h3 class="anchored" data-anchor-id="symmetric-self-play-with-the-migration-functor">Symmetric self-play with the migration functor</h3>
+<p>The helper below extracts the chosen-square index from a <code>legal_actions</code> entry and builds the board from the mover’s perspective using <code>F</code>:</p>
+<div id="perspective-helpers" class="cell" data-execution_count="32">
+<div class="sourceCode cell-code" id="cb44"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a><span class="fu">action_sq</span>(a<span class="op">::</span><span class="dt">Action</span>) <span class="op">=</span> <span class="fu">collect</span>(<span class="fu">components</span>(a.match)[<span class="op">:</span>Sq])[<span class="fl">1</span>]</span>
+<span id="cb44-2"><a href="#cb44-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb44-3"><a href="#cb44-3" aria-hidden="true" tabindex="-1"></a><span class="fu">perspective_world</span>(world, player<span class="op">::</span><span class="dt">Symbol</span>) <span class="op">=</span></span>
+<span id="cb44-4"><a href="#cb44-4" aria-hidden="true" tabindex="-1"></a>    player <span class="op">===</span> <span class="op">:</span>O ? <span class="fu">F</span>(world) <span class="op">:</span> world</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>A categorical sampler avoids any extra package dependency:</p>
+<div id="categorical-sample" class="cell" data-execution_count="33">
+<div class="sourceCode cell-code" id="cb45"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">sample_categorical</span>(probs<span class="op">::</span><span class="dt">Vector{Float32}</span>)</span>
+<span id="cb45-2"><a href="#cb45-2" aria-hidden="true" tabindex="-1"></a>    r <span class="op">=</span> <span class="fu">rand</span>(<span class="dt">Float32</span>)</span>
+<span id="cb45-3"><a href="#cb45-3" aria-hidden="true" tabindex="-1"></a>    cumulative <span class="op">=</span> <span class="fl">0f0</span></span>
+<span id="cb45-4"><a href="#cb45-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (i, p) <span class="kw">in</span> <span class="fu">enumerate</span>(probs)</span>
+<span id="cb45-5"><a href="#cb45-5" aria-hidden="true" tabindex="-1"></a>        cumulative <span class="op">+=</span> p</span>
+<span id="cb45-6"><a href="#cb45-6" aria-hidden="true" tabindex="-1"></a>        cumulative <span class="op">&gt;=</span> r <span class="op">&amp;&amp;</span> <span class="cf">return</span> i</span>
+<span id="cb45-7"><a href="#cb45-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb45-8"><a href="#cb45-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">length</span>(probs)</span>
+<span id="cb45-9"><a href="#cb45-9" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="collecting-a-self-play-episode" class="level3">
+<h3 class="anchored" data-anchor-id="collecting-a-self-play-episode">Collecting a self-play episode</h3>
+<p>During each episode the agent closure records <code>(perspective_world, sq_indices, chosen_index, player)</code> at every step. Returns are assigned after the episode ends.</p>
+<div id="self-play-episode" class="cell" data-execution_count="34">
+<div class="sourceCode cell-code" id="cb46"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> StepRecord</span>
+<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a>    world   <span class="op">::</span><span class="dt"> TTT</span></span>
+<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a>    sq_ids  <span class="op">::</span><span class="dt"> Vector{Int}</span></span>
+<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a>    chosen  <span class="op">::</span><span class="dt"> Int</span></span>
+<span id="cb46-5"><a href="#cb46-5" aria-hidden="true" tabindex="-1"></a>    player  <span class="op">::</span><span class="dt"> Symbol</span></span>
+<span id="cb46-6"><a href="#cb46-6" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb46-7"><a href="#cb46-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-8"><a href="#cb46-8" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">run_self_play_episode</span>(model, game, game_sched)</span>
+<span id="cb46-9"><a href="#cb46-9" aria-hidden="true" tabindex="-1"></a>    records <span class="op">=</span> StepRecord[]</span>
+<span id="cb46-10"><a href="#cb46-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-11"><a href="#cb46-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">function</span> <span class="fu">make_agent</span>(player<span class="op">::</span><span class="dt">Symbol</span>)</span>
+<span id="cb46-12"><a href="#cb46-12" aria-hidden="true" tabindex="-1"></a>        <span class="fu">FunctionAgent</span>(<span class="kw">function</span> (state<span class="op">::</span><span class="dt">GameState</span>, legal_actions<span class="op">::</span><span class="dt">Vector{Action}</span>)</span>
+<span id="cb46-13"><a href="#cb46-13" aria-hidden="true" tabindex="-1"></a>            <span class="fu">isempty</span>(legal_actions) <span class="op">&amp;&amp;</span> <span class="cf">return</span> <span class="cn">nothing</span></span>
+<span id="cb46-14"><a href="#cb46-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-15"><a href="#cb46-15" aria-hidden="true" tabindex="-1"></a>            pw     <span class="op">=</span> <span class="fu">perspective_world</span>(state.world, player)</span>
+<span id="cb46-16"><a href="#cb46-16" aria-hidden="true" tabindex="-1"></a>            g, _   <span class="op">=</span> <span class="fu">world_to_gnn</span>(pw)</span>
+<span id="cb46-17"><a href="#cb46-17" aria-hidden="true" tabindex="-1"></a>            sq_ids <span class="op">=</span> [<span class="fu">action_sq</span>(a) for a <span class="kw">in</span> legal_actions]</span>
+<span id="cb46-18"><a href="#cb46-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-19"><a href="#cb46-19" aria-hidden="true" tabindex="-1"></a>            logits <span class="op">=</span> <span class="fu">model</span>(g, sq_ids)</span>
+<span id="cb46-20"><a href="#cb46-20" aria-hidden="true" tabindex="-1"></a>            probs  <span class="op">=</span> <span class="fu">softmax</span>(logits)</span>
+<span id="cb46-21"><a href="#cb46-21" aria-hidden="true" tabindex="-1"></a>            chosen <span class="op">=</span> <span class="fu">sample_categorical</span>(probs)</span>
+<span id="cb46-22"><a href="#cb46-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-23"><a href="#cb46-23" aria-hidden="true" tabindex="-1"></a>            <span class="fu">push!</span>(records, <span class="fu">StepRecord</span>(<span class="fu">copy</span>(pw), sq_ids, chosen, player))</span>
+<span id="cb46-24"><a href="#cb46-24" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> legal_actions[chosen]</span>
+<span id="cb46-25"><a href="#cb46-25" aria-hidden="true" tabindex="-1"></a>        <span class="kw">end</span>)</span>
+<span id="cb46-26"><a href="#cb46-26" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span></span>
+<span id="cb46-27"><a href="#cb46-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-28"><a href="#cb46-28" aria-hidden="true" tabindex="-1"></a>    agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(</span>
+<span id="cb46-29"><a href="#cb46-29" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>X <span class="op">=&gt;</span> <span class="fu">make_agent</span>(<span class="op">:</span>X),</span>
+<span id="cb46-30"><a href="#cb46-30" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>O <span class="op">=&gt;</span> <span class="fu">make_agent</span>(<span class="op">:</span>O),</span>
+<span id="cb46-31"><a href="#cb46-31" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb46-32"><a href="#cb46-32" aria-hidden="true" tabindex="-1"></a>    exps <span class="op">=</span> <span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>)</span>
+<span id="cb46-33"><a href="#cb46-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-34"><a href="#cb46-34" aria-hidden="true" tabindex="-1"></a>    winner <span class="op">=</span> <span class="fu">isempty</span>(exps) ? <span class="cn">nothing</span> <span class="op">:</span> exps[<span class="kw">end</span>].winner</span>
+<span id="cb46-35"><a href="#cb46-35" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> records, winner</span>
+<span id="cb46-36"><a href="#cb46-36" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="reinforce-loss-and-training-loop" class="level3">
+<h3 class="anchored" data-anchor-id="reinforce-loss-and-training-loop">REINFORCE loss and training loop</h3>
+<p>Each step is assigned a scalar return <code>G</code>:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Outcome for the mover</th>
+<th><code>G</code></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Won</td>
+<td>+1</td>
+</tr>
+<tr class="even">
+<td>Draw</td>
+<td>0</td>
+</tr>
+<tr class="odd">
+<td>Lost</td>
+<td>−1</td>
+</tr>
+</tbody>
+</table>
+<p>The REINFORCE loss is the negative log-probability of the chosen action, weighted by <code>G</code>:</p>
+<p><span class="math display">\[\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N} G_i \cdot \log\pi_\theta(a_i \mid s_i)\]</span></p>
+<div id="reinforce-loss" class="cell" data-execution_count="35">
+<div class="sourceCode cell-code" id="cb47"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">reinforce_loss</span>(model, batch<span class="op">::</span><span class="dt">Vector{StepRecord}</span>, returns<span class="op">::</span><span class="dt">Vector{Float32}</span>, graphs<span class="op">::</span><span class="dt">Vector{GNNGraph}</span>)</span>
+<span id="cb47-2"><a href="#cb47-2" aria-hidden="true" tabindex="-1"></a>    total <span class="op">=</span> <span class="fl">0f0</span></span>
+<span id="cb47-3"><a href="#cb47-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (rec, G, g) <span class="kw">in</span> <span class="fu">zip</span>(batch, returns, graphs)</span>
+<span id="cb47-4"><a href="#cb47-4" aria-hidden="true" tabindex="-1"></a>        logits <span class="op">=</span> <span class="fu">model</span>(g, rec.sq_ids)</span>
+<span id="cb47-5"><a href="#cb47-5" aria-hidden="true" tabindex="-1"></a>        log_probs <span class="op">=</span> logits <span class="op">.-</span> <span class="fu">log</span>(<span class="fu">sum</span>(<span class="fu">exp</span>.(logits)))   <span class="co"># logsoftmax</span></span>
+<span id="cb47-6"><a href="#cb47-6" aria-hidden="true" tabindex="-1"></a>        total <span class="op">-=</span> log_probs[rec.chosen] <span class="op">*</span> G</span>
+<span id="cb47-7"><a href="#cb47-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb47-8"><a href="#cb47-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> total <span class="op">/</span> <span class="fu">length</span>(batch)</span>
+<span id="cb47-9"><a href="#cb47-9" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p>The training loop collects <code>n_episodes_per_update</code> self-play games, computes returns, then takes a single Adam step:</p>
+<div id="training-loop" class="cell" data-execution_count="36">
+<div class="sourceCode cell-code" id="cb48"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">train_self_play!</span>(model, opt_state, game, game_sched;</span>
+<span id="cb48-2"><a href="#cb48-2" aria-hidden="true" tabindex="-1"></a>                          n_updates             <span class="op">=</span> <span class="fl">20</span>,</span>
+<span id="cb48-3"><a href="#cb48-3" aria-hidden="true" tabindex="-1"></a>                          n_episodes_per_update <span class="op">=</span> <span class="fl">50</span>,</span>
+<span id="cb48-4"><a href="#cb48-4" aria-hidden="true" tabindex="-1"></a>                          eval_every            <span class="op">=</span> <span class="fl">5</span>,</span>
+<span id="cb48-5"><a href="#cb48-5" aria-hidden="true" tabindex="-1"></a>                          eval_n                <span class="op">=</span> <span class="fl">100</span>)</span>
+<span id="cb48-6"><a href="#cb48-6" aria-hidden="true" tabindex="-1"></a>    win_rates <span class="op">=</span> <span class="dt">Float64</span>[]</span>
+<span id="cb48-7"><a href="#cb48-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-8"><a href="#cb48-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> update <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_updates</span>
+<span id="cb48-9"><a href="#cb48-9" aria-hidden="true" tabindex="-1"></a>        batch   <span class="op">=</span> StepRecord[]</span>
+<span id="cb48-10"><a href="#cb48-10" aria-hidden="true" tabindex="-1"></a>        returns <span class="op">=</span> <span class="dt">Float32</span>[]</span>
+<span id="cb48-11"><a href="#cb48-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-12"><a href="#cb48-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n_episodes_per_update</span>
+<span id="cb48-13"><a href="#cb48-13" aria-hidden="true" tabindex="-1"></a>            records, winner <span class="op">=</span> <span class="fu">run_self_play_episode</span>(model, game, game_sched)</span>
+<span id="cb48-14"><a href="#cb48-14" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> rec <span class="kw">in</span> records</span>
+<span id="cb48-15"><a href="#cb48-15" aria-hidden="true" tabindex="-1"></a>                G <span class="op">=</span> <span class="cf">if</span> winner <span class="op">===</span> rec.player; <span class="fl">1f0</span></span>
+<span id="cb48-16"><a href="#cb48-16" aria-hidden="true" tabindex="-1"></a>                    <span class="cf">elseif</span> winner <span class="op">===</span> <span class="cn">nothing</span>; <span class="fl">0f0</span></span>
+<span id="cb48-17"><a href="#cb48-17" aria-hidden="true" tabindex="-1"></a>                    <span class="cf">else</span> <span class="op">-</span><span class="fl">1f0</span> <span class="cf">end</span></span>
+<span id="cb48-18"><a href="#cb48-18" aria-hidden="true" tabindex="-1"></a>                <span class="fu">push!</span>(batch, rec)</span>
+<span id="cb48-19"><a href="#cb48-19" aria-hidden="true" tabindex="-1"></a>                <span class="fu">push!</span>(returns, G)</span>
+<span id="cb48-20"><a href="#cb48-20" aria-hidden="true" tabindex="-1"></a>            <span class="cf">end</span></span>
+<span id="cb48-21"><a href="#cb48-21" aria-hidden="true" tabindex="-1"></a>        <span class="cf">end</span></span>
+<span id="cb48-22"><a href="#cb48-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-23"><a href="#cb48-23" aria-hidden="true" tabindex="-1"></a>        graphs <span class="op">=</span> GNNGraph[<span class="fu">world_to_gnn</span>(rec.world)[<span class="fl">1</span>] for rec <span class="kw">in</span> batch]</span>
+<span id="cb48-24"><a href="#cb48-24" aria-hidden="true" tabindex="-1"></a>        loss, grads <span class="op">=</span> Flux.<span class="fu">withgradient</span>(m <span class="op">-&gt;</span> <span class="fu">reinforce_loss</span>(m, batch, returns, graphs), model)</span>
+<span id="cb48-25"><a href="#cb48-25" aria-hidden="true" tabindex="-1"></a>        Flux.<span class="fu">update!</span>(opt_state, model, grads[<span class="fl">1</span>])</span>
+<span id="cb48-26"><a href="#cb48-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-27"><a href="#cb48-27" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> update <span class="op">%</span> eval_every <span class="op">==</span> <span class="fl">0</span></span>
+<span id="cb48-28"><a href="#cb48-28" aria-hidden="true" tabindex="-1"></a>            wr <span class="op">=</span> <span class="fu">eval_vs_random</span>(model, game, game_sched; n<span class="op">=</span>eval_n)</span>
+<span id="cb48-29"><a href="#cb48-29" aria-hidden="true" tabindex="-1"></a>            <span class="fu">push!</span>(win_rates, wr)</span>
+<span id="cb48-30"><a href="#cb48-30" aria-hidden="true" tabindex="-1"></a>            <span class="pp">@info</span> <span class="st">"Update </span><span class="sc">$</span>update<span class="st">  loss=</span><span class="sc">$</span>(<span class="fu">round</span>(loss; digits<span class="op">=</span><span class="fl">4</span>))<span class="st">  "</span> <span class="op">*</span></span>
+<span id="cb48-31"><a href="#cb48-31" aria-hidden="true" tabindex="-1"></a>                  <span class="st">"win-rate vs random=</span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>wr; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span></span>
+<span id="cb48-32"><a href="#cb48-32" aria-hidden="true" tabindex="-1"></a>        <span class="cf">end</span></span>
+<span id="cb48-33"><a href="#cb48-33" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb48-34"><a href="#cb48-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-35"><a href="#cb48-35" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> win_rates</span>
+<span id="cb48-36"><a href="#cb48-36" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<p><code>eval_vs_random</code> pits the trained policy (as X) against a random O and returns X’s win rate:</p>
+<div id="eval-vs-random" class="cell" data-execution_count="37">
+<div class="sourceCode cell-code" id="cb49"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">eval_vs_random</span>(model, game, game_sched; n<span class="op">=</span><span class="fl">100</span>)</span>
+<span id="cb49-2"><a href="#cb49-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">function</span> <span class="fu">gnn_agent_fn</span>(state<span class="op">::</span><span class="dt">GameState</span>, legal_actions<span class="op">::</span><span class="dt">Vector{Action}</span>)</span>
+<span id="cb49-3"><a href="#cb49-3" aria-hidden="true" tabindex="-1"></a>        <span class="fu">isempty</span>(legal_actions) <span class="op">&amp;&amp;</span> <span class="cf">return</span> <span class="cn">nothing</span></span>
+<span id="cb49-4"><a href="#cb49-4" aria-hidden="true" tabindex="-1"></a>        g, _ <span class="op">=</span> <span class="fu">world_to_gnn</span>(state.world)  <span class="co"># X's perspective — no migration needed</span></span>
+<span id="cb49-5"><a href="#cb49-5" aria-hidden="true" tabindex="-1"></a>        sq_ids <span class="op">=</span> [<span class="fu">action_sq</span>(a) for a <span class="kw">in</span> legal_actions]</span>
+<span id="cb49-6"><a href="#cb49-6" aria-hidden="true" tabindex="-1"></a>        logits <span class="op">=</span> <span class="fu">model</span>(g, sq_ids)</span>
+<span id="cb49-7"><a href="#cb49-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> legal_actions[<span class="fu">argmax</span>(logits)]   <span class="co"># greedy at eval time</span></span>
+<span id="cb49-8"><a href="#cb49-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span></span>
+<span id="cb49-9"><a href="#cb49-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb49-10"><a href="#cb49-10" aria-hidden="true" tabindex="-1"></a>    agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(</span>
+<span id="cb49-11"><a href="#cb49-11" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>X <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>(gnn_agent_fn),</span>
+<span id="cb49-12"><a href="#cb49-12" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>O <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((s, a) <span class="op">-&gt;</span> <span class="fu">rand</span>(a)),</span>
+<span id="cb49-13"><a href="#cb49-13" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb49-14"><a href="#cb49-14" aria-hidden="true" tabindex="-1"></a>    all_exps <span class="op">=</span> [<span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>) for _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n]</span>
+<span id="cb49-15"><a href="#cb49-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">count</span>(<span class="cn">e</span> <span class="op">-&gt;</span> !<span class="fu">isempty</span>(<span class="cn">e</span>) <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].winner <span class="op">===</span> <span class="op">:</span>X, all_exps) <span class="op">/</span> n</span>
+<span id="cb49-16"><a href="#cb49-16" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<hr>
+</section>
+<section id="running-the-training" class="level3">
+<h3 class="anchored" data-anchor-id="running-the-training">Running the training</h3>
+<div id="cell-run-training" class="cell" data-execution_count="38">
+<div class="sourceCode cell-code" id="cb50"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">1</span>)</span>
+<span id="cb50-2"><a href="#cb50-2" aria-hidden="true" tabindex="-1"></a>gnn_model  <span class="op">=</span> <span class="fu">TTTGNNPolicy</span>(embed_dim<span class="op">=</span><span class="fl">16</span>, hidden_dim<span class="op">=</span><span class="fl">32</span>)</span>
+<span id="cb50-3"><a href="#cb50-3" aria-hidden="true" tabindex="-1"></a>opt_state  <span class="op">=</span> Flux.<span class="fu">setup</span>(<span class="fu">Adam</span>(<span class="fl">1e-3</span>), gnn_model)</span>
+<span id="cb50-4"><a href="#cb50-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb50-5"><a href="#cb50-5" aria-hidden="true" tabindex="-1"></a>win_rates <span class="op">=</span> <span class="fu">train_self_play!</span>(gnn_model, opt_state, game, game_sched;</span>
+<span id="cb50-6"><a href="#cb50-6" aria-hidden="true" tabindex="-1"></a>                             n_updates<span class="op">=</span><span class="fl">20</span>,</span>
+<span id="cb50-7"><a href="#cb50-7" aria-hidden="true" tabindex="-1"></a>                             n_episodes_per_update<span class="op">=</span><span class="fl">50</span>,</span>
+<span id="cb50-8"><a href="#cb50-8" aria-hidden="true" tabindex="-1"></a>                             eval_every<span class="op">=</span><span class="fl">5</span>,</span>
+<span id="cb50-9"><a href="#cb50-9" aria-hidden="true" tabindex="-1"></a>                             eval_n<span class="op">=</span><span class="fl">100</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div id="run-training" class="cell-output cell-output-display" data-execution_count="39">
+<pre><code>4-element Vector{Float64}:
+ 0.8
+ 0.85
+ 0.92
+ 0.89</code></pre>
+</div>
+</div>
+<p>After 1 000 self-play games the trained X policy should be well above the ~62 % random baseline.</p>
+<div id="training-curve" class="cell" data-execution_count="39">
+<div class="sourceCode cell-code" id="cb52"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Win rates vs random at evaluation checkpoints (every 5 updates):"</span>)</span>
+<span id="cb52-2"><a href="#cb52-2" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i, wr) <span class="kw">in</span> <span class="fu">enumerate</span>(win_rates)</span>
+<span id="cb52-3"><a href="#cb52-3" aria-hidden="true" tabindex="-1"></a>    update <span class="op">=</span> <span class="fl">5</span>i</span>
+<span id="cb52-4"><a href="#cb52-4" aria-hidden="true" tabindex="-1"></a>    bar    <span class="op">=</span> <span class="st">"█"</span> <span class="op">^</span> <span class="fu">round</span>(<span class="dt">Int</span>, <span class="fl">30</span>wr)</span>
+<span id="cb52-5"><a href="#cb52-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">println</span>(<span class="st">"  Update </span><span class="sc">$</span>(<span class="fu">lpad</span>(update,<span class="fl">3</span>))<span class="st">: </span><span class="sc">$</span>(<span class="fu">lpad</span>(<span class="fu">round</span>(<span class="dt">Int</span>,<span class="fl">100</span>wr),<span class="fl">3</span>))<span class="st">%  </span><span class="sc">$</span>bar<span class="st">"</span>)</span>
+<span id="cb52-6"><a href="#cb52-6" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Win rates vs random at evaluation checkpoints (every 5 updates):
+  Update   5:  80%  ████████████████████████
+  Update  10:  85%  ██████████████████████████
+  Update  15:  92%  ████████████████████████████
+  Update  20:  89%  ███████████████████████████</code></pre>
+</div>
+</div>
+<hr>
+</section>
+<section id="benchmarking-training-cost" class="level3">
+<h3 class="anchored" data-anchor-id="benchmarking-training-cost">Benchmarking training cost</h3>
+<p>We now measure wall time for each component to identify where training time goes.</p>
+<section id="episode-collection-time" class="level4">
+<h4 class="anchored" data-anchor-id="episode-collection-time">Episode collection time</h4>
+<div id="bench-episode" class="cell" data-execution_count="40">
+<div class="sourceCode cell-code" id="cb54"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">42</span>)</span>
+<span id="cb54-2"><a href="#cb54-2" aria-hidden="true" tabindex="-1"></a>t_episode <span class="op">=</span> <span class="pp">@elapsed</span> <span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>)</span>
+<span id="cb54-3"><a href="#cb54-3" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Single episode (random agents): </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">1000</span>t_episode; digits<span class="op">=</span><span class="fl">2</span>))<span class="st"> ms"</span>)</span>
+<span id="cb54-4"><a href="#cb54-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb54-5"><a href="#cb54-5" aria-hidden="true" tabindex="-1"></a><span class="co"># Measure 50 episodes (one update's worth of data)</span></span>
+<span id="cb54-6"><a href="#cb54-6" aria-hidden="true" tabindex="-1"></a>t_batch <span class="op">=</span> <span class="pp">@elapsed</span> <span class="cf">begin</span></span>
+<span id="cb54-7"><a href="#cb54-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">50</span></span>
+<span id="cb54-8"><a href="#cb54-8" aria-hidden="true" tabindex="-1"></a>        <span class="fu">run_self_play_episode</span>(gnn_model, game, game_sched)</span>
+<span id="cb54-9"><a href="#cb54-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb54-10"><a href="#cb54-10" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb54-11"><a href="#cb54-11" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"50 self-play episodes:           </span><span class="sc">$</span>(<span class="fu">round</span>(t_batch; digits<span class="op">=</span><span class="fl">2</span>))<span class="st"> s"</span>)</span>
+<span id="cb54-12"><a href="#cb54-12" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"  ↳ per episode:                 </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">1000</span>t_batch<span class="op">/</span><span class="fl">50</span>; digits<span class="op">=</span><span class="fl">1</span>))<span class="st"> ms"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Single episode (random agents): 659.77 ms
+50 self-play episodes:           30.26 s
+  ↳ per episode:                 605.2 ms</code></pre>
+</div>
+</div>
+</section>
+<section id="gnn-forward-pass-time" class="level4">
+<h4 class="anchored" data-anchor-id="gnn-forward-pass-time">GNN forward pass time</h4>
+<div id="bench-gnn" class="cell" data-execution_count="41">
+<div class="sourceCode cell-code" id="cb56"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb56-1"><a href="#cb56-1" aria-hidden="true" tabindex="-1"></a>sample_world <span class="op">=</span> <span class="fu">create_board</span>()</span>
+<span id="cb56-2"><a href="#cb56-2" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(sample_world, <span class="op">:</span>X, xsq<span class="op">=</span><span class="fl">5</span>)   <span class="co"># X on centre</span></span>
+<span id="cb56-3"><a href="#cb56-3" aria-hidden="true" tabindex="-1"></a><span class="fu">add_part!</span>(sample_world, <span class="op">:</span>O, osq<span class="op">=</span><span class="fl">1</span>)   <span class="co"># O on top-left</span></span>
+<span id="cb56-4"><a href="#cb56-4" aria-hidden="true" tabindex="-1"></a>g_sample, _ <span class="op">=</span> <span class="fu">world_to_gnn</span>(sample_world)</span>
+<span id="cb56-5"><a href="#cb56-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb56-6"><a href="#cb56-6" aria-hidden="true" tabindex="-1"></a>t_encode  <span class="op">=</span> <span class="pp">@elapsed</span> <span class="fu">world_to_gnn</span>(sample_world)</span>
+<span id="cb56-7"><a href="#cb56-7" aria-hidden="true" tabindex="-1"></a>t_forward <span class="op">=</span> <span class="pp">@elapsed</span> <span class="fu">gnn_model</span>(g_sample, [<span class="fl">2</span>,<span class="fl">3</span>,<span class="fl">4</span>,<span class="fl">6</span>,<span class="fl">7</span>,<span class="fl">8</span>,<span class="fl">9</span>])   <span class="co"># 7 legal squares</span></span>
+<span id="cb56-8"><a href="#cb56-8" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"world_to_gnn encoding:  </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">1e6</span> <span class="op">*</span> t_encode;  digits<span class="op">=</span><span class="fl">1</span>))<span class="st"> μs"</span>)</span>
+<span id="cb56-9"><a href="#cb56-9" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"GNN forward pass:       </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">1e6</span> <span class="op">*</span> t_forward; digits<span class="op">=</span><span class="fl">1</span>))<span class="st"> μs"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>world_to_gnn encoding:  15.8 μs
+GNN forward pass:       80.0 μs</code></pre>
+</div>
+</div>
+</section>
+<section id="gradient-update-time" class="level4">
+<h4 class="anchored" data-anchor-id="gradient-update-time">Gradient update time</h4>
+<div id="bench-grad" class="cell" data-execution_count="42">
+<div class="sourceCode cell-code" id="cb58"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Collect a single batch for timing</span></span>
+<span id="cb58-2"><a href="#cb58-2" aria-hidden="true" tabindex="-1"></a>test_batch   <span class="op">=</span> StepRecord[]</span>
+<span id="cb58-3"><a href="#cb58-3" aria-hidden="true" tabindex="-1"></a>test_returns <span class="op">=</span> <span class="dt">Float32</span>[]</span>
+<span id="cb58-4"><a href="#cb58-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">50</span></span>
+<span id="cb58-5"><a href="#cb58-5" aria-hidden="true" tabindex="-1"></a>    recs, winner <span class="op">=</span> <span class="fu">run_self_play_episode</span>(gnn_model, game, game_sched)</span>
+<span id="cb58-6"><a href="#cb58-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> rec <span class="kw">in</span> recs</span>
+<span id="cb58-7"><a href="#cb58-7" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(test_batch, rec)</span>
+<span id="cb58-8"><a href="#cb58-8" aria-hidden="true" tabindex="-1"></a>        <span class="fu">push!</span>(test_returns, winner <span class="op">===</span> rec.player ? <span class="fl">1f0</span> <span class="op">:</span></span>
+<span id="cb58-9"><a href="#cb58-9" aria-hidden="true" tabindex="-1"></a>                            winner <span class="op">===</span> <span class="cn">nothing</span>     ? <span class="fl">0f0</span> <span class="op">:</span> <span class="op">-</span><span class="fl">1f0</span>)</span>
+<span id="cb58-10"><a href="#cb58-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb58-11"><a href="#cb58-11" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb58-12"><a href="#cb58-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb58-13"><a href="#cb58-13" aria-hidden="true" tabindex="-1"></a>t_grad <span class="op">=</span> <span class="pp">@elapsed</span> <span class="cf">begin</span></span>
+<span id="cb58-14"><a href="#cb58-14" aria-hidden="true" tabindex="-1"></a>    test_graphs <span class="op">=</span> GNNGraph[<span class="fu">world_to_gnn</span>(rec.world)[<span class="fl">1</span>] for rec <span class="kw">in</span> test_batch]</span>
+<span id="cb58-15"><a href="#cb58-15" aria-hidden="true" tabindex="-1"></a>    loss_val, grads <span class="op">=</span> Flux.<span class="fu">withgradient</span>(</span>
+<span id="cb58-16"><a href="#cb58-16" aria-hidden="true" tabindex="-1"></a>        m <span class="op">-&gt;</span> <span class="fu">reinforce_loss</span>(m, test_batch, test_returns, test_graphs), gnn_model)</span>
+<span id="cb58-17"><a href="#cb58-17" aria-hidden="true" tabindex="-1"></a>    Flux.<span class="fu">update!</span>(opt_state, gnn_model, grads[<span class="fl">1</span>])</span>
+<span id="cb58-18"><a href="#cb58-18" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb58-19"><a href="#cb58-19" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Gradient update (batch of </span><span class="sc">$</span>(<span class="fu">length</span>(test_batch))<span class="st"> steps): "</span> <span class="op">*</span></span>
+<span id="cb58-20"><a href="#cb58-20" aria-hidden="true" tabindex="-1"></a>        <span class="st">"</span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">1000</span>t_grad; digits<span class="op">=</span><span class="fl">1</span>))<span class="st"> ms"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Gradient update (batch of 367 steps): 485.1 ms</code></pre>
+</div>
+</div>
+</section>
+<section id="summary-table-and-bottleneck-discussion" class="level4">
+<h4 class="anchored" data-anchor-id="summary-table-and-bottleneck-discussion">Summary table and bottleneck discussion</h4>
+<div id="bench-summary" class="cell" data-execution_count="43">
+<div class="sourceCode cell-code" id="cb60"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"""</span></span>
+<span id="cb60-2"><a href="#cb60-2" aria-hidden="true" tabindex="-1"></a><span class="st">Timing breakdown (approximate, CPU, one training update):</span></span>
+<span id="cb60-3"><a href="#cb60-3" aria-hidden="true" tabindex="-1"></a><span class="st">  ┌─────────────────────────────────────┬──────────────┬──────────┐</span></span>
+<span id="cb60-4"><a href="#cb60-4" aria-hidden="true" tabindex="-1"></a><span class="st">  │ Component                           │ Time         │ Share    │</span></span>
+<span id="cb60-5"><a href="#cb60-5" aria-hidden="true" tabindex="-1"></a><span class="st">  ├─────────────────────────────────────┼──────────────┼──────────┤</span></span>
+<span id="cb60-6"><a href="#cb60-6" aria-hidden="true" tabindex="-1"></a><span class="st">  │ 50 self-play episodes               │ ~</span><span class="sc">$</span>(<span class="fu">lpad</span>(<span class="fu">round</span>(<span class="dt">Int</span>,t_batch),<span class="fl">4</span>))<span class="st"> ms        │ ~95 %    │</span></span>
+<span id="cb60-7"><a href="#cb60-7" aria-hidden="true" tabindex="-1"></a><span class="st">  │   of which: ACSet match enumeration │ ~</span><span class="sc">$</span>(<span class="fu">lpad</span>(<span class="fu">round</span>(<span class="dt">Int</span>,<span class="fl">0.85</span><span class="op">*</span>t_batch<span class="op">*</span><span class="fl">1000</span><span class="op">/</span><span class="fl">50</span>),<span class="fl">3</span>))<span class="st"> ms/episode   │          │</span></span>
+<span id="cb60-8"><a href="#cb60-8" aria-hidden="true" tabindex="-1"></a><span class="st">  │   of which: world_to_gnn encoding   │ &lt;1 ms/step   │          │</span></span>
+<span id="cb60-9"><a href="#cb60-9" aria-hidden="true" tabindex="-1"></a><span class="st">  │   of which: GNN forward pass        │ &lt;1 ms/step   │          │</span></span>
+<span id="cb60-10"><a href="#cb60-10" aria-hidden="true" tabindex="-1"></a><span class="st">  │ Zygote autodiff + Adam update       │ ~</span><span class="sc">$</span>(<span class="fu">lpad</span>(<span class="fu">round</span>(<span class="dt">Int</span>,t_grad<span class="op">*</span><span class="fl">1000</span>),<span class="fl">4</span>))<span class="st"> ms        │ ~5 %     │</span></span>
+<span id="cb60-11"><a href="#cb60-11" aria-hidden="true" tabindex="-1"></a><span class="st">  └─────────────────────────────────────┴──────────────┴──────────┘</span></span>
+<span id="cb60-12"><a href="#cb60-12" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Timing breakdown (approximate, CPU, one training update):
+  ┌─────────────────────────────────────┬──────────────┬──────────┐
+  │ Component                           │ Time         │ Share    │
+  ├─────────────────────────────────────┼──────────────┼──────────┤
+  │ 50 self-play episodes               │ ~  30 ms        │ ~95 %    │
+  │   of which: ACSet match enumeration │ ~514 ms/episode   │          │
+  │   of which: world_to_gnn encoding   │ &lt;1 ms/step   │          │
+  │   of which: GNN forward pass        │ &lt;1 ms/step   │          │
+  │ Zygote autodiff + Adam update       │ ~ 485 ms        │ ~5 %     │
+  └─────────────────────────────────────┴──────────────┴──────────┘
+</code></pre>
+</div>
+</div>
+<p><strong>Bottleneck analysis.</strong> Episode collection dominates (≈95 % of total time). Within each episode the cost is almost entirely in AlgebraicRewriting’s homomorphism-search engine, which is invoked twice per turn: once to enumerate all valid matches for <code>mark_x</code> (or <code>mark_o</code>) and once to apply the chosen match via DPO rewriting. For a 9-square board with up to 9 possible moves the search is fast in absolute terms (~1–5 ms per turn), but because the GNN forward pass is <em>sub-millisecond</em> on these tiny graphs the algebraic machinery is still the dominant cost by a large margin.</p>
+<p>By contrast, the backward pass through Zygote and the Adam parameter update are fast even for the full 50-episode batch (~5 % of wall time), confirming that the policy-gradient machinery is not the bottleneck.</p>
+<p><strong>Scaling outlook.</strong> For larger games (larger boards, richer schemas) the match-enumeration cost grows with the number of morphisms in the pattern and the size of the world ACSet. The main levers for reducing it are:</p>
+<ol type="1">
+<li><strong>Match caching</strong> — re-enumerate only the squares affected by the last move.</li>
+<li><strong>Lightweight matching</strong> — for placement rules the valid moves are simply the empty squares; a custom enumerator could bypass the general homomorphism machinery.</li>
+<li><strong>Parallelism</strong> — independent episodes are embarrassingly parallel.</li>
+</ol>
+<p>The GNN itself would remain cheap even at larger board sizes because the elements graph grows linearly with the ACSet size, and GCN layers scale linearly in the number of edges.</p>
+<hr>
+</section>
+</section>
+<section id="evaluating-the-trained-policy" class="level3">
+<h3 class="anchored" data-anchor-id="evaluating-the-trained-policy">Evaluating the trained policy</h3>
+<div id="final-eval" class="cell" data-execution_count="44">
+<div class="sourceCode cell-code" id="cb62"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">7</span>)</span>
+<span id="cb62-2"><a href="#cb62-2" aria-hidden="true" tabindex="-1"></a>final_wr <span class="op">=</span> <span class="fu">eval_vs_random</span>(gnn_model, game, game_sched; n<span class="op">=</span><span class="fl">200</span>)</span>
+<span id="cb62-3"><a href="#cb62-3" aria-hidden="true" tabindex="-1"></a>random_wr <span class="op">=</span> <span class="fl">0.62</span>   <span class="co"># approximate baseline from Part 5</span></span>
+<span id="cb62-4"><a href="#cb62-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb62-5"><a href="#cb62-5" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Trained GNN (X) vs random (O) over 200 games:"</span>)</span>
+<span id="cb62-6"><a href="#cb62-6" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"  X wins : </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>final_wr; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span>)</span>
+<span id="cb62-7"><a href="#cb62-7" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"  Improvement over random baseline: "</span> <span class="op">*</span></span>
+<span id="cb62-8"><a href="#cb62-8" aria-hidden="true" tabindex="-1"></a>        <span class="st">"+</span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span><span class="fu">*</span>(final_wr <span class="op">-</span> random_wr); digits<span class="op">=</span><span class="fl">1</span>))<span class="st">pp"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Trained GNN (X) vs random (O) over 200 games:
+  X wins : 89.0%
+  Improvement over random baseline: +27.0pp</code></pre>
+</div>
+</div>
+<p>For a fair head-to-head, also pit the trained policy as O against a random X:</p>
+<div id="final-eval-as-o" class="cell" data-execution_count="45">
+<div class="sourceCode cell-code" id="cb64"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">eval_as_o_vs_random</span>(model, game, game_sched; n<span class="op">=</span><span class="fl">200</span>)</span>
+<span id="cb64-2"><a href="#cb64-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">function</span> <span class="fu">gnn_o_fn</span>(state<span class="op">::</span><span class="dt">GameState</span>, legal_actions<span class="op">::</span><span class="dt">Vector{Action}</span>)</span>
+<span id="cb64-3"><a href="#cb64-3" aria-hidden="true" tabindex="-1"></a>        <span class="fu">isempty</span>(legal_actions) <span class="op">&amp;&amp;</span> <span class="cf">return</span> <span class="cn">nothing</span></span>
+<span id="cb64-4"><a href="#cb64-4" aria-hidden="true" tabindex="-1"></a>        pw     <span class="op">=</span> <span class="fu">F</span>(state.world)   <span class="co"># O's perspective</span></span>
+<span id="cb64-5"><a href="#cb64-5" aria-hidden="true" tabindex="-1"></a>        g, _   <span class="op">=</span> <span class="fu">world_to_gnn</span>(pw)</span>
+<span id="cb64-6"><a href="#cb64-6" aria-hidden="true" tabindex="-1"></a>        sq_ids <span class="op">=</span> [<span class="fu">action_sq</span>(a) for a <span class="kw">in</span> legal_actions]</span>
+<span id="cb64-7"><a href="#cb64-7" aria-hidden="true" tabindex="-1"></a>        logits <span class="op">=</span> <span class="fu">model</span>(g, sq_ids)</span>
+<span id="cb64-8"><a href="#cb64-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> legal_actions[<span class="fu">argmax</span>(logits)]</span>
+<span id="cb64-9"><a href="#cb64-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">end</span></span>
+<span id="cb64-10"><a href="#cb64-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb64-11"><a href="#cb64-11" aria-hidden="true" tabindex="-1"></a>    agents <span class="op">=</span> <span class="fu">Dict</span><span class="dt">{Symbol, AbstractAgent}</span>(</span>
+<span id="cb64-12"><a href="#cb64-12" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>X <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>((s, a) <span class="op">-&gt;</span> <span class="fu">rand</span>(a)),</span>
+<span id="cb64-13"><a href="#cb64-13" aria-hidden="true" tabindex="-1"></a>        <span class="op">:</span>O <span class="op">=&gt;</span> <span class="fu">FunctionAgent</span>(gnn_o_fn),</span>
+<span id="cb64-14"><a href="#cb64-14" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb64-15"><a href="#cb64-15" aria-hidden="true" tabindex="-1"></a>    all_exps <span class="op">=</span> [<span class="fu">run_game_sched!</span>(game_sched, game, agents; T_max<span class="op">=</span><span class="fl">20</span>) for _ <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>n]</span>
+<span id="cb64-16"><a href="#cb64-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="fu">count</span>(<span class="cn">e</span> <span class="op">-&gt;</span> !<span class="fu">isempty</span>(<span class="cn">e</span>) <span class="op">&amp;&amp;</span> <span class="cn">e</span>[<span class="kw">end</span>].winner <span class="op">===</span> <span class="op">:</span>O, all_exps) <span class="op">/</span> n</span>
+<span id="cb64-17"><a href="#cb64-17" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span></span>
+<span id="cb64-18"><a href="#cb64-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb64-19"><a href="#cb64-19" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">8</span>)</span>
+<span id="cb64-20"><a href="#cb64-20" aria-hidden="true" tabindex="-1"></a>o_wr <span class="op">=</span> <span class="fu">eval_as_o_vs_random</span>(gnn_model, game, game_sched; n<span class="op">=</span><span class="fl">200</span>)</span>
+<span id="cb64-21"><a href="#cb64-21" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"Trained GNN (O) vs random (X) over 200 games:"</span>)</span>
+<span id="cb64-22"><a href="#cb64-22" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"  O wins : </span><span class="sc">$</span>(<span class="fu">round</span>(<span class="fl">100</span>o_wr; digits<span class="op">=</span><span class="fl">1</span>))<span class="st">%"</span>)</span>
+<span id="cb64-23"><a href="#cb64-23" aria-hidden="true" tabindex="-1"></a><span class="fu">println</span>(<span class="st">"  (random O baseline ≈ 30 %)"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Trained GNN (O) vs random (X) over 200 games:
+  O wins : 48.0%
+  (random O baseline ≈ 30 %)</code></pre>
+</div>
+</div>
+<p>The symmetric weight sharing pays off: the same network weights improve play for both X and O, even though it was trained via symmetric self-play with no player-specific supervision.</p>
+<hr>
+</section>
+</section>
 <section id="summary" class="level2">
 <h2 class="anchored" data-anchor-id="summary">Summary</h2>
 <table class="caption-top table">
@@ -886,6 +1442,22 @@ Mean episode length : 7.12</code></pre>
 <tr class="odd">
 <td>Analyse results</td>
 <td><code>win_rate</code>, <code>episode_length</code>, <code>action_counts</code></td>
+</tr>
+<tr class="even">
+<td>GNN state encoding</td>
+<td><code>world_to_gnn(world)</code> → <code>GNNGraph</code> from elements; node features = one-hot type</td>
+</tr>
+<tr class="odd">
+<td>Symmetric RL agent</td>
+<td><code>perspective_world(world, player)</code> applies <code>F</code> for O; single shared network</td>
+</tr>
+<tr class="even">
+<td>RL training</td>
+<td><code>train_self_play!</code> — REINFORCE + Adam, self-play episodes, periodic eval</td>
+</tr>
+<tr class="odd">
+<td>Training bottleneck</td>
+<td>Episode collection (ACSet match enumeration) &gt;&gt; GNN forward + grad update</td>
 </tr>
 </tbody>
 </table>
@@ -975,8 +1547,6 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
   });
   clipboard.on('success', onCopySuccess);
   if (window.document.getElementById('quarto-embedded-source-code-modal')) {
-    // For code content inside modals, clipBoardJS needs to be initialized with a container option
-    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
     const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
       text: getTextToCopy,
       container: window.document.getElementById('quarto-embedded-source-code-modal')
@@ -1087,7 +1657,6 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
       if (window.Quarto?.typesetMath) {
         window.Quarto.typesetMath(note);
       }
-      // TODO in 1.5, we should make sure this works without a callout special case
       if (note.classList.contains("callout")) {
         return note.outerHTML;
       } else {

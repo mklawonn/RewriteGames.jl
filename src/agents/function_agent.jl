@@ -5,7 +5,7 @@ An agent backed by any Julia callable `f` with signature:
 
     f(state::GameState, legal_actions::Vector{Action}) -> Action
 
-This covers random policies, rule-based heuristics, trained Flux models, MCTS
+This covers random policies, rule-based heuristics, trained ML models (e.g. via ONNX), MCTS
 trees, or any other strategy expressible as a Julia function.  The raw ACSet
 world is available as `state.world`; use `elements_graph(state)` for the
 category-of-elements representation.
