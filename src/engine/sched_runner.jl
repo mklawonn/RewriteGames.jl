@@ -158,7 +158,8 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     all_pra    = _collect_player_apps(gs)
     for (name, pra) in all_pra
         if pra.use_cache && pra.fast_match_fn === nothing
-            cache_dict[name] = MatchCache(pra.rule, pra.cat, initial_world)
+            cache_dict[name] = MatchCache(pra.rule, pra.cat, initial_world;
+                                          match_limit = pra.match_limit)
         end
     end
 
@@ -316,9 +317,13 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         raw    = box.fast_match_fn(box.rule, world, _cat)
         actions = [Action(box, m) for m in raw]
     elseif haskey(cache_dict, box.name)
-        actions = [Action(box, m) for m in cache_dict[box.name].matches]
+        ms = cache_dict[box.name].matches
+        ms = box.match_limit === nothing ? ms : @view ms[1:min(end, box.match_limit)]
+        actions = [Action(box, m) for m in ms]
     else
-        raw    = collect(get_matches(box.rule, world; cat=box.cat))
+        gen = get_matches(box.rule, world; cat=box.cat)
+        raw = box.match_limit === nothing ? collect(gen) :
+              collect(Iterators.take(gen, box.match_limit))
         actions = [Action(box, m) for m in raw]
     end
 

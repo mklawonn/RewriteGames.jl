@@ -25,6 +25,12 @@ The inner `RuleApp` is stored in `_inner` and forwarded to `mk_sched` /
 - `use_cache`:     When `true`, `run_game_sched!` maintains a `MatchCache`
                    for this box and updates it incrementally after every DPO
                    rewrite, avoiding a full re-search each turn.
+- `match_limit`:   When set to an `Int`, caps the number of matches
+                   enumerated to at most that many per turn.  Passes a
+                   lazy `take` limit to the underlying homomorphism search
+                   so that work stops once enough matches are found.  Has
+                   no effect when `fast_match_fn` is set (the user-supplied
+                   function controls enumeration).
 """
 struct PlayerRuleApp
     name          :: Symbol
@@ -35,15 +41,18 @@ struct PlayerRuleApp
     _inner        :: Any      # inner RuleApp
     fast_match_fn :: Union{Function, Nothing}
     use_cache     :: Bool
+    match_limit   :: Union{Int, Nothing}
 end
 
 function PlayerRuleApp(name::Symbol, rule, init, player::Symbol;
                         cat=nothing,
                         fast_match_fn::Union{Function,Nothing}=nothing,
-                        use_cache::Bool=false)
+                        use_cache::Bool=false,
+                        match_limit::Union{Int,Nothing}=nothing)
     inner = cat === nothing ? RuleApp(name, rule, init) :
                               RuleApp(name, rule, init; cat=cat)
-    PlayerRuleApp(name, rule, init, player, cat, inner, fast_match_fn, use_cache)
+    PlayerRuleApp(name, rule, init, player, cat, inner, fast_match_fn, use_cache,
+                  match_limit)
 end
 
 Base.show(io::IO, p::PlayerRuleApp) =
@@ -158,7 +167,8 @@ function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol};
             PlayerRuleApp(new_name, F(v.rule), F(v.init), new_player;
                           cat           = v.cat === nothing ? nothing : v.cat,
                           fast_match_fn = v.fast_match_fn,
-                          use_cache     = v.use_cache)
+                          use_cache     = v.use_cache,
+                          match_limit   = v.match_limit)
         elseif v isa GameSched
             player_migrate(F, v, player_map; name_map)
         else

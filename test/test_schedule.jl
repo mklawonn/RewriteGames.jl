@@ -36,6 +36,14 @@ rand_agent = FunctionAgent((s, a) -> rand(a))
         @test pra._inner isa RuleApp
     end
 
+    @testset "PlayerRuleApp with match_limit" begin
+        pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice; match_limit=3)
+        @test pra.match_limit == 3
+        # default is nothing
+        pra2 = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
+        @test pra2.match_limit === nothing
+    end
+
     # ─── Body parser ─────────────────────────────────────────────────────────
 
     @testset "_parse_body: simple two-output box" begin

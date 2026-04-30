@@ -29,24 +29,31 @@ Incremental cache of valid match morphisms for a `Rule` against an evolving
 ACSet world.
 
 # Fields
-- `rule`:    The rewrite rule whose match set is being maintained.
-- `cat`:     The ACSet category (passed through to `get_matches` / `can_match`).
-- `matches`: Current set of valid match morphisms `L → world`.
+- `rule`:        The rewrite rule whose match set is being maintained.
+- `cat`:         The ACSet category (passed through to `get_matches` / `can_match`).
+- `matches`:     Current set of valid match morphisms `L → world`.
+- `match_limit`: Optional cap on the number of stored matches.
 """
 mutable struct MatchCache
-    rule    :: Any   # AbsRule (Rule{:DPO} in practice)
-    cat     :: Any   # ACSetCategory or nothing
-    matches :: Vector{Any}   # Vector{ACSetTransformation}
+    rule        :: Any   # AbsRule (Rule{:DPO} in practice)
+    cat         :: Any   # ACSetCategory or nothing
+    matches     :: Vector{Any}   # Vector{ACSetTransformation}
+    match_limit :: Union{Int, Nothing}
 end
 
 """
-    MatchCache(rule, cat, world::ACSet) -> MatchCache
+    MatchCache(rule, cat, world::ACSet; match_limit=nothing) -> MatchCache
 
-Initialise a cache with a full homomorphism search against `world`.
+Initialise a cache with a homomorphism search against `world`.  When
+`match_limit` is an `Int`, at most that many matches are stored.
 """
-function MatchCache(rule, cat, world::ACSet)
+function MatchCache(rule, cat, world::ACSet;
+                    match_limit::Union{Int,Nothing}=nothing)
     _cat = isnothing(cat) ? infer_acset_cat(world) : cat
-    MatchCache(rule, cat, Vector{Any}(get_matches(rule, world; cat=_cat)))
+    gen  = get_matches(rule, world; cat=_cat)
+    ms   = match_limit === nothing ? collect(gen) :
+           collect(Iterators.take(gen, match_limit))
+    MatchCache(rule, cat, Vector{Any}(ms), match_limit)
 end
 
 """
@@ -80,6 +87,9 @@ function update_cache!(cache::MatchCache, maps::Dict)
     # ── Step 3: find new matches involving newly added elements ────────────────
     append!(new_matches, _find_new_matches(cache.rule, rh, kh, _cat))
 
+    if cache.match_limit !== nothing && length(new_matches) > cache.match_limit
+        resize!(new_matches, cache.match_limit)
+    end
     cache.matches = new_matches
     return cache
 end

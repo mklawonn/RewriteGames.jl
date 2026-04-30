@@ -93,6 +93,40 @@ using AlgebraicRewriting
         @test !isempty(exps)
     end
 
+    # ── match_limit ───────────────────────────────────────────────────────────
+
+    @testset "match_limit caps legal_actions per turn" begin
+        # Start with 4 vertices so rule_add_edge has multiple matches.
+        # With match_limit=1, each Experience should have at most 1 legal action.
+        pra_limited = PlayerRuleApp(:add_edge, rule_add_edge, I_two_v, :bob;
+                                    match_limit=1)
+        sched_limited = mk_game_sched(
+            (;), (init=:I_two_v,), N,
+            (b=pra_limited,),
+            quote
+                moved, tie = b(init)
+                return moved, tie
+            end)
+        exps = run_game_sched!(sched_limited, Graph(4), agents; T_max=5)
+        @test !isempty(exps)
+        @test all(e -> length(e.legal_actions) <= 1, exps)
+    end
+
+    @testset "match_limit with use_cache caps legal_actions per turn" begin
+        pra_cached = PlayerRuleApp(:add_edge, rule_add_edge, I_two_v, :bob;
+                                   match_limit=1, use_cache=true)
+        sched_cached = mk_game_sched(
+            (;), (init=:I_two_v,), N,
+            (b=pra_cached,),
+            quote
+                moved, tie = b(init)
+                return moved, tie
+            end)
+        exps = run_game_sched!(sched_cached, Graph(4), agents; T_max=5)
+        @test !isempty(exps)
+        @test all(e -> length(e.legal_actions) <= 1, exps)
+    end
+
     # ── Exit-wire winner detection ────────────────────────────────────────────
 
     # One-shot schedule: alice adds a vertex then exits.
