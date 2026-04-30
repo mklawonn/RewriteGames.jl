@@ -12,7 +12,6 @@ A single step of interaction between a player and the game environment.
 - `done`:          Whether the game terminated after this step.
 - `winner`:        Winning player symbol, or `nothing`.
 - `info`:          Metadata dict.
-- `schedule_path`: Reserved for compatibility; always `Symbol[]`.
 """
 struct Experience
     player        :: Symbol
@@ -23,7 +22,6 @@ struct Experience
     done          :: Bool
     winner        :: Union{Symbol, Nothing}
     info          :: Dict{Symbol, Any}
-    schedule_path :: Vector{Symbol}
 end
 
 Base.show(io::IO, e::Experience) =

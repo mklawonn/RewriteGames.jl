@@ -42,11 +42,7 @@ module RewriteGames
 using Catlab
 using AlgebraicRewriting
 
-# ── Core types ──────────────────────────────────────────────────────────────
-include("core/rule_entry.jl")
-include("core/auto_rule.jl")
-
-# ── Game struct ─────────────────────────────────────────────────────────────
+# ── Core ────────────────────────────────────────────────────────────────────
 include("core/game.jl")
 
 # ── Encoding utilities ────────────────────────────────────────────────────
@@ -55,11 +51,8 @@ include("encoding/encoding.jl")
 # ── Agent interface ──────────────────────────────────────────────────────
 include("agents/abstract.jl")
 include("agents/function_agent.jl")
-# ONNXAgent is loaded via the ONNXAgentExt package extension when ONNXRunTime is available.
 
 # ── Engine ──────────────────────────────────────────────────────────────────
-include("engine/matches.jl")
-include("engine/auto.jl")
 include("engine/driver.jl")
 include("engine/match_cache.jl")
 
@@ -84,8 +77,6 @@ include("dsl.jl")
 
 export
     # Core
-    RuleEntry, RuleLibrary,
-    AutoRule,
     Game, GameState,
     nplayers,
 
@@ -95,9 +86,6 @@ export
     select_action,
 
     # Engine
-    enumerate_all_matches, enumerate_legal_actions,
-    apply_rule!, rule_index,
-    fire_auto_rules!,
     Experience,
 
     # Wiring-diagram schedule

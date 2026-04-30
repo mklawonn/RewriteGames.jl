@@ -7,12 +7,12 @@ using AlgebraicRewriting
     W     = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
     state = GameState(W, 1)
 
-    rule_stub = RuleEntry("r"; name=:move)
-    act = Action(rule_stub, nothing)
+    stub = (name=:move, rule="r")
+    act = Action(stub, nothing)
 
-    exp_win  = Experience(:alice, state, [act], act,     state, true,  :alice,  Dict{Symbol,Any}(), Symbol[])
-    exp_draw = Experience(:bob,   state, [act], nothing, state, true,  nothing, Dict{Symbol,Any}(), Symbol[])
-    exp_mid  = Experience(:alice, state, [act], act,     state, false, nothing, Dict{Symbol,Any}(), Symbol[])
+    exp_win  = Experience(:alice, state, [act], act,     state, true,  :alice,  Dict{Symbol,Any}())
+    exp_draw = Experience(:bob,   state, [act], nothing, state, true,  nothing, Dict{Symbol,Any}())
+    exp_mid  = Experience(:alice, state, [act], act,     state, false, nothing, Dict{Symbol,Any}())
 
     exps = [exp_mid, exp_win, exp_draw]
 

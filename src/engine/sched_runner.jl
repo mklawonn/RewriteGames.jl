@@ -210,7 +210,7 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
                 last_exp.player, last_exp.state, last_exp.legal_actions,
                 last_exp.action, last_exp.next_state,
                 true, wire_winner,
-                last_exp.info, last_exp.schedule_path,
+                last_exp.info,
             )
         end
     end
@@ -343,7 +343,7 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         state_post = GameState(new_world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, chosen,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[]))
+                               Dict{Symbol, Any}()))
         # Route to success port (1) and clear failure port (2)
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
@@ -354,7 +354,7 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         state_post = GameState(world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, nothing,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[]))
+                               Dict{Symbol, Any}()))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = nothing)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = world)
     end
