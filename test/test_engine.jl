@@ -80,7 +80,6 @@ using AlgebraicRewriting
         @test exp.legal_actions isa Vector{Action}
         @test exp.action isa Union{Action, Nothing}
         @test exp.info isa Dict{Symbol, Any}
-        @test exp.schedule_path isa Vector{Symbol}
     end
 
     # ── Agent behaviour ───────────────────────────────────────────────────────

@@ -6,8 +6,8 @@ using Catlab
     W     = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
     state = GameState(W, 1)
 
-    rule    = RuleEntry("stub"; name=:test)
-    actions = [Action(rule, nothing), Action(rule, nothing), Action(rule, nothing)]
+    stub    = (name=:test, rule="stub")
+    actions = [Action(stub, nothing), Action(stub, nothing), Action(stub, nothing)]
 
     @testset "FunctionAgent wraps callable" begin
         agent  = FunctionAgent((state, acts) -> acts[1])

@@ -1,17 +1,10 @@
 using Test
 using RewriteGames
 using Catlab
-using AlgebraicRewriting
 
 @testset "Serialization tests" begin
     W     = @acset Graph begin V=2; E=1; src=[1]; tgt=[2] end
     state = GameState(W, 1)
-
-    I_empty = Graph()
-    R_one_v = Graph(1)
-    rule  = Rule(ACSetTransformation(I_empty, I_empty),
-                 ACSetTransformation(I_empty, R_one_v))
-    entry = RuleEntry(rule; name=:add_vertex)
 
     exp = Experience(
         :alice,
@@ -22,7 +15,6 @@ using AlgebraicRewriting
         true,
         :alice,
         Dict{Symbol, Any}(:auto_results => []),
-        Symbol[],
     )
 
     path = tempname() * ".arrow"
