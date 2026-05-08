@@ -25,6 +25,16 @@ The inner `RuleApp` is stored in `_inner` and forwarded to `mk_sched` /
 - `use_cache`:     When `true`, `run_game_sched!` maintains a `MatchCache`
                    for this box and updates it incrementally after every DPO
                    rewrite, avoiding a full re-search each turn.
+                   Ignored when `view_fn` is set.
+- `view_fn`:       Optional fog-of-war function
+                   `(player::Symbol, world) -> (subworld, v::ACSetTransformation)`
+                   where `v : subworld → world` is the monic inclusion.
+                   When set, matches are enumerated against `subworld`
+                   and translated back to `world` via composition with `v`;
+                   translated matches that violate the DPO dangling condition
+                   in `world` are silently discarded.  The agent receives a
+                   `GameState` whose world is `subworld`.  `use_cache` is
+                   incompatible with `view_fn` and is ignored when both are set.
 """
 struct PlayerRuleApp
     name          :: Symbol
@@ -35,15 +45,17 @@ struct PlayerRuleApp
     _inner        :: Any      # inner RuleApp
     fast_match_fn :: Union{Function, Nothing}
     use_cache     :: Bool
+    view_fn       :: Union{Function, Nothing}
 end
 
 function PlayerRuleApp(name::Symbol, rule, init, player::Symbol;
                         cat=nothing,
                         fast_match_fn::Union{Function,Nothing}=nothing,
-                        use_cache::Bool=false)
+                        use_cache::Bool=false,
+                        view_fn::Union{Function,Nothing}=nothing)
     inner = cat === nothing ? RuleApp(name, rule, init) :
                               RuleApp(name, rule, init; cat=cat)
-    PlayerRuleApp(name, rule, init, player, cat, inner, fast_match_fn, use_cache)
+    PlayerRuleApp(name, rule, init, player, cat, inner, fast_match_fn, use_cache, view_fn)
 end
 
 Base.show(io::IO, p::PlayerRuleApp) =
@@ -158,7 +170,8 @@ function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol};
             PlayerRuleApp(new_name, F(v.rule), F(v.init), new_player;
                           cat           = v.cat === nothing ? nothing : v.cat,
                           fast_match_fn = v.fast_match_fn,
-                          use_cache     = v.use_cache)
+                          use_cache     = v.use_cache,
+                          view_fn       = v.view_fn)
         elseif v isa GameSched
             player_migrate(F, v, player_map; name_map)
         else

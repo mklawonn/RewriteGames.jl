@@ -23,6 +23,7 @@ using AlgebraicRewriting
         :alice,
         Dict{Symbol, Any}(:auto_results => []),
         Symbol[],
+        nothing,
     )
 
     path = tempname() * ".arrow"

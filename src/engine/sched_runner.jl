@@ -153,11 +153,13 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     n_trace    = length(gs._trace_names)
     _terminal  = terminal === nothing ? (W) -> (false, nothing) : terminal
 
-    # Build incremental match caches for all PlayerRuleApp boxes that request one
+    # Build incremental match caches for all PlayerRuleApp boxes that request one.
+    # Boxes with view_fn are excluded: their matches are computed on the subworld,
+    # which the full-world cache cannot track.
     cache_dict = Dict{Symbol, MatchCache}()
     all_pra    = _collect_player_apps(gs)
     for (name, pra) in all_pra
-        if pra.use_cache && pra.fast_match_fn === nothing
+        if pra.use_cache && pra.fast_match_fn === nothing && pra.view_fn === nothing
             cache_dict[name] = MatchCache(pra.rule, pra.cat, initial_world)
         end
     end
@@ -210,7 +212,7 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
                 last_exp.player, last_exp.state, last_exp.legal_actions,
                 last_exp.action, last_exp.next_state,
                 true, wire_winner,
-                last_exp.info, last_exp.schedule_path,
+                last_exp.info, last_exp.schedule_path, last_exp.view,
             )
         end
     end
@@ -310,27 +312,43 @@ end
 function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
                         turn::Ref{Int}, T_max, exps,
                         cache_dict::Dict{Symbol, MatchCache})
-    # Determine match set: fast_match_fn → cache → full search
-    if box.fast_match_fn !== nothing
-        _cat   = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
-        raw    = box.fast_match_fn(box.rule, world, _cat)
-        actions = [Action(box, m) for m in raw]
+    _cat = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
+
+    # ── Enumerate legal actions (view-aware) ──────────────────────────────────
+    view_world = nothing   # subworld seen by the agent; nothing = full information
+
+    if box.view_fn !== nothing
+        # Fog-of-war path: match against the player's subworld, then translate
+        # each match back to the full world via the inclusion morphism v.
+        # Drop translated matches that violate the DPO dangling condition in world.
+        subworld, v = box.view_fn(box.player, world)
+        view_world  = subworld
+        raw_sub = box.fast_match_fn !== nothing ?
+            box.fast_match_fn(box.rule, subworld, _cat) :
+            collect(get_matches(box.rule, subworld; cat=box.cat))
+        raw = [compose(m, v) for m in raw_sub]
+        filter!(m -> can_pushout_complement[_cat](left(box.rule), m), raw)
+    elseif box.fast_match_fn !== nothing
+        raw = box.fast_match_fn(box.rule, world, _cat)
     elseif haskey(cache_dict, box.name)
-        actions = [Action(box, m) for m in cache_dict[box.name].matches]
+        raw = cache_dict[box.name].matches
     else
-        raw    = collect(get_matches(box.rule, world; cat=box.cat))
-        actions = [Action(box, m) for m in raw]
+        raw = collect(get_matches(box.rule, world; cat=box.cat))
     end
 
-    state_pre = GameState(world, turn[])
-    agent     = agents[box.player]
+    actions = [Action(box, m) for m in raw]
 
-    chosen = isempty(actions) ? nothing : select_action(agent, state_pre, actions)
+    # ── Agent decision ────────────────────────────────────────────────────────
+    # state_pre records the full world for Experience; the agent sees the subworld.
+    state_pre  = GameState(world, turn[])
+    agent_view = isnothing(view_world) ? world : view_world
+    chosen     = isempty(actions) ? nothing :
+                 select_action(agents[box.player], GameState(agent_view, turn[]), actions)
 
     if chosen !== nothing
-        # Use rewrite_match_maps to get DPO output needed for cache update
-        _cat  = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
-        maps  = rewrite_match_maps(box.rule, chosen.match; cat=_cat)
+        # Use rewrite_match_maps to get DPO output needed for cache update.
+        # chosen.match is always a morphism into the full world (translated above).
+        maps      = rewrite_match_maps(box.rule, chosen.match; cat=_cat)
         new_world = codom(maps[:rh])
 
         # Update ALL caches with the DPO maps from this move
@@ -343,18 +361,18 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         state_post = GameState(new_world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, chosen,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[]))
+                               Dict{Symbol, Any}(), Symbol[], view_world))
         # Route to success port (1) and clear failure port (2)
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
     else
-        # No matches — route to failure port (2), success port (1) inactive
+        # No legal actions — pass; route to failure port (2)
         done, winner = terminal(world)
         turn[] += 1
         state_post = GameState(world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, nothing,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[]))
+                               Dict{Symbol, Any}(), Symbol[], view_world))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = nothing)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = world)
     end
