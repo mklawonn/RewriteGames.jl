@@ -27,8 +27,6 @@ import Catlab.Graphics.Graphviz
 
 ---
 
-TODO: Re-index the section header numbers
-
 ## Overview
 
 Reinforcement learning (RL) provides a powerful paradigm for discovering optimal
@@ -99,16 +97,21 @@ Every relational model begins with a **schema**. The schema defines the
 connect. For tic-tac-toe, we need to track squares, pieces, and the 
 connectivity of the board:
 
-TODO: This table and surrounding prose needs updating to reflect the new schema which has multiple edge tables.
-| Object | Meaning |
-|--------|---------|
-| `Sq`   | Board squares (always exactly 9) |
-| `E`    | Edges encoding the board's graph topology |
-| `X`    | X pieces placed so far |
-| `O`    | O pieces placed so far |
+| Object   | Meaning |
+|----------|---------|
+| `Sq`     | Board squares (always exactly 9) |
+| `RowE`   | Horizontal edges encoding row adjacency |
+| `ColE`   | Vertical edges encoding column adjacency |
+| `DiagE`  | Diagonal edges encoding diagonal adjacency |
+| `X`      | X pieces placed so far |
+| `O`      | O pieces placed so far |
 
-Two foreign keys record which square each piece occupies, and two more record 
-the source and target squares of each edge. Let's look at how we implement this schema in RewriteGames.jl,
+Two foreign keys (`xsq`, `osq`) record which square each piece occupies.
+Each of the three edge tables has two foreign keys recording its source and
+target squares (`rsrc`/`rtgt`, `csrc`/`ctgt`, `dsrc`/`dtgt`), giving six
+edge-related foreign keys in total. Separating rows, columns, and diagonals
+into distinct tables lets win-detection patterns refer specifically to each
+orientation without over-generating matches. Let's look at how we implement this schema in RewriteGames.jl,
 or more accurately how RewriteGames.jl uses Catlab.jl and ACSets.jl to do so.
 
 ```{julia}
@@ -535,12 +538,14 @@ The representable for each schema object is the unique (up to isomorphism) ACSet
 exactly one element of that type, plus the minimum number of elements of every other type
 required to satisfy the foreign-key constraints.  Think of it as the "atom" for that type.
 
-| Variable | Object | `Sq` | `E` | `X` | `O` | Description |
-|----------|--------|------|-----|-----|-----|-------------|
-| `Sq` | `Sq` | 1 | 0 | 0 | 0 | A single bare square |
-| `E` | `E` | 2 | 1 | 0 | 0 | Two squares connected by one edge |
-| `X` | `X` | 1 | 0 | 1 | 0 | One X piece on one square |
-| `O` | `O` | 1 | 0 | 0 | 1 | One O piece on one square |
+| Variable | Object  | `Sq` | `RowE` | `ColE` | `DiagE` | `X` | `O` | Description |
+|----------|---------|------|--------|--------|---------|-----|-----|-------------|
+| `Sq`     | `Sq`    | 1    | 0      | 0      | 0       | 0   | 0   | A single bare square |
+| `RowE`   | `RowE`  | 2    | 1      | 0      | 0       | 0   | 0   | Two squares joined by one row edge |
+| `ColE`   | `ColE`  | 2    | 0      | 1      | 0       | 0   | 0   | Two squares joined by one column edge |
+| `DiagE`  | `DiagE` | 2    | 0      | 0      | 1       | 0   | 0   | Two squares joined by one diagonal edge |
+| `X`      | `X`     | 1    | 0      | 0      | 0       | 1   | 0   | One X piece on one square |
+| `O`      | `O`     | 1    | 0      | 0      | 0       | 0   | 1   | One O piece on one square |
 
 The representables for `X` and `O` look like single-square boards with a piece already placed:
 
@@ -742,28 +747,6 @@ x_cols_app  = RuleApp(:x_wins_cols,  x_cols_rule,  I; cat=𝒞)
 x_diags_app = RuleApp(:x_wins_diags, x_diags_rule, I; cat=𝒞)
 ```
 
-TODO: I think the following "RuleApp" subsection makes more sense in the "Building the Schedules" section. There, we should start out by "Taking Stock", and then describe RuleApp, and then describe how to arrange into a schedule.
-### `RuleApp` and its two output ports
-
-A `RuleApp` wraps a `Rule` into a *schedulable box*.  When execution reaches a `RuleApp`
-the engine applies the rule automatically — it picks a match on its own (or signals
-failure when none exists) — **without consulting any player or agent**.  This makes
-`RuleApp` appropriate for mechanical checks such as win detection, where there is no
-decision to be made.
-
-For moves that require a player decision use `PlayerRuleApp` instead (introduced in
-Part 4).  A `PlayerRuleApp` pauses execution, enumerates all legal matches, asks the
-registered agent to select one, and then applies the chosen match.
-
-The key property shared by both is **two output wires**:
-
-- **Port 1** (success): carries the rewritten world when a match was found and the rule
-  applied.
-- **Port 2** (failure): carries the original world unchanged when no match existed.
-
-This two-port structure lets schedules branch based on whether a rule could fire — which
-is exactly what we need for win detection and tie detection.
-
 ### Taking Stock: From Rules to Gameplay
 
 We have now implemented everything we need to describe the **logic** of 
@@ -780,7 +763,7 @@ game should officially stop. For this, we need to arrange our rules into a
 
 ---
 
-## Part 4 — Building the Schedules
+## Part 3 — Building the Schedules
 
 With moves defined as rewrite rules, the next step is to arrange them into a *schedule*:
 a wiring diagram that specifies whose turn it is, what happens when a win condition is
@@ -797,6 +780,26 @@ Two RewriteGames primitives build on AlgebraicRewriting's scheduling machinery:
   which player and retains enough information to rebuild the schedule after a schema
   migration.
 
+### `RuleApp` and its two output ports
+
+Before introducing `PlayerRuleApp`, it helps to understand the simpler primitive it
+extends: `RuleApp`.
+
+A `RuleApp` wraps a `Rule` into a *schedulable box*.  When execution reaches a `RuleApp`
+the engine applies the rule automatically — it finds a match on its own (or signals
+failure when none exists) — **without consulting any player or agent**.  This makes
+`RuleApp` appropriate for mechanical checks such as win detection, where there is no
+decision to be made.
+
+The key property of every `RuleApp` (and `PlayerRuleApp`) is **two output ports**:
+
+- **Port 1** (success): carries the rewritten world when a match was found and the rule
+  applied.
+- **Port 2** (failure): carries the original world unchanged when no match existed.
+
+This two-port structure lets schedules branch based on whether a rule could fire — which
+is exactly what we need for win detection and tie detection.
+
 ### `PlayerRuleApp` — tagging a rule with a player
 
 `PlayerRuleApp` extends `RuleApp` by tagging the rule with a *player identity*:
@@ -812,10 +815,15 @@ Arguments:
 - `:X` — the player key; must match a key in the `agents` dict passed to
   `run_game_sched!`.
 
-TODO: Hand hold the reader a bit more about the consequences of tagging a player. Hint at where players are registered and say it will be explained later on.
+The `:X` tag is the **player key** that links this box to a concrete agent at runtime.
+When you call `run_game_sched!`, you pass an `agents` dictionary mapping player keys to
+`AbstractAgent` values — for example `Dict(:X => FunctionAgent(...), :O => FunctionAgent(...))`.
+Every `PlayerRuleApp` consults that dictionary to find the right agent for its player
+key. We will see exactly how to construct and register agents in Part 4.
+
 When `run_game_sched!` reaches a `PlayerRuleApp` box, it enumerates all valid matches
-(legal moves), asks the registered agent to pick one, applies the chosen match, and
-records an `Experience`. 
+(legal moves), presents them to the registered agent, applies the chosen match, and
+records an `Experience` capturing the board before and after the move.
 
 Like a plain `RuleApp`, a `PlayerRuleApp` has two output ports: **success** (a move was
 made) and **failure** (no legal moves exist). If no matches exist (board full), the box routes to its failure
@@ -827,42 +835,11 @@ are available routes to the same failure port with the world left unchanged, and
 (`exp.action !== nothing`) to distinguish a real move from a pass or no-match turn.
 
 
-### `GameSched` and `mk_game_sched`
-
-TODO: This needs much more hand holding explanation. Give intuition about why we thinking of "trace". Perhaps we need to show a simple schedule somewhere before this so people
-can think about what "wires" are. Actually, I think it might make sense to put this discussion *after* the X and ) schedules.
-
-You construct a `GameSched` with `mk_game_sched`, which shares its signature with
-AlgebraicRewriting's `mk_sched`:
-
-```julia
-mk_game_sched(trace_args, init_args, N, boxes, body) -> GameSched
-```
-
-- `trace_args` — a `NamedTuple` declaring wires that loop back from the last return
-  wire(s) to feed subsequent iterations.
-- `init_args` — a `NamedTuple` declaring wires active only on the first iteration.
-- `N` — the `Names` object for wire-type labels.
-- `boxes` — a `NamedTuple` of `PlayerRuleApp`, `GameSched`, bare `RuleApp`,
-  `merge_wires(I)`, or any other `AgentBox`.
-- `body` — a `quote` block written in the wire-assignment DSL.
-
-The body DSL:
-
-```julia
-quote
-    out1, out2 = box_name(in_wire)        # box with one input, two outputs
-    merged_out = merge_box(out1, out3)    # merge_wires: first active input wins
-    out3, out4 = box2([wire_a, wire_b])   # first active of wire_a/wire_b enters box2
-    return trace_wire, exit_wire          # first length(trace_args) wires loop back
-end
-```
-
-`[wire_a, wire_b]` passes the first active (non-`nothing`) wire into the box — the
-standard way to merge the `init` wire (first turn) with the `trace_arg` wire (later
-turns).
-
-`view_sched(gs; names=N)` renders any `GameSched` as a Graphviz wiring diagram.
+The sub-schedules below are built with `mk_game_sched`.  Read each code block as a
+**dataflow program**: every assignment `out1, out2 = box(in)` runs `box` on whatever
+board is currently flowing along wire `in` and routes the result to `out1` (success) or
+`out2` (failure).  A full reference for `mk_game_sched` and its DSL appears in the
+next subsection, after you have seen all three component schedules.
 
 ### Win-check sub-schedules
 
@@ -959,6 +936,67 @@ We also derive O's win-check sub-schedule via the same migration:
 o_won_check_gs = player_migrate(F, x_won_check_gs, Dict(:X => :O))
 ```
 
+### `GameSched` and `mk_game_sched` — the scheduling DSL
+
+Now that you have seen three concrete schedules, it is easier to understand the
+primitives that build them.
+
+#### Wires and boxes
+
+Think of a schedule as a **wiring diagram**: named wires carry a board (an ACSet) from
+one box to the next.  At any moment exactly one wire is *active* (carrying a board);
+all others are `nothing`.  A box receives the board on its input wire, does something
+with it, and routes the result to one of its output wires:
+
+- A `RuleApp` box fires its rule automatically and routes to port 1 (success) or port 2
+  (no match found).
+- A `PlayerRuleApp` box pauses, asks its agent to pick a move, applies it, and routes
+  to port 1 (moved) or port 2 (no legal moves — tie).
+- A `merge_wires` box forwards the first active (non-`nothing`) input wire and discards
+  the rest — a convenient fan-in node.
+
+#### Loops and the `trace_arg`
+
+A schedule can loop by declaring **trace wires**: return wires that feed back into the
+start of the next iteration.  The first `length(trace_args)` wires in the `return`
+statement are loop-back wires; any remaining wires are exit wires that terminate the
+schedule.
+
+For example, `game_sched` declares `(trace_arg=:I,)` as its trace wire and
+`(init=:I,)` as its one-time initialisation wire:
+
+- On the **first iteration**, `[init, trace_arg]` routes `init` (the freshly created
+  board) into X's turn, because `trace_arg` is still `nothing`.
+- On **subsequent iterations**, the board returned on `o_cont` feeds back as
+  `trace_arg`, while `init` is now `nothing`.
+
+This pattern — `[init, trace_arg]` as the input — is the standard idiom for turning a
+straight-line schedule into a game loop.
+
+#### Full API
+
+```julia
+mk_game_sched(trace_args, init_args, N, boxes, body) -> GameSched
+```
+
+- `trace_args` — `NamedTuple` of `Symbol => wire_type` pairs for loop-back wires.
+- `init_args`  — `NamedTuple` for wires that are only active on the first iteration.
+- `N`          — the `Names` object mapping wire-type labels to representable ACSets.
+- `boxes`      — `NamedTuple` of schedulable boxes (`PlayerRuleApp`, `GameSched`,
+  `RuleApp`, `merge_wires(I)`, …).
+- `body`       — a `quote` block in the wire-assignment DSL:
+
+```julia
+quote
+    out1, out2 = box_name(in_wire)        # route a single active wire into a box
+    merged     = merge_box(out1, out3)    # merge_wires: forward the first active wire
+    out3, out4 = box2([wire_a, wire_b])   # [wa, wb]: first active wire enters box
+    return trace_wire, exit_wire          # first length(trace_args) wires loop back
+end
+```
+
+`view_sched(gs; names=N)` renders any `GameSched` as a Graphviz wiring diagram.
+
 ### Full game loop
 
 The outer schedule loops X then O, interleaving each player's move with the
@@ -997,11 +1035,22 @@ Return wires:
 
 ---
 
-TODO: Hand hold the user a bit more through the process of constructing a Game and running training.
-## Part 5 — Running the Game
+## Part 4 — Running the Game
 
-With the schedule built, the final step is to package everything into a `Game` record,
-supply agents for each player, and run episodes.
+With the schedule built, we have a complete description of how tic-tac-toe **works**,
+but we still need to say **who** plays and **what** the winning conditions are.  This
+section connects the three remaining pieces:
+
+1. **`Game`** — a lightweight metadata record that tells the runner which players
+   participate, how to create a fresh board, and which exit wires count as wins, losses,
+   or draws.
+2. **Agents** — Julia callables (wrapped in `FunctionAgent` or a custom `AbstractAgent`
+   subtype) that decide which move to make when the runner asks.
+3. **`run_game_sched!`** — the main loop that drives the schedule, asks agents for
+   moves, and collects an `Experience` record for every player turn.
+
+Once these are in place, running a single game is a one-liner, and collecting thousands
+of episodes for training or statistics is a simple loop.
 
 ### `Game` metadata record
 
@@ -1153,7 +1202,7 @@ X goes first, so it has an advantage under purely random play — expect roughly
 
 ---
 
-## Part 6 — Learning to Play via Self-Play Reinforcement Learning
+## Part 5 — Learning to Play via Self-Play Reinforcement Learning
 
 The previous section showed that under pure random play X wins roughly 60–70 %
 of games.  This section trains a **graph neural network (GNN) policy** that
