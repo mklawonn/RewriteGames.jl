@@ -1,7 +1,7 @@
 name = "RewriteGames"
 uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-authors = ["RewriteGames.jl contributors"]
 version = "0.1.0"
+authors = ["RewriteGames.jl contributors"]
 
 [deps]
 AlgebraicRewriting = "725a01d3-f174-5bbd-84e1-b9417bad95d9"
@@ -9,6 +9,7 @@ Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
 Catlab = "134e5e36-593f-5add-ad60-77f754baafbe"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 GraphNeuralNetworks = "cffab07f-9bc2-4db1-8861-388f63bf7694"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
@@ -19,6 +20,7 @@ Arrow = "2"
 Catlab = "0.16, 0.17"
 Flux = "0.16.10"
 GraphNeuralNetworks = "1.1.0"
+JSON3 = "1.14.3"
 Tables = "1"
 julia = "1.9"
 

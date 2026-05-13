@@ -63,6 +63,7 @@ include("engine/sched_runner.jl")
 
 # ── Serialization ─────────────────────────────────────────────────────────
 include("serialization/arrow.jl")
+include("serialization/game_json.jl")
 
 # ── Schema migration ─────────────────────────────────────────────────────
 include("migration/game_migration.jl")
@@ -103,6 +104,7 @@ export
 
     # Serialization
     write_experiences, read_experiences,
+    write_game, read_game,
 
     # Migration
     GameMigration,
