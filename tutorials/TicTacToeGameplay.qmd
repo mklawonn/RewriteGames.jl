@@ -55,7 +55,7 @@ Two longer-term goals shape the library's design:
   simpler ones. You might start with a simple grid-based board and later 
   seamlessly add new types of pieces or network connections without throwing 
   away your existing rules or schedules.
-- **Cross-Game Transfer.** Because games share a common relational representation, 
+- **Cross-Game Transfer.** When games share a common relational representation, 
   a policy trained on one game could, in principle, transfer to another with 
   a similar structure. This is ongoing research.
 
@@ -67,7 +67,7 @@ modelling to rewrite logic—exactly when we need it to build our game.
 1. **Relational Modelling:** We define the "schema" and instances of the board—its objects 
    and the relationships between them—using Attributed C-Sets (ACSets).
 2. **Move Logic:** We define moves as structural changes using rewrite rules 
-   and pattern-matching (Homomorphisms).
+   and pattern-matching (homomorphisms).
 3. **Strategic Symmetry:** We use Data Migrations to mechanically derive O's 
    logic from X's, ensuring perfect symmetry while avoiding code duplication.
 4. **Game Flow:** We organize rules and win-checks into a complete, branching 
@@ -109,10 +109,9 @@ connectivity of the board:
 Two foreign keys (`xsq`, `osq`) record which square each piece occupies.
 Each of the three edge tables has two foreign keys recording its source and
 target squares (`rsrc`/`rtgt`, `csrc`/`ctgt`, `dsrc`/`dtgt`), giving six
-edge-related foreign keys in total. Separating rows, columns, and diagonals
-into distinct tables lets win-detection patterns refer specifically to each
-orientation without over-generating matches. Let's look at how we implement this schema in RewriteGames.jl,
-or more accurately how RewriteGames.jl uses Catlab.jl and ACSets.jl to do so.
+edge-related foreign keys in total. As we will see later, separating rows, columns, and diagonals
+into distinct tables lets win-detection patterns repeat across orientations. 
+Let's look at how we implement this schema in RewriteGames.jl, or more accurately how RewriteGames.jl uses Catlab.jl and ACSets.jl to do so.
 
 ```{julia}
 #| label: schema
@@ -271,20 +270,7 @@ $\{h_c: I(c) \to J(c)\}_{c \in \mathbf{C}}$ (one for each object in our
 schema) such that for every morphism $f: c \to d$ in $\mathbf{C}$ (every 
 foreign key), the following diagram commutes:
 
-```{tikz}
-#| label: fig-naturality
-#| fig-cap: "The naturality condition: preserving relationships across instances."
-\begin{tikzpicture}
-  \node (A) at (0,2) {$I(c)$};
-  \node (B) at (2,2) {$J(c)$};
-  \node (C) at (0,0) {$I(d)$};
-  \node (D) at (2,0) {$J(d)$};
-  \draw[->] (A) -- (B) node[midway,above] {$h_c$};
-  \draw[->] (A) -- (C) node[midway,left] {$I(f)$};
-  \draw[->] (C) -- (D) node[midway,below] {$h_d$};
-  \draw[->] (B) -- (D) node[midway,right] {$J(f)$};
-\end{tikzpicture}
-```
+![The naturality condition: preserving relationships across instances.](TicTacToeGameplay_files/figure-html/fig-naturality-1.svg){#fig-naturality}
 
 In plain English, this commutativity means that the mapping $h$ **preserves 
 structure**. If we map an element from one table to another, all of its 
@@ -366,22 +352,16 @@ Each piece of this span has a specific semantic role:
 - **$R$ (Right Pattern):** What the sub-structure looks like *after* the 
   rewrite.
 
-```{tikz}
-#| label: fig-span-placeholder
-#| fig-cap: "Placeholder: A span $L \\leftarrow K \\to R$ showing example ACSets (e.g., for marking an X)."
-\begin{tikzpicture}[box/.style={draw, minimum width=2cm, minimum height=1.5cm, align=center}]
-  \node[box] (L) at (0,0) {$L$\\[1em]\tiny (Pattern to find)};
-  \node[box] (K) at (4,0) {$K$\\[1em]\tiny (Preserved structure)};
-  \node[box] (R) at (8,0) {$R$\\[1em]\tiny (Replacement structure)};
-  
-  \draw[->] (K) -- (L) node[midway,above] {$l$};
-  \draw[->] (K) -- (R) node[midway,above] {$r$};
-  
-  \node at (0,-1.5) {\textit{Example: Square with X?}};
-  \node at (4,-1.5) {\textit{Example: Bare Square}};
-  \node at (8,-1.5) {\textit{Example: Square with O?}};
-\end{tikzpicture}
-```
+![A rewrite rule is a span $L \xleftarrow{l} K \xrightarrow{r} R$: $l$ identifies what is preserved, $r$ describes the result.](TicTacToeGameplay_files/figure-html/fig-span-placeholder-1.svg){#fig-span-placeholder}
+
+As a concrete illustration, consider the `mark_x` rule that places an X on an empty square:
+
+- **$L = K$:** A single bare Sq. The left leg $l = id_{Sq}$ is an isomorphism, so nothing in the world is deleted — we are simply locating a square to mark.
+- **$R$:** The Sq-with-X representable. The right leg $r: Sq \to X$ embeds the bare square into a structure that also holds an X piece, adding the piece to the matched square.
+
+@fig-mark-x-span shows the same span with each ACSets replaced by its **category of elements**: every table row becomes a node and every foreign-key application becomes an edge. The color encoding reveals the action of the span morphisms — blue nodes appear in the image of $l$ or $r$ from $K$, while the orange X node is freshly introduced by $r$ with no preimage in $K$.
+
+![The span for the `mark_x` rule, with each ACSets shown as its category of elements. Blue nodes are preserved by the span morphisms from $K$; the orange $X$ node is newly introduced by $r$.](TicTacToeGameplay_files/figure-html/mark-x-span-1.svg){#fig-mark-x-span}
 
 ### Matching and the DPO Diagram
 
@@ -392,119 +372,148 @@ board where the pattern $L$ exists.
 The rewrite process is then governed by the following commutative diagram 
 consisting of two **pushout** squares:
 
-```{tikz}
-#| label: fig-dpo-diagram
-#| fig-cap: "The Double Pushout (DPO) diagram."
-\begin{tikzpicture}
-  \node (L) at (0,2) {$L$};
-  \node (K) at (2,2) {$K$};
-  \node (R) at (4,2) {$R$};
-  \node (G) at (0,0) {$G$};
-  \node (D) at (2,0) {$D$};
-  \node (Gprime) at (4,0) {$G'$};
-  
-  \draw[<-] (L) -- (K) node[midway,above] {$l$};
-  \draw[->] (K) -- (R) node[midway,above] {$r$};
-  \draw[->] (L) -- (G) node[midway,left] {$m$};
-  \draw[->] (K) -- (D) node[midway,left] {$k$};
-  \draw[->] (R) -- (Gprime) node[midway,right] {$m'$};
-  \draw[->] (D) -- (G) node[midway,below] {$g$};
-  \draw[->] (D) -- (Gprime) node[midway,below] {$g'$};
-\end{tikzpicture}
-```
+![The Double Pushout (DPO) diagram: two pushout squares share the interface $K$, replacing the matched sub-structure $L$ in world $G$ with the new pattern $R$ to produce $G'$.](TicTacToeGameplay_files/figure-html/fig-dpo-diagram-1.svg){#fig-dpo-diagram}
+
+
+Each element of the diagram has a concrete role:
+
+| Symbol | Role | For `mark_x` |
+|--------|------|--------------|
+| $L$ | Left pattern — the sub-structure to find | A single bare square |
+| $K$ | Interface — what is preserved | The same bare square |
+| $R$ | Right pattern — the replacement | A square with an X piece |
+| $G$ | Current world | The 3×3 board before the move |
+| $D$ | Pushout complement — the residual world | The board unchanged (nothing is deleted) |
+| $G'$ | New world | The board after the X is placed |
+
+The morphisms stitch the objects together: $l$ and $r$ are the span legs; $m: L \to G$ is the **match** (identifying where in $G$ the pattern appears); $k: K \to D$ tracks the preserved interface into the residual world; and $g$, $g'$, $m'$ complete the two pushout squares.
+
+### Finding the Match
+
+The first computational step is finding the match $m: L \to G$ — a
+homomorphism from the left pattern into the current world.
+
+Recall that a homomorphism is a structure-preserving map: it must send every
+table row of $L$ to a row of the same table in $G$, and it must respect every
+foreign key. If $L$ records a row-edge from square $a$ to square $b$, then
+$m(a)$ and $m(b)$ must also be connected by a row-edge in $G$.
+
+For `mark_x`, $L$ is a single bare square with no edges, so the only constraint
+is that the target is a square. @fig-hom-search shows one particular match $m$:
+$L$'s Sq is sent to the center square of $G$ (highlighted in bright blue). The
+eight remaining squares (light blue) are valid alternative targets — on an empty
+board any of the nine squares could serve as the match. Narrowing the candidate
+set to only empty squares is the job of **Negative Application Conditions
+(NACs)**, described in the next section.
+
+![One match $m: L \to G$ for `mark_x`: $L$'s single Sq node maps to the center square of $G$ (bright blue). The eight light squares are valid alternative targets on an empty board.](TicTacToeGameplay_files/figure-html/fig-hom-search-1.svg){#fig-hom-search}
+
+### Negative Application Conditions
+
+Finding all homomorphisms $m: L \to G$ gives the raw candidate matches. A
+**Negative Application Condition (NAC)** prunes that set by declaring a match
+*invalid* whenever the matched sub-graph can be extended into a larger forbidden
+pattern.
+
+Formally, a NAC is a morphism $n: L \to N$. A match $m: L \to G$ is *rejected*
+by this NAC if there exists any morphism $q: N \to G$ that makes the triangle
+commute — that is, if $q \circ n = m$.
+
+![A NAC consists of a morphism $n: L \to N$. A match $m: L \to G$ is rejected if any $q: N \to G$ with $q \circ n = m$ exists (the dashed arrow must not exist for the match to be valid).](TicTacToeGameplay_files/figure-html/fig-nac-triangle-1.svg){#fig-nac-triangle}
+
+Think of it as a "forbidden extension": the match is legal only when the
+matched sub-structure in $G$ *cannot* be extended into the pattern $N$.
+
+For `mark_x`, we attach two NACs:
+
+1. **"Not already an X":** $n: Sq \to X$ — reject the match if the square already holds an X piece.
+2. **"Not already an O":** $n: Sq \to O$ — reject the match if the square already holds an O piece.
+
+Together these ensure `mark_x` can only fire on a genuinely empty square,
+which is exactly the legality condition for a Tic-Tac-Toe move.
 
 ### What is a Pushout?
 
-Formally, a **pushout** of two morphisms $f: A \to B$ and $g: A \to C$ consists 
-of an object $P$ and two morphisms $f': C \to P$ and $g': B \to P$ such that 
-$f' \circ g = g' \circ f$. 
+Formally, a **pushout** of two morphisms $l: K \to L$ and $k: K \to D$ consists
+of an object $G$ and two morphisms $m: L \to G$ and $g: D \to G$ such that
+$m \circ l = g \circ k$.
 
-Furthermore, it must satisfy the **universal property**: for any other object 
-$Q$ and morphisms $h: C \to Q$ and $k: B \to Q$ such that $h \circ g = k \circ f$, 
-there exists a unique morphism $u: P \to Q$ such that $u \circ f' = h$ and 
-$u \circ g' = k$.
+Furthermore, it must satisfy the **universal property**: for any other object
+$Q$ and morphisms $h: L \to Q$ and $j: D \to Q$ such that $h \circ l = j \circ k$,
+there exists a unique morphism $u: G \to Q$ such that $u \circ m = h$ and
+$u \circ g = j$.
 
-```{tikz}
-#| label: fig-pushout-universal
-#| fig-cap: "The universal property of a pushout."
-\begin{tikzpicture}
-  \node (A) at (0,2) {$A$};
-  \node (B) at (2,2) {$B$};
-  \node (C) at (0,0) {$C$};
-  \node (P) at (2,0) {$P$};
-  \node (Q) at (3.5,-1) {$Q$};
-  
-  \draw[->] (A) -- (B) node[midway,above] {$f$};
-  \draw[->] (A) -- (C) node[midway,left] {$g$};
-  \draw[->] (B) -- (P) node[midway,right] {$g'$};
-  \draw[->] (C) -- (P) node[midway,below] {$f'$};
-  
-  \draw[->,bend left] (B) to node[midway,above right] {$k$} (Q);
-  \draw[->,bend right] (C) to node[midway,below left] {$h$} (Q);
-  \draw[->,dashed] (P) -- (Q) node[midway,above] {$u$};
-\end{tikzpicture}
-```
+![The universal property of a pushout. $G$ is the minimal object receiving both $m: L \to G$ and $g: D \to G$; any competing object $Q$ factors uniquely through $u$.](TicTacToeGameplay_files/figure-html/fig-pushout-universal-1.svg){#fig-pushout-universal}
 
-In the context of ACSets, this means taking the disjoint union of the 
-elements in $B$ and $C$, and then identifying (merging) any elements that 
-came from the same element in $A$.
+In the context of ACSets, this means taking the disjoint union of the
+elements in $L$ and $D$, and then identifying (merging) any elements that
+came from the same element in $K$.
 
 #### Intuition: The "Minimal" Glue
 
-The universal property might look abstract, but it provides a critical 
-guarantee: it ensures that the pushout is the 
-**minimal** object that combines $B$ and $C$ along $A$. 
+The universal property might look abstract, but it provides a critical
+guarantee: it ensures that the pushout is the
+**minimal** object that combines $L$ and $D$ along $K$.
 
--   **No extra elements:** The property ensures we haven't added any 
-    "ghost" squares or pieces that weren't in $B$ or $C$.
--   **No unnecessary merges:** It ensures we haven't "squashed" any 
-    distinct parts of the board together unless they were explicitly linked 
-    by the interface $A$.
+-   **No extra elements:** The property ensures we haven't added any
+    "ghost" squares or pieces that weren't in $L$ or $D$.
+-   **No unnecessary merges:** It ensures we haven't "squashed" any
+    distinct parts of the board together unless they were explicitly linked
+    by the interface $K$.
 
-In short, the universal property is our algebraic guarantee that the rewrite 
-performs **exactly** the specified replacement and nothing more. 
+In short, the universal property is our algebraic guarantee that the rewrite
+performs **exactly** the specified replacement and nothing more.
 
-### Taking Stock of the Rewrite Process
+### Computing the Pushout Complement
 
-Before we dive into implementation, let's recap the workflow of a structural 
-rewrite. The lifecycle of a move in RewriteGames.jl follows these steps:
+With the pushout defined, we can now describe the first computational step of
+a DPO rewrite: finding the **pushout complement** $D$.
 
-1.  **Game Design (The Span):** The designer defines a span $L \leftarrow K \to R$. 
+Given the match $m: L \to G$ and the left leg $l: K \to L$, the pushout
+complement is the unique ACSets $D$ — together with morphisms $k: K \to D$ and
+$g: D \to G$ — such that the left square of the DPO diagram is a pushout.
+Intuitively, $D$ is $G$ with the elements that were matched by $L$ but are
+*not* in the interface $K$ removed. It is the "residual world" that persists
+through the rewrite.
+
+@fig-pushout-example shows this setup for the `mark_x` rule on an empty board.
+$G$ (bottom-left) is the full 3×3 board: nine Sq nodes connected by row, column,
+and diagonal adjacency edges. The darker blue square is the one targeted by the
+match $m$. Because $l: K \to L$ is an isomorphism for this rule — nothing is
+deleted — the pushout complement $D$ (bottom-right, dashed border) is identical
+to $G$. The key morphism $k: K \to D$ embeds the interface square into $D$ at
+the same position selected by the match.
+
+![The left pushout square for the `mark_x` rule on an empty board. $L$ and $K$ each contain a single square. $G$ is the full empty board (its category of elements shown as a grid; darker node = matched square). $D$ is the pushout complement — structurally identical to $G$ here since no elements are deleted.](TicTacToeGameplay_files/figure-html/fig-pushout-example-1.svg){#fig-pushout-example}
+
+### The DPO Rewrite Process
+
+We are now ready to understand a full DPO rewrite step.
+
+1.  **Game Design (The Span):** The designer defines a span $L \leftarrow K \to R$.
     This is a static declaration of what a move looks like in principle.
-2.  **Match Search (Finding $m$):** During gameplay, the engine searches for 
-    **homomorphisms** $m: L \to G$. These represent the legal "spots" on the 
+2.  **Match Search (Finding $m$):** During gameplay, the engine searches for
+    **homomorphisms** $m: L \to G$. These represent the legal "spots" on the
     current board where the rule could be applied.
-3.  **Determining What to Keep (The Pushout Complement $D$):** Once a match 
-    is chosen, the engine computes the **pushout complement**. This step 
-    effectively "deletes" the parts of the board matched by $L$ that aren't 
-    part of the interface $K$, leaving us with a "residual" board $D$.
+3.  **Pushout Complement (Finding $D$):** Once a match is chosen, the engine
+    computes $D$ as described above — the board with the matched-but-not-preserved
+    elements removed.
+4.  **The Result (The RHS Pushout $G'$):** The engine computes a second pushout,
+    gluing the new pattern $R$ onto $D$ along the shared interface $K$. This
+    produces the updated world $G'$.
 
-```{tikz}
-#| label: fig-pushout-complement-placeholder
-#| fig-cap: "Placeholder: Visualizing the pushout complement (finding $D$ from $G$, $L$, and $K$)."
-\begin{tikzpicture}[box/.style={draw, minimum width=2cm, minimum height=1.5cm, align=center}]
-  \node[box] (G) at (0,0) {$G$\\[1em]\tiny (Current World)};
-  \node[box] (L) at (0,3) {$L$\\[1em]\tiny (Pattern)};
-  \node[box] (K) at (3,3) {$K$\\[1em]\tiny (Interface)};
-  \node[box, dashed] (D) at (3,0) {$D$\\[1em]\tiny (Remaining World)};
-  
-  \draw[->] (L) -- (G) node[midway,left] {$m$};
-  \draw[<-] (L) -- (K) node[midway,above] {$l$};
-  \draw[->] (K) -- (D) node[midway,right] {$k$};
-  \draw[->] (D) -- (G) node[midway,below] {$g$};
-  
-  \node at (1.5,1.5) {\Large ?};
-\end{tikzpicture}
-```
+@fig-dpo-markx shows the complete DPO rewrite for the `mark_x` rule applied
+to the center square of an empty board. Each object is its category of elements:
+blue circles are Sq nodes (bright = in the image of a morphism from $K$; light
+= elsewhere on the board), and the orange circle is the new X piece glued in by
+the right pushout. Gray lines are board topology edges (RowE, ColE, DiagE).
 
-4.  **The Result (The RHS Pushout $G'$):** Finally, the engine computes a 
-    second pushout, gluing the new pattern $R$ onto the residual board $D$ 
-    along the shared interface $K$. This produces the updated world $G'$.
+![Complete DPO rewrite for `mark_x`. Top: the span $L \xleftarrow{l} K \xrightarrow{r} R$. Bottom: match $m$ sends $L$'s square to the center of board $G$; the pushout complement $D$ is identical to $G$ (nothing deleted); the right pushout glues $R$'s X piece onto $D$ at the interface square to produce $G'$.](TicTacToeGameplay_files/figure-html/fig-dpo-markx-1.svg){#fig-dpo-markx}
 
-By using this formal approach, RewriteGames.jl ensures that all state 
-transitions are structurally consistent. Defining the game rules as rewrite 
-rules means that agents can only ever take legal actions that are available 
-given the state of the board. The algebraic machinery handles the "logic" 
+By using this formal approach, RewriteGames.jl ensures that all state
+transitions are structurally consistent. Defining the game rules as rewrite
+rules means that agents can only ever take legal actions that are available
+given the state of the board. The algebraic machinery handles the "logic"
 of the physical board automatically.
 
 ### Theory to Practice: Building X's Rules
@@ -567,54 +576,22 @@ to label wires in the wiring diagram.
 
 ### The `mark_x` rule
 
-The `mark_x` rule is the fundamental move for the X player: it places an X 
-piece on any empty square. In our DPO framework, this is represented by a 
-span that "keeps" a square and "adds" an X piece to it.
-
-#### Understanding the Span Legs
-
--   **$K \to L$ (The Left Leg):** For `mark_x`, we use the identity 
-    morphism on `Sq` ($id_{Sq}$). Because this map is an isomorphism, it 
-    tells the engine that **nothing is deleted**. We are simply finding a 
-    square and keeping it exactly as it is.
--   **$K \to R$ (The Right Leg):** We use the unique morphism from `Sq` 
-    into the representable `X`. This map "embeds" our bare square into a 
-    structure that also contains an X piece. Categorically, this represents 
-    the **addition** of the piece.
-
-By finding a match for $L$ (a square) and applying the DPO process, we 
-effectively glue a new X piece onto that specific square on the board.
+With the theory in place, the implementation is direct. `L = K` is the bare
+square representable `Sq`; the left leg is the identity (nothing deleted) and
+the right leg embeds `Sq` into `X` (adding the piece). The two NACs block
+firing on already-occupied squares.
 
 ```{julia}
 #| label: view-span-L
 #| output: true
-view_TTT(Sq)   # L = K: a bare square (the sub-structure to find in the board)
+view_TTT(Sq)   # L = K
 ```
 
 ```{julia}
 #| label: view-span-R
 #| output: true
-view_TTT(X)    # R: a square with an X piece (the result after the rewrite)
+view_TTT(X)    # R
 ```
-
-#### Enforcing Legality with NACs
-
-While the span describes *what* the move does, it doesn't yet say that we 
-can't place a piece on a square that's already occupied. For this, we use 
-**Negative Application Conditions (NACs)**.
-
-Think of a NAC as a "forbidden extension." We tell the engine: "You can match 
-this bare square $L$, **unless** that square is already part of a larger 
-pattern $N$."
-
-For `mark_x`, we have two NACs:
-1.  **"Not already an X":** Reject the match if the square already has an X.
-2.  **"Not already an O":** Reject the match if the square already has an O.
-
-In the code below, `homomorphism(Sq, X; cat=𝒞)` defines the extension from a 
-bare square to a square-with-X. If this extension can be found in the 
-current board state for our matched square, the NAC "fires" and the match is 
-rejected.
 
 ```{julia}
 #| label: mark-x-rule
@@ -933,7 +910,8 @@ We also derive O's win-check sub-schedule via the same migration:
 
 ```{julia}
 #| label: o-win-check
-o_won_check_gs = player_migrate(F, x_won_check_gs, Dict(:X => :O))
+o_won_check_gs = player_migrate(F, x_won_check_gs, Dict(:X => :O);
+    name_map=Dict(:x_wins_rows => :o_wins_rows, :x_wins_cols => :o_wins_cols, :x_wins_diags => :o_wins_diags))
 ```
 
 ### `GameSched` and `mk_game_sched` — the scheduling DSL
@@ -1038,8 +1016,7 @@ Return wires:
 ## Part 4 — Running the Game
 
 With the schedule built, we have a complete description of how tic-tac-toe **works**,
-but we still need to say **who** plays and **what** the winning conditions are.  This
-section connects the three remaining pieces:
+but we still need to say **who** plays.  This section connects the three remaining pieces:
 
 1. **`Game`** — a lightweight metadata record that tells the runner which players
    participate, how to create a fresh board, and which exit wires count as wins, losses,
@@ -1059,7 +1036,6 @@ of episodes for training or statistics is a simple loop.
 ```julia
 struct Game
     players        :: Vector{Symbol}
-    terminal       :: Union{Function, Nothing}       # W -> (done, winner), or nothing
     initial        :: Function                       # () -> ACSet
     schema         :: Any                            # schema presentation (optional)
     win_conditions :: Union{Dict{Symbol,Any}, Nothing}
@@ -1067,15 +1043,12 @@ end
 ```
 
 - `players` declares who participates and in what order.
-- `terminal` is a legacy callback `W -> (Bool, Symbol|Nothing)` called after every
-  move.  Set to `nothing` (the default) when win conditions are expressed as exit wires.
 - `initial` is a zero-argument factory called once per episode to produce a fresh world
   ACSet.  Keeping it as a callable (rather than a single ACSet) ensures episodes are
   truly independent.
 - `schema` is optional metadata used by `GameMigration`.
-- `win_conditions` maps exit wire names to winner identities.  When non-`nothing`,
-  `run_game_sched!` uses it to resolve the winner from the active exit wire instead of
-  calling `terminal`.  Use `nothing` for draw wires.
+- `win_conditions` maps exit wire names to winner identities, resolving the winner from
+  the active exit wire when the schedule terminates.  Use `nothing` for draw wires.
 
 ### `FunctionAgent` — the simplest agent type
 
@@ -1094,8 +1067,8 @@ run_game_sched!(gs::GameSched, game::Game, agents::Dict; T_max=1000)
     -> Vector{Experience}
 ```
 
-The runner calls `game.initial()` to create the starting world and `game.terminal` as
-the stopping criterion.  Every `PlayerRuleApp` execution emits one `Experience`:
+The runner calls `game.initial()` to create the starting world, then drives the
+schedule until it exits.  Every `PlayerRuleApp` execution emits one `Experience`:
 
 ```julia
 struct Experience

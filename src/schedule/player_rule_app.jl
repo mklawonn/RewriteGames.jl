@@ -185,7 +185,11 @@ function player_migrate(F, gs::GameSched, player_map::Dict{Symbol, Symbol};
         elseif v isa GameSched
             player_migrate(F, v, player_map; name_map)
         else
-            F(v)
+            migrated = F(v)
+            migrated isa RuleApp ?
+                RuleApp(get(name_map, migrated.name, migrated.name),
+                        migrated.rule, migrated.in_agent, migrated.out_agent) :
+                migrated
         end
     end
     mk_game_sched(gs._trace_args, gs._init_args, gs._N, new_boxes, gs._body)
