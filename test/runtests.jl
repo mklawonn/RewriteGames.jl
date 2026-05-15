@@ -11,4 +11,5 @@ using Test
     include("test_analysis.jl")
     include("test_dsl.jl")
     include("test_schedule.jl")
+    include("test_json_serialization.jl")
 end

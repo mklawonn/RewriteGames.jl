@@ -12,8 +12,7 @@ function acset_to_dict(X::StructACSet)
     for ob in S.obs
         n = nparts(X, ob)
         n == 0 && continue
-        
-        row_d = Dict{String, Any}()
+        row_d = Dict{String, Any}("_n" => n)
         for (h, dom_h, codom_h) in S.homs
             if dom_h == ob
                 row_d[string(h)] = collect(subpart(X, h))
@@ -62,12 +61,15 @@ function dict_to_acset(T::Type{<:StructACSet}, d::AbstractDict)
         ob_str = string(ob)
         haskey(d, ob_str) || continue
         tbl = d[ob_str]
-        n = 0
+        n_val = get(tbl, "_n", get(tbl, :_n, nothing))
+        n = n_val !== nothing ? Int(n_val) : 0
         for (col, vals) in tbl
+            String(col) == "_n" && continue
             n = max(n, length(vals))
         end
         add_parts!(X, ob, n)
         for (col_str, vals) in tbl
+            String(col_str) == "_n" && continue
             col = Symbol(col_str)
             if !isempty(vals) && (vals[1] isa Integer || (vals[1] isa String && tryparse(Int, vals[1]) !== nothing))
                 set_subpart!(X, :, col, Int.(vals))
@@ -131,10 +133,10 @@ function box_to_dict(b)
         )
     elseif b isa GameSched
         return Dict("type" => "GameSched")
+    elseif b isa Schedule && hasproperty(b, :x) && occursin("mmerge", string(b.x))
+        return Dict("type" => "MergeWires")
     elseif b isa Schedule
         return Dict("type" => "Schedule")
-    elseif occursin("MergeWires", string(typeof(b)))
-        return Dict("type" => "MergeWires")
     else
         return Dict("type" => string(typeof(b)))
     end
@@ -184,7 +186,8 @@ function read_game(path::String, T_world::Type{<:StructACSet}, N_obj::Names)
     players = Symbol.(data["players"])
     init_acset = dict_to_acset(T_world, data["initial_state"])
     win_conditions = data["win_conditions"] === nothing ? nothing :
-                     Dict(Symbol(k) => Symbol(v) for (k, v) in data["win_conditions"])
+                     Dict{Symbol, Any}(Symbol(k) => (string(v) == "nothing" ? nothing : Symbol(v))
+                                       for (k, v) in data["win_conditions"])
     
     I_state = N_obj["I"]
     

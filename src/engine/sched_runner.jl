@@ -1,6 +1,21 @@
 import Catlab.CategoricalAlgebra
 import AlgebraicRewriting: get_matches, can_match, can_pushout_complement
 
+function _compose_hom(f::Catlab.CategoricalAlgebra.ACSetTransformation,
+                      g::Catlab.CategoricalAlgebra.ACSetTransformation)
+    S = Catlab.CategoricalAlgebra.acset_schema(Catlab.CategoricalAlgebra.dom(f))
+    obs = Catlab.CategoricalAlgebra.ob(S)
+    comps = Pair{Symbol, Vector{Int}}[
+        o => [g.components[o](f.components[o](i))
+              for i in 1:Catlab.CategoricalAlgebra.nparts(Catlab.CategoricalAlgebra.dom(f), o)]
+        for o in obs
+    ]
+    Catlab.CategoricalAlgebra.ACSetTransformation(
+        Catlab.CategoricalAlgebra.dom(f),
+        Catlab.CategoricalAlgebra.codom(g);
+        comps...)
+end
+
 # ─── Game execution engine ────────────────────────────────────────────────────
 
 """
@@ -171,21 +186,14 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
         raw_sub = box.fast_match_fn !== nothing ?
             box.fast_match_fn(box.rule, subworld, _cat) :
             collect(get_matches(box.rule, subworld; cat=box.cat))
-        raw = [Catlab.CategoricalAlgebra.compose(m, v) for m in raw_sub]
-        filter!(m -> AlgebraicRewriting.can_pushout_complement(_cat, Catlab.CategoricalAlgebra.left(box.rule), m), raw)
+        raw = [_compose_hom(m, v) for m in raw_sub]
     elseif box.fast_match_fn !== nothing
         raw = box.fast_match_fn(box.rule, world, _cat)
     elseif haskey(cache_dict, box.name) && agent_match === nothing
         ms  = cache_dict[box.name].matches
         raw = box.match_limit === nothing ? ms : @view ms[1:min(end, box.match_limit)]
     else
-        if agent_match !== nothing
-            println("DEBUG: _exec_player! $(box.name) searching homomorphisms.")
-            println("DEBUG:   L parts: ", [(o, nparts(codom(left(box.rule)), o)) for o in Catlab.CategoricalAlgebra.ob(S)])
-            println("DEBUG:   L variables: ", [(at, nparts(codom(left(box.rule)), at)) for at in attrtypes(S)])
-            println("DEBUG:   initial_map: ", initial_map)
-        end
-        gen = isempty(initial_map) ? 
+        gen = isempty(initial_map) ?
               get_matches(box.rule, world; cat=box.cat) :
               Catlab.CategoricalAlgebra.homomorphisms(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)), world; cat=_cat, initial=initial_map, monic=box.rule.monic)
         raw = box.match_limit === nothing ? collect(gen) : collect(Iterators.take(gen, box.match_limit))
@@ -193,12 +201,6 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
 
     actions = [Action(box, m) for m in raw]
     state_pre  = GameState(world, turn[])
-    
-    # DEBUG
-    if isempty(actions)
-        # println("DEBUG: _exec_player! $(box.name) for agent $(agent_match[:Platform](1)) found NO matches.")
-    end
-
     chosen     = isempty(actions) ? nothing : select_action(agents[box.player], state_pre, actions)
 
     if chosen !== nothing
@@ -234,7 +236,6 @@ function _exec_subsched!(step, sub_gs::GameSched, world, wires, _boxes, agents,
                           cache_dict::Dict{Symbol, MatchCache}, agent_match=nothing)
     if sub_gs._agent_name !== nothing
         _cat = isnothing(sub_gs.cat) ? infer_acset_cat(world) : sub_gs.cat
-        println("DEBUG: _exec_subsched! agent=$(sub_gs._agent_name) cat_model=$(typeof(_cat.val))")
         agent_interface = sub_gs._N[string(sub_gs._agent_name)]
         agent_matches = collect(Catlab.CategoricalAlgebra.homomorphisms(agent_interface, world; cat=_cat))
         

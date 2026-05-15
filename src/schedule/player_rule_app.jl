@@ -63,8 +63,13 @@ function PlayerRuleApp(name::Symbol, rule, in_hom, out_hom, player::Symbol;
                         use_cache::Bool=false,
                         match_limit::Union{Int,Nothing}=nothing,
                         view_fn::Union{Function,Nothing}=nothing)
-    inner = cat === nothing ? RuleApp(name, rule, in_hom, out_hom) :
-                              RuleApp(name, rule, in_hom, out_hom; cat=cat)
+    inner = if in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation
+        cat === nothing ? RuleApp(name, rule, in_hom, out_hom) :
+                          RuleApp(name, rule, in_hom, out_hom; cat=cat)
+    else
+        cat === nothing ? RuleApp(name, rule, in_hom) :
+                          RuleApp(name, rule, in_hom; cat=cat)
+    end
     PlayerRuleApp(name, rule, in_hom, out_hom, player, cat, inner, fast_match_fn, use_cache,
                   match_limit, view_fn)
 end
@@ -81,8 +86,12 @@ Base.show(io::IO, p::PlayerRuleApp) =
 import Catlab.Theories: ⋅, ⊗
 import AlgebraicRewriting: agent, singleton, tryrule, merge_wires
 
+_pra_interface(p::PlayerRuleApp) =
+    p.in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation ?
+    Catlab.CategoricalAlgebra.dom(p.in_hom) : p.in_hom
+
 function tryrule(p::PlayerRuleApp)
-    I_state = Catlab.CategoricalAlgebra.dom(p.in_hom)
+    I_state = _pra_interface(p)
     # We create a local Names object to resolve "I" in mk_game_sched
     N_local = Names(Dict("I" => I_state))
     mk_game_sched(NamedTuple(), (init=:I,), N_local,
@@ -111,17 +120,16 @@ end
 Compose two `PlayerRuleApp`s.  Returns a `GameSched`.
 """
 function ⋅(p1::PlayerRuleApp, p2::PlayerRuleApp)
-    I_state = Catlab.CategoricalAlgebra.dom(p1.in_hom)
+    I_state = _pra_interface(p1)
     N_local = Names(Dict("I" => I_state))
+    mw = merge_wires(I_state)
     mk_game_sched(NamedTuple(), (init=:I,), N_local,
-                  NamedTuple{(p1.name, p2.name)}((p1, p2)),
+                  NamedTuple{(p1.name, p2.name, :mw)}((p1, p2, mw)),
                   quote
                       s1, f1 = $(p1.name)(init)
                       s2, f2 = $(p2.name)(s1)
-                      # Connect success of p1 to p2. We merge failure wires?
-                      # For now let's just return success of p2.
-                      # In Tesseract we usually compose tryruled apps anyway.
-                      return s2
+                      fail = mw(f1, f2)
+                      return s2, fail
                   end; cat=p1.cat)
 end
 
@@ -131,7 +139,7 @@ end
 Tensor product of two `PlayerRuleApp`s.  Returns a `GameSched`.
 """
 function ⊗(p1::PlayerRuleApp, p2::PlayerRuleApp)
-    I_state = Catlab.CategoricalAlgebra.dom(p1.in_hom)
+    I_state = _pra_interface(p1)
     N_local = Names(Dict("I" => I_state))
     mk_game_sched(NamedTuple(), (init1=:I, init2=:I), N_local,
                   NamedTuple{(p1.name, p2.name)}((p1, p2)),
