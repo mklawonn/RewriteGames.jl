@@ -1,152 +1,21 @@
-# ─── Body-parsing IR ─────────────────────────────────────────────────────────
+import Catlab.CategoricalAlgebra
+import AlgebraicRewriting: get_matches, can_match, can_pushout_complement
+
+# ─── Game execution engine ────────────────────────────────────────────────────
 
 """
-    BoxStep
-
-Represents one box invocation in the parsed wiring-diagram body.  Created once
-at `mk_game_sched` time; reused on every call to `run_game_sched!`.
-
-# Fields
-- `box`:     Key of the box in the `_all_boxes` NamedTuple.
-- `inputs`:  Wire names supplying input to the box (merged when more than one).
-- `outputs`: Wire names receiving the box's output ports (index = port number).
-"""
-struct BoxStep
-    box     :: Symbol
-    inputs  :: Vector{Symbol}
-    outputs :: Vector{Symbol}
-end
-
-Base.show(io::IO, s::BoxStep) =
-    print(io, "BoxStep(:$(s.box), in=$(s.inputs), out=$(s.outputs))")
-
-# ─── Body parser (called once at mk_game_sched time) ──────────────────────────
-
-"""
-    _parse_body(body::Expr) -> (steps::Vector{BoxStep}, ret_names::Vector{Symbol})
-
-Walk the AST of the `mk_game_sched` body quote block and extract an ordered
-list of `BoxStep` records plus the final return wire names.
-
-Supported statement patterns:
-- `a, b = box(w)`            → `BoxStep(:box, [:w], [:a, :b])`
-- `a, b, c = box([w1, w2])`  → `BoxStep(:box, [:w1, :w2], [:a, :b, :c])`
-- `a = box(w)`               → `BoxStep(:box, [:w], [:a])`
-- Nested calls such as `a = mw(mw(b, c), d)` are flattened to intermediate
-  `_gstmp_N` wires.
-- `return a, b` or `return a` → sets the return wire list.
-"""
-function _parse_body(body::Expr)
-    steps      = BoxStep[]
-    ret_names  = Symbol[]
-    tmp_ctr    = Ref(0)
-
-    for stmt in body.args
-        stmt isa LineNumberNode && continue
-
-        if stmt isa Expr && stmt.head === :return
-            ret_names = _parse_names(stmt.args[1])
-
-        elseif stmt isa Expr && stmt.head === :(=)
-            lhs, rhs = stmt.args[1], stmt.args[2]
-            out_names = _parse_names(lhs)
-            rhs isa Expr && rhs.head === :call ||
-                error("_parse_body: expected a function call on the rhs, got: $rhs")
-            _flatten_call!(steps, rhs, out_names, tmp_ctr)
-
-        else
-            error("_parse_body: unrecognised statement: $stmt")
-        end
-    end
-
-    return steps, ret_names
-end
-
-function _parse_names(expr)
-    expr isa Symbol                             && return [expr]
-    expr isa Expr && expr.head === :tuple       && return [a for a in expr.args if a isa Symbol]
-    error("_parse_body: expected symbol or tuple of symbols, got: $expr")
-end
-
-function _flatten_call!(steps, call::Expr, out_names::Vector{Symbol}, tmp_ctr::Ref{Int})
-    box_sym = call.args[1]
-    box_sym isa Symbol || error("_parse_body: box name must be a symbol, got: $(call.args[1])")
-
-    in_names = Symbol[]
-    for arg in call.args[2:end]
-        if arg isa Symbol
-            push!(in_names, arg)
-        elseif arg isa Expr && arg.head === :vect
-            for a in arg.args
-                a isa Symbol || error("_parse_body: wire list entry must be a symbol, got: $a")
-                push!(in_names, a)
-            end
-        elseif arg isa Expr && arg.head === :call
-            # Nested call — materialise to a temp wire and recurse
-            tmp_ctr[] += 1
-            tmp = Symbol("_gstmp_$(tmp_ctr[])")
-            _flatten_call!(steps, arg, [tmp], tmp_ctr)
-            push!(in_names, tmp)
-        else
-            error("_parse_body: unexpected call argument: $arg")
-        end
-    end
-
-    push!(steps, BoxStep(box_sym, in_names, out_names))
-end
-
-# ─── Cache helpers ────────────────────────────────────────────────────────────
-
-"""
-    _collect_player_apps(gs::GameSched) -> Dict{Symbol, PlayerRuleApp}
-
-Recursively collect all `PlayerRuleApp` boxes from a `GameSched` and its
-nested sub-schedules, keyed by `box.name`.
-"""
-function _collect_player_apps(gs::GameSched)
-    result = Dict{Symbol, PlayerRuleApp}()
-    for (_, v) in pairs(gs._all_boxes)
-        if v isa PlayerRuleApp
-            result[v.name] = v
-        elseif v isa GameSched
-            merge!(result, _collect_player_apps(v))
-        end
-    end
-    return result
-end
-
-# ─── Runtime executor ─────────────────────────────────────────────────────────
-
-"""
-    run_game_sched!(gs::GameSched, initial_world, agents::Dict;
-                    T_max::Int=1000,
-                    terminal::Union{Function,Nothing}=nothing,
-                    winner_wires::Dict{Symbol,Union{Symbol,Nothing}}=Dict())
+    run_game_sched!(gs::GameSched, initial_world, agents; T_max=1000, ...)
         -> Vector{Experience}
 
-Execute a complete game episode using the wiring-diagram schedule `gs`.
+Run a `GameSched` starting from `initial_world` using the provided `agents` dict.
+Continues for `T_max` iterations of the top-level schedule or until `terminal(world)`
+returns `true`.
 
-Wire semantics: each named wire holds either a live ACSet world (active) or
-`nothing` (inactive).  Only one wire should be active at any time.
-
-Loop structure:
-- `init` wires are active on the first iteration.
-- The first `length(gs._trace_names)` return wires loop back to the trace
-  inputs on subsequent iterations; the rest are exit wires.
-- The episode terminates when an exit wire becomes active, when
-  `terminal(world)` returns `true` (if `terminal` is provided), or when
-  `T_max` turns are exhausted.
-
-Winner resolution (in priority order):
-1. If `terminal` is non-`nothing`, it is called after each move and its result
-   populates `Experience.winner` immediately (backward-compatible path).
-2. If `winner_wires` is non-empty and an exit wire fires, the winner is looked
-   up from `winner_wires` and the final `Experience` record is updated.
-3. If `T_max` is reached without an exit wire, `winner = nothing` (draw/timeout).
+Returns a vector of `Experience` records from all `PlayerRuleApp` boxes encountered.
 """
-function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
+function run_game_sched!(gs::GameSched, initial_world::ACSet, agents::Dict;
                          T_max::Int = 1000,
-                         terminal::Union{Function, Nothing} = nothing,
+                         terminal::Function = (W) -> (false, nothing),
                          winner_wires::Dict{Symbol, Union{Symbol, Nothing}} = Dict{Symbol, Union{Symbol, Nothing}}())
     all_exps   = Experience[]
     turn       = Ref(1)
@@ -154,8 +23,6 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     _terminal  = terminal === nothing ? (W) -> (false, nothing) : terminal
 
     # Build incremental match caches for all PlayerRuleApp boxes that request one.
-    # Boxes with view_fn are excluded: their matches are computed on the subworld,
-    # which the full-world cache cannot track.
     cache_dict = Dict{Symbol, MatchCache}()
     all_pra    = _collect_player_apps(gs)
     for (name, pra) in all_pra
@@ -207,7 +74,6 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     if !isempty(winner_wires) && fired_exit_name !== nothing && !isempty(all_exps)
         wire_winner = get(winner_wires, fired_exit_name, nothing)
         last_exp = all_exps[end]
-        # Only update if terminal() did not already resolve the winner
         if terminal === nothing || !last_exp.done
             all_exps[end] = Experience(
                 last_exp.player, last_exp.state, last_exp.legal_actions,
@@ -221,13 +87,6 @@ function run_game_sched!(gs::GameSched, initial_world, agents::Dict;
     return all_exps
 end
 
-"""
-Convenience overload: use `game.initial()` as the starting world.
-
-If `game.win_conditions` is non-`nothing`, it is used as `winner_wires` and
-`terminal` is ignored (categorical exit-wire mode).  Otherwise `game.terminal`
-is used as the termination predicate (backward-compatible mode).
-"""
 function run_game_sched!(gs::GameSched, game::Game, agents::Dict; T_max::Int = 1000)
     if game.win_conditions !== nothing
         run_game_sched!(gs, game.initial(), agents;
@@ -254,26 +113,15 @@ function _init_wires(gs::GameSched, initial_world, trace_world)
     return wires
 end
 
+# _collect_player_apps moved to player_rule_app.jl
+
 # ─── _run_body! ───────────────────────────────────────────────────────────────
 
-"""
-    _run_body!(steps, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict)
-
-Execute a parsed body `steps` against the live wire state `wires`.
-
-Dispatches on the concrete box type stored in `boxes`:
-- `PlayerRuleApp` — enumerates matches, calls the agent, applies the chosen
-  rewrite, emits an `Experience`, and updates all match caches.
-- `GameSched`     — recurses into the sub-schedule's body.
-- `RuleApp` (AR native) — tries one match; routes to success/failure output.
-- Anything else   — merge semantics: first active input wire → first output.
-"""
 function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max, exps,
-                    cache_dict::Dict{Symbol, MatchCache})
+                    cache_dict::Dict{Symbol, MatchCache}, agent_match=nothing)
     for step in steps
         box = boxes[step.box]
 
-        # Collect active input worlds (first non-nothing)
         input_world = nothing
         for wname in step.inputs
             w = get(wires, wname, nothing)
@@ -281,29 +129,19 @@ function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max
         end
 
         if input_world === nothing
-            # No active input → all outputs inactive
-            for out in step.outputs
-                wires[out] = nothing
-            end
+            for out in step.outputs; wires[out] = nothing; end
             continue
         end
 
         if box isa PlayerRuleApp
-            _exec_player!(step, box, input_world, wires, agents, terminal, turn, T_max, exps, cache_dict)
-
+            _exec_player!(step, box, input_world, wires, agents, terminal, turn, T_max, exps, cache_dict, agent_match)
         elseif box isa GameSched
-            _exec_subsched!(step, box, input_world, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict)
-
+            _exec_subsched!(step, box, input_world, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict, agent_match)
         elseif hasproperty(box, :rule)
-            # Native RuleApp (or similar) — try-apply semantics, 2 output ports
-            _exec_native_rule!(step, box, input_world, wires)
-
+            _exec_native_rule!(step, box, input_world, wires, agent_match)
         else
-            # Schedule / merge_wires / other — pass first active input to first output
             wires[step.outputs[1]] = input_world
-            for i in 2:length(step.outputs)
-                wires[step.outputs[i]] = nothing
-            end
+            for i in 2:length(step.outputs); wires[step.outputs[i]] = nothing; end
         end
     end
 end
@@ -312,71 +150,78 @@ end
 
 function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
                         turn::Ref{Int}, T_max, exps,
-                        cache_dict::Dict{Symbol, MatchCache})
+                        cache_dict::Dict{Symbol, MatchCache}, agent_match=nothing)
     _cat = isnothing(box.cat) ? infer_acset_cat(world) : box.cat
 
-    # ── Enumerate legal actions (view-aware) ──────────────────────────────────
-    view_world = nothing   # subworld seen by the agent; nothing = full information
+    initial_map = Dict{Symbol, Any}()
+    if agent_match !== nothing
+        S = acset_schema(world)
+        # only bind combinatorial parts, let Catlab find variables from them
+        for o in Catlab.CategoricalAlgebra.ob(S)
+            d = Dict{Int, Int}()
+            for i in parts(dom(box.in_hom), o)
+                d[box.in_hom[o](i)] = agent_match[o](i)
+            end
+            if !isempty(d); initial_map[o] = d; end
+        end
+    end
 
     if box.view_fn !== nothing
-        # Fog-of-war path: match against the player's subworld, then translate
-        # each match back to the full world via the inclusion morphism v.
-        # Drop translated matches that violate the DPO dangling condition in world.
         subworld, v = box.view_fn(box.player, world)
-        view_world  = subworld
         raw_sub = box.fast_match_fn !== nothing ?
             box.fast_match_fn(box.rule, subworld, _cat) :
             collect(get_matches(box.rule, subworld; cat=box.cat))
-        raw = [compose(m, v) for m in raw_sub]
-        filter!(m -> can_pushout_complement[_cat](left(box.rule), m), raw)
+        raw = [Catlab.CategoricalAlgebra.compose(m, v) for m in raw_sub]
+        filter!(m -> AlgebraicRewriting.can_pushout_complement(_cat, Catlab.CategoricalAlgebra.left(box.rule), m), raw)
     elseif box.fast_match_fn !== nothing
         raw = box.fast_match_fn(box.rule, world, _cat)
-    elseif haskey(cache_dict, box.name)
+    elseif haskey(cache_dict, box.name) && agent_match === nothing
         ms  = cache_dict[box.name].matches
         raw = box.match_limit === nothing ? ms : @view ms[1:min(end, box.match_limit)]
     else
-        gen = get_matches(box.rule, world; cat=box.cat)
-        raw = box.match_limit === nothing ? collect(gen) :
-              collect(Iterators.take(gen, box.match_limit))
+        if agent_match !== nothing
+            println("DEBUG: _exec_player! $(box.name) searching homomorphisms.")
+            println("DEBUG:   L parts: ", [(o, nparts(codom(left(box.rule)), o)) for o in Catlab.CategoricalAlgebra.ob(S)])
+            println("DEBUG:   L variables: ", [(at, nparts(codom(left(box.rule)), at)) for at in attrtypes(S)])
+            println("DEBUG:   initial_map: ", initial_map)
+        end
+        gen = isempty(initial_map) ? 
+              get_matches(box.rule, world; cat=box.cat) :
+              Catlab.CategoricalAlgebra.homomorphisms(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)), world; cat=_cat, initial=initial_map, monic=box.rule.monic)
+        raw = box.match_limit === nothing ? collect(gen) : collect(Iterators.take(gen, box.match_limit))
     end
 
     actions = [Action(box, m) for m in raw]
-
-    # ── Agent decision ────────────────────────────────────────────────────────
-    # state_pre records the full world for Experience; the agent sees the subworld.
     state_pre  = GameState(world, turn[])
-    agent_view = isnothing(view_world) ? world : view_world
-    chosen     = isempty(actions) ? nothing :
-                 select_action(agents[box.player], GameState(agent_view, turn[]), actions)
+    
+    # DEBUG
+    if isempty(actions)
+        # println("DEBUG: _exec_player! $(box.name) for agent $(agent_match[:Platform](1)) found NO matches.")
+    end
+
+    chosen     = isempty(actions) ? nothing : select_action(agents[box.player], state_pre, actions)
 
     if chosen !== nothing
-        # Use rewrite_match_maps to get DPO output needed for cache update.
-        # chosen.match is always a morphism into the full world (translated above).
-        maps      = rewrite_match_maps(box.rule, chosen.match; cat=_cat)
-        new_world = codom(maps[:rh])
-
-        # Update ALL caches with the DPO maps from this move
-        for cache in values(cache_dict)
-            update_cache!(cache, maps)
+        maps      = AlgebraicRewriting.rewrite_match_maps(box.rule, chosen.match; cat=_cat)
+        new_world = Catlab.CategoricalAlgebra.codom(maps[:rh])
+        if agent_match === nothing
+            for cache in values(cache_dict); update_cache!(cache, maps); end
         end
-
         done, winner = terminal(new_world)
         turn[] += 1
         state_post = GameState(new_world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, chosen,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[], view_world))
-        # Route to success port (1) and clear failure port (2)
+                               Dict{Symbol, Any}(), Symbol[], nothing))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
     else
-        # No legal actions — pass; route to failure port (2)
         done, winner = terminal(world)
         turn[] += 1
         state_post = GameState(world, turn[])
         push!(exps, Experience(box.player, state_pre, actions, nothing,
                                state_post, done || turn[] > T_max, winner,
-                               Dict{Symbol, Any}(), Symbol[], view_world))
+                               Dict{Symbol, Any}(), Symbol[], nothing))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = nothing)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = world)
     end
@@ -386,39 +231,53 @@ end
 
 function _exec_subsched!(step, sub_gs::GameSched, world, wires, _boxes, agents,
                           terminal, turn::Ref{Int}, T_max, exps,
-                          cache_dict::Dict{Symbol, MatchCache})
-    # Build sub-wire state: map parent input wires positionally to sub init wires
-    sub_wires = Dict{Symbol, Any}()
-    for (i, name) in enumerate(sub_gs._init_names)
-        sub_wires[name] = i == 1 ? world : nothing
-    end
-    for name in sub_gs._trace_names
-        sub_wires[name] = nothing
-    end
-
-    sub_exps = Experience[]
-    _run_body!(sub_gs._steps, sub_wires, sub_gs._all_boxes,
-               agents, terminal, turn, T_max, sub_exps, cache_dict)
-    append!(exps, sub_exps)
-
-    # Map sub-schedule return wires (by position) to parent output wires
-    for (i, out_name) in enumerate(step.outputs)
-        if i <= length(sub_gs._ret_names)
-            wires[out_name] = get(sub_wires, sub_gs._ret_names[i], nothing)
-        else
-            wires[out_name] = nothing
+                          cache_dict::Dict{Symbol, MatchCache}, agent_match=nothing)
+    if sub_gs._agent_name !== nothing
+        _cat = isnothing(sub_gs.cat) ? infer_acset_cat(world) : sub_gs.cat
+        println("DEBUG: _exec_subsched! agent=$(sub_gs._agent_name) cat_model=$(typeof(_cat.val))")
+        agent_interface = sub_gs._N[string(sub_gs._agent_name)]
+        agent_matches = collect(Catlab.CategoricalAlgebra.homomorphisms(agent_interface, world; cat=_cat))
+        
+        current_world = world
+        for am in agent_matches
+            sub_wires = Dict{Symbol, Any}()
+            for (i, name) in enumerate(sub_gs._init_names); sub_wires[name] = i == 1 ? current_world : nothing; end
+            for name in sub_gs._trace_names; sub_wires[name] = nothing; end
+            _run_body!(sub_gs._steps, sub_wires, sub_gs._all_boxes, agents, terminal, turn, T_max, exps, cache_dict, am)
+            if !isempty(sub_gs._ret_names); current_world = get(sub_wires, sub_gs._ret_names[1], current_world); end
+            if !isempty(exps) && exps[end].done; break; end
+        end
+        wires[step.outputs[1]] = current_world
+        for i in 2:length(step.outputs); wires[step.outputs[i]] = nothing; end
+    else
+        sub_wires = Dict{Symbol, Any}()
+        for (i, name) in enumerate(sub_gs._init_names); sub_wires[name] = i == 1 ? world : nothing; end
+        for name in sub_gs._trace_names; sub_wires[name] = nothing; end
+        _run_body!(sub_gs._steps, sub_wires, sub_gs._all_boxes, agents, terminal, turn, T_max, exps, cache_dict, agent_match)
+        for (i, out_name) in enumerate(step.outputs)
+            wires[out_name] = i <= length(sub_gs._ret_names) ? get(sub_wires, sub_gs._ret_names[i], nothing) : nothing
         end
     end
 end
 
 # ─── Native RuleApp execution ─────────────────────────────────────────────────
 
-function _exec_native_rule!(step, box, world, wires)
-    _cat    = hasproperty(box, :cat) ? box.cat :
-              infer_acset_cat(codom(left(box.rule)))
-    matches = collect(get_matches(box.rule, world; cat=_cat))
+function _exec_native_rule!(step, box, world, wires, agent_match=nothing)
+    _cat    = hasproperty(box, :cat) ? box.cat : infer_acset_cat(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)))
+    initial_map = Dict{Symbol, Any}()
+    if agent_match !== nothing && hasproperty(box, :in_agent) && box.in_agent !== nothing
+        S = acset_schema(world)
+        for o in Catlab.CategoricalAlgebra.ob(S)
+            d = Dict{Int, Int}()
+            for i in parts(dom(box.in_agent), o); d[box.in_agent[o](i)] = agent_match[o](i); end
+            if !isempty(d); initial_map[o] = d; end
+        end
+    end
+    gen = isempty(initial_map) ? get_matches(box.rule, world; cat=_cat) :
+          Catlab.CategoricalAlgebra.homomorphisms(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)), world; cat=_cat, initial=initial_map, monic=box.rule.monic)
+    matches = collect(gen)
     if !isempty(matches)
-        new_world = rewrite_match(box.rule, first(matches))
+        new_world = Catlab.CategoricalAlgebra.rewrite_match(box.rule, first(matches))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
     else
