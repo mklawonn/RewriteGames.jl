@@ -1,9 +1,7 @@
 ---
 title: "Tic-Tac-Toe Gameplay with RewriteGames"
 format:
-  html:
-    theme: cosmo
-    code-fold: false
+  pdf:
     toc: true
 jupyter: julia-1.11
 execute:
@@ -1156,7 +1154,6 @@ end
 ```{julia}
 #| label: statistics
 #| output: true
-#| eval: false
 all_exps = [run_game_sched!(game_sched, game, agents; T_max=20) for _ in 1:200]
 
 x_wins  = count(e -> !isempty(e) && e[end].winner === :X, all_exps)
@@ -1200,7 +1197,6 @@ The key design choices are:
 
 ```{julia}
 #| label: rl-packages
-#| eval: false
 Pkg.add(["Flux", "GraphNeuralNetworks"])
 using Flux
 using GraphNeuralNetworks
@@ -1213,12 +1209,14 @@ using GraphNeuralNetworks
 `world_to_gnn` converts a `TTT` ACSet into a `GNNGraph` whose nodes are the
 elements of the ACSet and whose edges are the morphism applications.
 
-| Node group | Count | One-hot feature |
-|------------|-------|-----------------|
-| `Sq` nodes | 9     | `[1,0,0,0]`     |
-| `E` nodes  | 12    | `[0,1,0,0]`     |
-| `X` nodes  | 0–9   | `[0,0,1,0]`     |
-| `O` nodes  | 0–9   | `[0,0,0,1]`     |
+| Node group   | Count | One-hot feature  |
+|--------------|-------|------------------|
+| `Sq` nodes   | 9     | `[1,0,0,0,0,0]`  |
+| `RowE` nodes | 6     | `[0,1,0,0,0,0]`  |
+| `ColE` nodes | 6     | `[0,0,1,0,0,0]`  |
+| `DiagE` nodes| 4     | `[0,0,0,1,0,0]`  |
+| `X` nodes    | 0–9   | `[0,0,0,0,1,0]`  |
+| `O` nodes    | 0–9   | `[0,0,0,0,0,1]`  |
 
 Edges come from the four morphisms (`xsq`, `osq`, `src`, `tgt`); each is added
 in both directions so message passing is bidirectional.  This exactly mirrors
@@ -1227,7 +1225,6 @@ pairs and morphisms are foreign-key applications.
 
 ```{julia}
 #| label: world-to-gnn
-#| eval: false
 function world_to_gnn(world::TTT)
     n_sq = nparts(world, :Sq)
     n_re = nparts(world, :RowE)
@@ -1305,8 +1302,8 @@ board.
 The network maps the elements graph to a logit for each legal square:
 
 ```
-one-hot type (4)
-    └── Dense(4→16, relu)          node embedding
+one-hot type (6)
+    └── Dense(6→16, relu)          node embedding
     └── GCNConv(16→32, relu)       first message-passing round
     └── GCNConv(32→16, identity)   second round
     └── Dense(16→1)                scalar head (applied to Sq nodes only)
@@ -1318,7 +1315,6 @@ function of that square's local neighbourhood, aggregated over two hops.
 
 ```{julia}
 #| label: gnn-policy
-#| eval: false
 struct TTTGNNPolicy
     node_embed  :: Dense
     conv1       :: GCNConv
@@ -1330,7 +1326,7 @@ Flux.@functor TTTGNNPolicy
 
 function TTTGNNPolicy(; embed_dim=16, hidden_dim=32)
     TTTGNNPolicy(
-        Dense(4, embed_dim, relu),
+        Dense(6, embed_dim, relu),
         GCNConv(embed_dim => hidden_dim, relu),
         GCNConv(hidden_dim => embed_dim),
         Dense(embed_dim, 1),
@@ -1356,7 +1352,6 @@ and builds the board from the mover's perspective using `F`:
 
 ```{julia}
 #| label: perspective-helpers
-#| eval: false
 action_sq(a::Action) = components(a.match)[:Sq](1)
 
 perspective_world(world, player::Symbol) =
@@ -1367,7 +1362,6 @@ A categorical sampler avoids any extra package dependency:
 
 ```{julia}
 #| label: categorical-sample
-#| eval: false
 function sample_categorical(probs::Vector{Float32})
     r = rand(Float32)
     cumulative = 0f0
@@ -1389,7 +1383,6 @@ ends.
 
 ```{julia}
 #| label: self-play-episode
-#| eval: false
 struct StepRecord
     world   :: TTT
     sq_ids  :: Vector{Int}
@@ -1447,7 +1440,6 @@ $$\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N} G_i \cdot \log\pi_\theta(a_i \mid s_i
 
 ```{julia}
 #| label: reinforce-loss
-#| eval: false
 function reinforce_loss(model, batch::Vector{StepRecord}, returns::Vector{Float32}, graphs::Vector{GNNGraph})
     total = 0f0
     for (rec, G, g) in zip(batch, returns, graphs)
@@ -1464,7 +1456,6 @@ returns, then takes a single Adam step:
 
 ```{julia}
 #| label: training-loop
-#| eval: false
 function train_self_play!(model, opt_state, game, game_sched;
                           n_updates             = 20,
                           n_episodes_per_update = 50,
@@ -1508,7 +1499,6 @@ X's win rate:
 
 ```{julia}
 #| label: eval-vs-random
-#| eval: false
 function eval_vs_random(model, game, game_sched; n=100)
     function gnn_agent_fn(state::GameState, legal_actions::Vector{Action})
         isempty(legal_actions) && return nothing
@@ -1533,7 +1523,6 @@ end
 
 ```{julia}
 #| label: run-training
-#| eval: false
 #| output: true
 Random.seed!(1)
 gnn_model  = TTTGNNPolicy(embed_dim=16, hidden_dim=32)
@@ -1551,7 +1540,6 @@ After 1 000 self-play games the trained X policy should be well above the
 
 ```{julia}
 #| label: training-curve
-#| eval: false
 #| output: true
 println("Win rates vs random at evaluation checkpoints (every 5 updates):")
 for (i, wr) in enumerate(win_rates)
@@ -1572,7 +1560,6 @@ goes.
 
 ```{julia}
 #| label: bench-episode
-#| eval: false
 #| output: true
 Random.seed!(42)
 t_episode = @elapsed run_game_sched!(game_sched, game, agents; T_max=20)
@@ -1592,7 +1579,6 @@ println("  ↳ per episode:                 $(round(1000t_batch/50; digits=1)) m
 
 ```{julia}
 #| label: bench-gnn
-#| eval: false
 #| output: true
 sample_world = create_board()
 add_part!(sample_world, :X, xsq=5)   # X on centre
@@ -1609,7 +1595,6 @@ println("GNN forward pass:       $(round(1e6 * t_forward; digits=1)) μs")
 
 ```{julia}
 #| label: bench-grad
-#| eval: false
 #| output: true
 # Collect a single batch for timing
 test_batch   = StepRecord[]
@@ -1637,7 +1622,6 @@ println("Gradient update (batch of $(length(test_batch)) steps): " *
 
 ```{julia}
 #| label: bench-summary
-#| eval: false
 #| output: true
 println("""
 Timing breakdown (approximate, CPU, one training update):
@@ -1686,7 +1670,6 @@ linearly in the number of edges.
 
 ```{julia}
 #| label: final-eval
-#| eval: false
 #| output: true
 Random.seed!(7)
 final_wr = eval_vs_random(gnn_model, game, game_sched; n=200)
@@ -1702,7 +1685,6 @@ For a fair head-to-head, also pit the trained policy as O against a random X:
 
 ```{julia}
 #| label: final-eval-as-o
-#| eval: false
 #| output: true
 function eval_as_o_vs_random(model, game, game_sched; n=200)
     function gnn_o_fn(state::GameState, legal_actions::Vector{Action})
