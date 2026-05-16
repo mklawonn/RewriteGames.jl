@@ -74,6 +74,28 @@ include("analysis.jl")
 # ── DSL ──────────────────────────────────────────────────────────────────
 include("dsl.jl")
 
+# ── GPU extension stubs ───────────────────────────────────────────────────────
+# Implementations live in ext/GPURewritingExt/ and are loaded automatically
+# when KernelAbstractions + CUDA are present in the environment.
+
+"""
+    gpu_run_game_sched!(gs, initial_world, agents; backend, T_max, ...)
+        -> Vector{Experience}
+
+GPU-accelerated version of `run_game_sched!`.  Requires `KernelAbstractions`
+and `CUDA` to be loaded.  See the `GPURewritingExt` extension for details.
+"""
+function gpu_run_game_sched! end
+
+"""
+    gpu_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
+
+GPU Turbo homomorphism enumerator.  Returns the same set as Catlab's
+`homomorphisms(L, G)` computed via the CSP propagation + dive-solve engine.
+Requires `KernelAbstractions` and `CUDA`.
+"""
+function gpu_homomorphisms end
+
 # ─── Public API ─────────────────────────────────────────────────────────────
 
 export
@@ -114,6 +136,10 @@ export
     win_rate, episode_length, action_counts,
 
     # DSL
-    @game
+    @game,
+
+    # GPU extension (available when KernelAbstractions + CUDA are loaded)
+    gpu_run_game_sched!,
+    gpu_homomorphisms
 
 end # module RewriteGames
