@@ -78,20 +78,16 @@ end
     max_solutions :: Int
 )
     inst = @index(Global, Linear)
-    inst > size(domains_in, 2) && return
+    if inst <= size(domains_in, 2)
+        # Copy domains into thread-local registers (stack array)
+        domains = MArray{Tuple{64}, UInt64}(undef)  # max 64 variables
+        for v in 1:n_vars
+            domains[v] = domains_in[v, inst]
+        end
 
-    # Copy domains into thread-local registers (stack array)
-    domains = MArray{Tuple{64}, UInt64}(undef)  # max 64 variables
-    for v in 1:n_vars
-        domains[v] = domains_in[v, inst]
+        _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
+                         solutions, sol_count, max_solutions)
     end
-
-    # Iterative DFS via explicit stack (avoids GPU recursion limits)
-    # Stack entry: (variable_index, bit_mask_remaining, saved_domains...)
-    # For simplicity this kernel handles n_vars ≤ 16 inline; larger patterns
-    # fall back to the CPU solver via the host dispatcher.
-    _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
-                     solutions, sol_count, max_solutions)
 end
 
 function _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,

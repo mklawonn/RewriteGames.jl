@@ -23,68 +23,66 @@ logic is implemented in `cpu_propagate!` below.
     changed   :: AbstractVector{Bool}      # [n_instances] — any domain shrank?
 )
     inst = @index(Global, Linear)
-    inst > size(domains, 2) && return
+    if inst <= size(domains, 2)
 
-    # Use a local changed flag; write back once.
-    local_changed = false
+        for _ in 1:n_bc                        # AC-1: repeat until fixed point
+            made_progress = false
+            for bc_idx in 1:n_bc
+                bc  = bytecodes[bc_idx]
+                op  = bc.op
+                v1  = Int(bc.var1)
+                v2  = Int(bc.var2)
+                p1  = Int(bc.param1)
+                p2  = Int(bc.param2)
 
-    for _ in 1:n_bc                        # AC-1: repeat until fixed point
-        made_progress = false
-        for bc_idx in 1:n_bc
-            bc  = bytecodes[bc_idx]
-            op  = bc.op
-            v1  = Int(bc.var1)
-            v2  = Int(bc.var2)
-            p1  = Int(bc.param1)
-            p2  = Int(bc.param2)
+                v1 == 0 && continue            # unused field
 
-            v1 == 0 && continue            # unused field
+                old = domains[v1, inst]
 
-            old = domains[v1, inst]
+                if op == PROP_EQ
+                    # v1 and v2 must agree — intersect domains
+                    v2 == 0 && continue
+                    domains[v1, inst] &= domains[v2, inst]
+                    domains[v2, inst] &= old
 
-            if op == PROP_EQ
-                # v1 and v2 must agree — intersect domains
-                v2 == 0 && continue
-                domains[v1, inst] &= domains[v2, inst]
-                domains[v2, inst] &= old
+                elseif op == PROP_NEQ
+                    # monic: if v2 is fixed (single bit) remove that value from v1
+                    v2 == 0 && continue
+                    d2 = domains[v2, inst]
+                    if count_ones(d2) == 1
+                        domains[v1, inst] &= ~d2
+                    end
+                    d1 = domains[v1, inst]
+                    if count_ones(d1) == 1
+                        domains[v2, inst] &= ~d1
+                    end
 
-            elseif op == PROP_NEQ
-                # monic: if v2 is fixed (single bit) remove that value from v1
-                v2 == 0 && continue
-                d2 = domains[v2, inst]
-                if count_ones(d2) == 1
-                    domains[v1, inst] &= ~d2
+                elseif op == PROP_ATTR_EQ
+                    nothing
+
+                elseif op == DOMAIN_SIZE
+                    # Clamp domain to valid world element range [1..p1]
+                    if p1 < 64
+                        mask = (UInt64(1) << p1) - UInt64(1)
+                        domains[v1, inst] &= mask
+                    end
                 end
-                d1 = domains[v1, inst]
-                if count_ones(d1) == 1
-                    domains[v2, inst] &= ~d1
-                end
 
-            elseif op == PROP_ATTR_EQ
-                # v1 must map to world element whose attr column p1 == p2.
-                # The kernel has no world access — attr constraints are applied
-                # as domain masks pre-loaded before this kernel runs.
-                # (This bytecode is a no-op here; domains already pre-masked.)
-                nothing
-
-            elseif op == DOMAIN_SIZE
-                # Clamp domain to valid world element range [1..p1]
-                if p1 < 64
-                    mask = (UInt64(1) << p1) - UInt64(1)
-                    domains[v1, inst] &= mask
-                end
+                domains[v1, inst] != old && (made_progress = true)
             end
-
-            domains[v1, inst] != old && (made_progress = true)
+            made_progress || break
         end
-        made_progress || break
-    end
 
-    # Check for empty domain (failure)
-    for v in 1:size(domains, 1)
-        domains[v, inst] == UInt64(0) && (changed[inst] = false; return)
+        # Check for empty domain (failure)
+        failed = false
+        for v in 1:size(domains, 1)
+            if domains[v, inst] == UInt64(0)
+                failed = true
+                break
+            end
+        end
+        changed[inst] = !failed
     end
-    changed[inst] = true   # instance survived propagation
 end
 
 # ── CPU fallback (used in tests without GPU) ─────────────────────────────────
