@@ -48,7 +48,7 @@ import Catlab.CategoricalAlgebra:
     set_subpart!, add_parts!, add_part!, homomorphism, homomorphisms,
     ACSetTransformation, AttrVar
 
-import AlgebraicRewriting: left, right
+import Catlab.CategoricalAlgebra: left, right
 
 import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
                      select_action, _collect_player_apps
@@ -158,7 +158,7 @@ and compared against the CPU ground truth.
 
 Falls back to the CPU solver when `!CUDA.functional()`.
 """
-function gpu_homomorphisms(L, G;
+function RewriteGames.gpu_homomorphisms(L, G;
                            backend = CUDA.functional() ? CUDA.CUDABackend() : nothing,
                            monic   = false,
                            initial :: Union{Nothing, NamedTuple, Dict} = nothing)
@@ -210,14 +210,15 @@ struct _MockRule
 end
 
 function _make_identity_rule(L, monic)
-    K = L   # identity span: K = L, left = id, right = id
-    id_L = ACSetTransformation(L, L;
-               Dict(o => collect(1:nparts(L,o)) for o in ob(acset_schema(L)))...)
+    S = acset_schema(L)
+    cat = Catlab.CategoricalAlgebra.infer_acset_cat(L)
+    init = Dict{Symbol, Any}(o => collect(1:nparts(L, o)) for o in ob(S))
+    id_L = first(homomorphisms(L, L; cat=cat, initial=init))
     _MockRule(id_L, id_L, monic)
 end
 
-AlgebraicRewriting.left(r::_MockRule)  = r._left
-AlgebraicRewriting.right(r::_MockRule) = r._right
+Catlab.CategoricalAlgebra.left(r::_MockRule)  = r._left
+Catlab.CategoricalAlgebra.right(r::_MockRule) = r._right
 
 function _init_domains_from_world(csp::CSPProblem, G, schema::SchemaInfo)
     domains = zeros(UInt64, Int(csp.n_vars))

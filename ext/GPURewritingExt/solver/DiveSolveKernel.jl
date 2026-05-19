@@ -95,61 +95,73 @@ function _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
     # Find first unbound variable
     unbound = 0
     for v in 1:n_vars
-        count_ones(domains[v]) > 1 && (unbound = v; break)
+        if count_ones(domains[v]) > 1
+            unbound = v
+            break
+        end
     end
 
     if unbound == 0
         # Fully bound — write solution atomically
         idx = Atomix.@atomic sol_count[1] += Int32(1)
-        idx > max_solutions && return
-        for v in 1:n_vars
-            solutions[v, idx] = Int32(trailing_zeros(domains[v]) + 1)
-        end
-        return
-    end
-
-    d = domains[unbound]
-    while d != UInt64(0)
-        bit = d & (-d)
-        d  &= d - UInt64(1)
-
-        # Clone domains and fix unbound → bit
-        saved = MArray{Tuple{64}, UInt64}(undef)
-        for v in 1:n_vars; saved[v] = domains[v]; end
-        domains[unbound] = bit
-
-        ok = true
-        for _ in 1:(n_bc + n_vars)           # bounded AC-1 in kernel
-            changed = false
-            for bc_idx in 1:n_bc
-                bc = bytecodes[bc_idx]
-                v1 = Int(bc.var1); v1 == 0 && continue
-                old = domains[v1]
-                if bc.op == PROP_NEQ && bc.var2 != 0
-                    v2 = Int(bc.var2)
-                    d2 = domains[v2]
-                    count_ones(d2) == 1 && (domains[v1] &= ~d2)
-                    d1 = domains[v1]
-                    count_ones(d1) == 1 && (domains[v2] &= ~d1)
-                elseif bc.op == PROP_EQ && bc.var2 != 0
-                    v2 = Int(bc.var2)
-                    domains[v1] &= domains[v2]
-                    domains[v2] &= old
-                end
-                domains[v1] != old && (changed = true)
-            end
-            # Check failures
+        if idx <= max_solutions
             for v in 1:n_vars
-                domains[v] == UInt64(0) && (ok = false; break)
+                solutions[v, idx] = Int32(trailing_zeros(domains[v]) + 1)
             end
-            !ok && break
-            !changed && break
         end
+    else
+        d = domains[unbound]
+        while d != UInt64(0)
+            bit = d & (-d)
+            d  &= d - UInt64(1)
 
-        ok && _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
-                               solutions, sol_count, max_solutions)
+            # Clone domains and fix unbound → bit
+            saved = MArray{Tuple{64}, UInt64}(undef)
+            for v in 1:n_vars; saved[v] = domains[v]; end
+            domains[unbound] = bit
 
-        # Restore domains for next branch
-        for v in 1:n_vars; domains[v] = saved[v]; end
+            ok = true
+            for _ in 1:(n_bc + n_vars)           # bounded AC-1 in kernel
+                changed = false
+                for bc_idx in 1:n_bc
+                    bc = bytecodes[bc_idx]
+                    v1 = Int(bc.var1); v1 == 0 && continue
+                    old = domains[v1]
+                    if bc.op == PROP_NEQ && bc.var2 != 0
+                        v2 = Int(bc.var2)
+                        d2 = domains[v2]
+                        count_ones(d2) == 1 && (domains[v1] &= ~d2)
+                        d1 = domains[v1]
+                        count_ones(d1) == 1 && (domains[v2] &= ~d1)
+                    elseif bc.op == PROP_EQ && bc.var2 != 0
+                        v2 = Int(bc.var2)
+                        domains[v1] &= domains[v2]
+                        domains[v2] &= old
+                    end
+                    domains[v1] != old && (changed = true)
+                end
+                # Check failures
+                for v in 1:n_vars
+                    if domains[v] == UInt64(0)
+                        ok = false
+                        break
+                    end
+                end
+                if !ok
+                    break
+                end
+                if !changed
+                    break
+                end
+            end
+
+            if ok
+                _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
+                                 solutions, sol_count, max_solutions)
+            end
+
+            # Restore domains for next branch
+            for v in 1:n_vars; domains[v] = saved[v]; end
+        end
     end
 end

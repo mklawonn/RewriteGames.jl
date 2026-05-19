@@ -16,13 +16,14 @@ box_type values:
 `params` holds box-specific Float32 parameters (e.g. coin probability).
 """
 struct CompiledBox
-    box_type  :: UInt8
-    csp_idx   :: UInt16
-    adh_idx   :: UInt16
-    player    :: Symbol                  # :_none for non-player boxes
-    in_wire   :: UInt16
-    out_wires :: NTuple{4, UInt16}
-    params    :: NTuple{4, Float32}
+    box_type      :: UInt8
+    csp_idx       :: UInt16
+    adh_idx       :: UInt16
+    player        :: Symbol                  # :_none for non-player boxes
+    in_wire       :: UInt16
+    out_wires     :: NTuple{4, UInt16}
+    params        :: NTuple{4, Float32}
+    sub_sched_idx :: UInt16                  # index into sub_schedules
 end
 
 const BOX_PLAYER_RULE = UInt8(0)
@@ -30,6 +31,7 @@ const BOX_QUERY       = UInt8(1)
 const BOX_WEAKEN      = UInt8(2)
 const BOX_COIN        = UInt8(3)
 const BOX_NATIVE_RULE = UInt8(4)
+const BOX_AGENT_LOOP = UInt8(5)
 
 """
     CompiledGPUSched
@@ -54,6 +56,7 @@ struct CompiledGPUSched
     trace_wires     :: Vector{Int}
     exit_wires      :: Vector{Int}
     n_wires         :: Int
+    sub_schedules   :: Vector{CompiledGPUSched}
 end
 
 """
@@ -63,6 +66,31 @@ Walk `gs._steps` (the parsed wiring-diagram body) and produce a
 `CompiledGPUSched`.  Rules are deduplicated by object identity so that a
 single CSP / adhesive cube serves all boxes sharing the same rule.
 """
+
+function _register_agent_interface!(registry, csps, cubes, L, world, schema, enc)
+    key = (:interface, objectid(L))
+    if !haskey(registry, key)
+        # Build identity rule wrapping L
+        S = acset_schema(L)
+        cat = Catlab.CategoricalAlgebra.infer_acset_cat(L)
+        init = Dict{Symbol, Any}(o => collect(1:nparts(L, o)) for o in ob(S))
+        homs = homomorphisms(L, L; cat=cat, initial=init)
+        id_L = isempty(homs) ? nothing : first(homs)
+        if id_L === nothing
+             # fallback for variable categories where identity is hard to construct
+             # just use codom(left(rule)) logic by mocking a rule
+             rule = (left = x -> L, right = x -> L, monic = true) # Hacky mock
+             push!(csps, lower_rule_to_csp(rule, world, schema, enc))
+        else
+             rule = (left = id_L, right = id_L, monic = true)
+             push!(csps, lower_rule_to_csp(rule, world, schema, enc))
+        end
+        push!(cubes, precompute_adhesive_cube(nothing, schema)) # Dummy cube
+        registry[key] = length(csps)
+    end
+    registry[key]
+end
+
 function compile_schedule(gs::GameSched, world,
                           schema::SchemaInfo,
                           enc::AttributeEncoder)::CompiledGPUSched
@@ -108,6 +136,7 @@ function compile_schedule(gs::GameSched, world,
 
     # ── 3. Compile each BoxStep ───────────────────────────────────────────────
     boxes = CompiledBox[]
+    sub_schedules = CompiledGPUSched[]
 
     for step in gs._steps
         box    = gs._all_boxes[step.box]
@@ -119,23 +148,51 @@ function compile_schedule(gs::GameSched, world,
             ridx = _register_rule!(box.rule)
             push!(boxes, CompiledBox(BOX_PLAYER_RULE, UInt16(ridx), UInt16(ridx),
                                      box.player, in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0)))
+                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
 
         elseif box isa GameSched
-            # Nested schedule: recursively compile and inline
-            sub = compile_schedule(box, world, schema, enc)
-            append!(boxes, sub.boxes)
+            if box._agent_name !== nothing
+                # Agent loop: compile recursively as a sub-schedule
+                sub = compile_schedule(box, world, schema, enc)
+                push!(sub_schedules, sub)
+                
+                # Find interface for agent loop
+                interface = nothing
+                if box._N !== nothing && haskey(box._N.from_name, string(box._agent_name))
+                    interface = box._N[string(box._agent_name)]
+                end
+                
+                if interface !== nothing
+                    iface_idx = _register_agent_interface!(rule_registry, csps, adhesive_cubes, 
+                                                           interface, world, schema, enc)
+                    push!(boxes, CompiledBox(BOX_AGENT_LOOP, UInt16(iface_idx), UInt16(0),
+                                             box._agent_name, in_w, out_ws,
+                                             (0f0, 0f0, 0f0, 0f0),
+                                             UInt16(length(sub_schedules))))
+                else
+                    push!(boxes, CompiledBox(BOX_AGENT_LOOP, UInt16(0), UInt16(0),
+                                             box._agent_name, in_w, out_ws,
+                                             (0f0, 0f0, 0f0, 0f0),
+                                             UInt16(length(sub_schedules))))
+                end
+            else
+                # Plain nested schedule: inline
+                sub = compile_schedule(box, world, schema, enc)
+                append!(boxes, sub.boxes)
+                # Note: we might need to merge csps and adhesive_cubes if they are not in parent
+                # but for now we assume global registry in compile_schedule is enough if we refactor.
+            end
 
-        elseif hasproperty(box, :rule)
-            ridx = _register_rule!(box.rule)
+        elseif hasproperty(box, :rule) || (box isa AlgebraicRewriting.Schedules.RuleApps.RuleApp)
+            ridx = _register_rule!(box isa PlayerRuleApp ? box.rule : box.rule)
             push!(boxes, CompiledBox(BOX_NATIVE_RULE, UInt16(ridx), UInt16(ridx),
                                      :_none, in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0)))
+                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
         else
             # Utility box (merge_wires, etc.) — wire pass-through
             push!(boxes, CompiledBox(BOX_WEAKEN, UInt16(0), UInt16(0),
                                      :_none, in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0)))
+                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
         end
     end
 
@@ -150,5 +207,5 @@ function compile_schedule(gs::GameSched, world,
     CompiledGPUSched(boxes, wire_set, wire_index,
                      csps, adhesive_cubes,
                      init_wires, trace_wires, exit_wires,
-                     length(wire_set))
+                     length(wire_set), sub_schedules)
 end

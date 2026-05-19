@@ -12,12 +12,13 @@ Fields:
 - `pac_groups`:  Number of distinct PAC groups (0 if no PACs).
 """
 struct CSPProblem
-    n_vars       :: Int32
-    var_offset   :: Dict{Symbol, Int}   # obj type → first variable index (1-based)
-    domain_sizes :: Vector{Int32}       # one per variable
-    bytecodes    :: Vector{TCNBytecode}
-    nac_groups   :: Int32
-    pac_groups   :: Int32
+    n_vars        :: Int32
+    var_offset    :: Dict{Symbol, Int}   # obj type → first variable index (1-based)
+    domain_sizes  :: Vector{Int32}       # one per variable
+    bytecodes     :: Vector{TCNBytecode}
+    nac_groups    :: Int32
+    pac_groups    :: Int32
+    agent_var_map :: Vector{Int32}       # mapping from agent interface elements to L variables
 end
 
 """
@@ -136,8 +137,34 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         end
     end
 
+    # ── 9. agent_var_map: mapping from agent interface to L variables ────────
+    agent_var_map = Int32[]
+    if hasproperty(rule, :in_hom) && rule.in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation
+        # PlayerRuleApp case
+        h = rule.in_hom
+        dom_L = dom(h)
+        for o in schema.obj_types
+            haskey(var_offset, o) || continue
+            for i in parts(dom_L, o)
+                tgt = subpart(h, o, i)
+                push!(agent_var_map, Int32(var_offset[o] + (tgt - 1)))
+            end
+        end
+    elseif hasproperty(rule, :in_agent) && rule.in_agent isa Catlab.CategoricalAlgebra.ACSetTransformation
+        # RuleApp case
+        h = rule.in_agent
+        dom_L = dom(h)
+        for o in schema.obj_types
+            haskey(var_offset, o) || continue
+            for i in parts(dom_L, o)
+                tgt = subpart(h, o, i)
+                push!(agent_var_map, Int32(var_offset[o] + (tgt - 1)))
+            end
+        end
+    end
+
     CSPProblem(Int32(n_vars), var_offset, domain_sizes, bytecodes,
-               nac_count, pac_count)
+               nac_count, pac_count, agent_var_map)
 end
 
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)

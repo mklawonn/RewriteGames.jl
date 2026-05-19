@@ -18,10 +18,11 @@ that the incremental match update step can forward existing matches.
 )
     # Single-thread prefix sum (small array — GPU overhead not worth parallelising)
     i = @index(Global, Linear)
-    i > 1 && return
-    offsets[1] = Int32(1)
-    for t in 1:length(counts)
-        offsets[t+1] = offsets[t] + counts[t]
+    if i == 1
+        offsets[1] = Int32(1)
+        for t in 1:length(counts)
+            offsets[t+1] = offsets[t] + counts[t]
+        end
     end
 end
 
@@ -36,14 +37,15 @@ end
     n_new       :: Int
 )
     idx = @index(Global, Linear)
-    idx > n_new && return
-    global_idx = r_to_global[idx]
-    active_dst[global_idx] = true
-    for h in axes(hom_dst, 2)
-        hom_dst[global_idx, h] = r_homs[idx, h]
-    end
-    for a in axes(attr_dst, 2)
-        attr_dst[global_idx, a] = r_attrs[idx, a]
+    if idx <= n_new
+        global_idx = r_to_global[idx]
+        active_dst[global_idx] = true
+        for h in axes(hom_dst, 2)
+            hom_dst[global_idx, h] = r_homs[idx, h]
+        end
+        for a in axes(attr_dst, 2)
+            attr_dst[global_idx, a] = r_attrs[idx, a]
+        end
     end
 end
 
