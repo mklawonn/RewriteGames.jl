@@ -92,8 +92,11 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         for i in parts(L, hom_ob)
             j = subpart(L, i, h)           # j is the target element in L
             j == 0 && continue
-            v_i = var_offset[hom_ob] + (i - 1)
-            v_j = var_offset[schema.hom_cod[h]] + (j - 1)
+            v_i = get(var_offset, hom_ob, 0) + (i - 1)
+            v_j = get(var_offset, schema.hom_cod[h], 0) + (j - 1)
+            # If either variable is 0 (type not in L), this constraint cannot be satisfied if L is well-formed.
+            # But here we just skip if not in L.
+            (get(var_offset, hom_ob, 0) == 0 || get(var_offset, schema.hom_cod[h], 0) == 0) && continue
             push!(bytecodes, tcn(PROP_FUNC; var1=v_i, var2=v_j, param1=h_idx))
         end
     end
@@ -107,6 +110,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
             raw isa AttrVar && continue          # free attribute variable — skip
             encoded = encode_value(enc, a, raw)
             encoded == Int32(0) && continue      # unknown value — skip
+            haskey(var_offset, owner) || continue
             v_i = var_offset[owner] + (i - 1)
             push!(bytecodes, tcn(PROP_ATTR_EQ; var1=v_i,
                                  param1=a_idx, param2=encoded))
@@ -163,7 +167,8 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
             haskey(var_offset, o) || continue
             for i in parts(dom_L, o)
                 tgt = subpart(h, o, i)
-                push!(agent_var_map, Int32(var_offset[o] + (tgt - 1)))
+                v_idx = var_offset[o] + (tgt - 1)
+                push!(agent_var_map, Int32(v_idx))
             end
         end
     elseif hasproperty(rule, :in_agent) && rule.in_agent isa Catlab.CategoricalAlgebra.ACSetTransformation
@@ -174,7 +179,8 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
             haskey(var_offset, o) || continue
             for i in parts(dom_L, o)
                 tgt = subpart(h, o, i)
-                push!(agent_var_map, Int32(var_offset[o] + (tgt - 1)))
+                v_idx = var_offset[o] + (tgt - 1)
+                push!(agent_var_map, Int32(v_idx))
             end
         end
     end
