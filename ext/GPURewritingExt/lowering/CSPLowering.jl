@@ -41,7 +41,17 @@ Bytecodes emitted (in order):
 """
 function lower_rule_to_csp(rule, world, schema::SchemaInfo,
                             enc::AttributeEncoder)::CSPProblem
-    L = codom(left(rule))   # pattern graph (LHS of the span)
+    
+    L = if hasmethod(left, Tuple{typeof(rule)})
+        codom(left(rule))
+    elseif hasproperty(rule, :_left) && rule._left !== nothing
+        codom(rule._left)
+    elseif hasproperty(rule, :L)
+        rule.L
+    else
+        error("lower_rule_to_csp: could not extract L from rule")
+    end
+
     S = acset_schema(L)
 
     # ── 1. Assign variable indices ─────────────────────────────────────────────

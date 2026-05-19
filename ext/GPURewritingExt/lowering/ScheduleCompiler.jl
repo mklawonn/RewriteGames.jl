@@ -79,11 +79,12 @@ function _register_agent_interface!(registry, csps, cubes, L, world, schema, enc
         if id_L === nothing
              # fallback for variable categories where identity is hard to construct
              # just use codom(left(rule)) logic by mocking a rule
-             rule = (left = x -> L, right = x -> L, monic = true) # Hacky mock
-             push!(csps, lower_rule_to_csp(rule, world, schema, enc))
+             # Use a mock that just provides L
+             push!(csps, lower_rule_to_csp((L=L, monic=true), world, schema, enc))
         else
-             rule = (left = id_L, right = id_L, monic = true)
-             push!(csps, lower_rule_to_csp(rule, world, schema, enc))
+             # In this context _MockRule and lower_rule_to_csp expect L
+             # but we can just pass L if we update lower_rule_to_csp or a mock
+             push!(csps, lower_rule_to_csp(_MockRule(id_L, id_L, true), world, schema, enc))
         end
         push!(cubes, precompute_adhesive_cube(nothing, schema)) # Dummy cube
         registry[key] = length(csps)
