@@ -121,6 +121,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
     if hasproperty(rule, :monic) && rule.monic === true
         for o in schema.obj_types
             cnt = nparts(L, o)
+            cnt == 0 && continue
             base = var_offset[o]
             for i in 1:cnt, j in (i+1):cnt
                 push!(bytecodes,
