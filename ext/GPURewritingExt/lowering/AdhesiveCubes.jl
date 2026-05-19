@@ -39,7 +39,35 @@ Extract the adhesive cube from a rewrite rule's span `K ← L → R` using the
 rule's `left` (I → L) and `right` (I → R) morphisms, where I plays the role
 of the interface/gluing object K.
 """
+
 function precompute_adhesive_cube(rule, schema::SchemaInfo)::AdhesiveCube
+    # Handle the Nothing case (for agent interfaces/queries)
+    if rule === nothing
+        n_types = length(schema.obj_types)
+        return AdhesiveCube(0, 0, 0, Int32[], Int32[], Int32[], Int32[],
+                            Dict(o => 1 for o in schema.obj_types),
+                            Dict(o => 1 for o in schema.obj_types),
+                            Dict(o => 1 for o in schema.obj_types))
+    end
+    
+    # Handle mock rules with L but no left/right
+    if !hasmethod(left, Tuple{typeof(rule)}) && hasproperty(rule, :L)
+        L = rule.L
+        n_l = sum(nparts(L, o) for o in schema.obj_types)
+        l_offset = Dict{Symbol,Int}()
+        curr = 1
+        l_types = Int32[]
+        for o in schema.obj_types
+            l_offset[o] = curr
+            n = nparts(L, o)
+            curr += n
+            append!(l_types, fill(Int32(schema.obj_index[o]), n))
+        end
+        return AdhesiveCube(n_l, 0, 0, Int32[], Int32[], l_types, Int32[],
+                            l_offset, Dict(o => 1 for o in schema.obj_types),
+                            Dict(o => 1 for o in schema.obj_types))
+    end
+
     L    = codom(left(rule))
     R    = codom(right(rule))
     K    = dom(left(rule))      # interface / gluing object
