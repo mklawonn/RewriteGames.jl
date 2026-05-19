@@ -130,7 +130,7 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
                         end
                         
                         # Run sub-schedule for this agent match
-                        changed = _run_gpu_boxes!(state, sub_sched, sub_wire_active, terminal_fn, winner_wires, am)
+                        if _run_gpu_boxes!(state, sub_sched, sub_wire_active, terminal_fn, winner_wires, am); iter_changed = true; end
                         changed && (iter_changed = true)
                     end
                 end

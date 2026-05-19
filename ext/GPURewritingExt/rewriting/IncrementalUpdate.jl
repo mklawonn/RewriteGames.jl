@@ -118,16 +118,21 @@ end
 
 function _var_to_type(v::Int, csp::CSPProblem, schema::SchemaInfo)
     for o in schema.obj_types
-        base  = get(csp.var_offset, o, 0)
-        # Count how many L-elements of type o there are
-        # (= number of variables in this block)
-        # We infer from the next block's offset
-        found = false
+        base = get(csp.var_offset, o, 0)
+        base == 0 && continue
+        
+        # Determine the number of variables for this type
+        # It's the number of parts in L for this type
+        # We don't have L here, but we can look for the next base
+        next_base = typemax(Int)
         for other in schema.obj_types
             ob = get(csp.var_offset, other, 0)
-            ob > base && ob <= v && (found = true)
+            if ob > base && ob < next_base
+                next_base = ob
+            end
         end
-        if !found && v >= base
+        
+        if v >= base && v < next_base
             return o
         end
     end

@@ -58,17 +58,23 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
     var_offset = Dict{Symbol,Int}()
     cursor = 1
     for o in schema.obj_types
-        var_offset[o] = cursor
-        cursor += nparts(L, o)
+        n = nparts(L, o)
+        if n > 0
+            var_offset[o] = cursor
+            cursor += n
+        end
     end
     n_vars = cursor - 1
 
     # ── 2. Domain size for each variable ──────────────────────────────────────
     domain_sizes = Int32[]
     for o in schema.obj_types
-        sz = Int32(nparts(world, o))
-        for _ in 1:nparts(L, o)
-            push!(domain_sizes, sz)
+        n = nparts(L, o)
+        if n > 0
+            sz = Int32(nparts(world, o))
+            for _ in 1:nparts(L, o)
+                push!(domain_sizes, sz)
+            end
         end
     end
 
