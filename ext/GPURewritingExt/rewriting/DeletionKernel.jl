@@ -22,28 +22,25 @@ The `dangling_check_kernel!` must be called (and its output inspected) before
     valid       :: AbstractVector{Bool}       # output: match satisfies dangling cond?
 )
     inst = @index(Global, Linear)
-    inst > 1 && return   # single-instance check
-
-    ok = true
-    # For each morphism h: dom(h) → cod(h), check that no surviving element in
-    # dom(h) points to an element being deleted in cod(h).
-    for h_idx in 1:length(hom_offsets)
-        off  = Int(hom_offsets[h_idx])
-        n_h  = Int(hom_sizes[h_idx])
-        for src in 1:n_h
-            active[off + src] || continue       # source is already deleted
-            tgt = hom_data[src, h_idx]
-            tgt == 0 && continue
-            # Is tgt being deleted?
-            # (to_del_mask is indexed over the flat G-element space)
-            if active[tgt] && to_del_mask[tgt]
-                ok = false
-                break
+    if inst == 1   # single-instance check
+        ok = true
+        for h_idx in 1:length(hom_offsets)
+            off  = Int(hom_offsets[h_idx])
+            n_h  = Int(hom_sizes[h_idx])
+            src  = 1
+            while ok && src <= n_h
+                if active[off + src]
+                    tgt = hom_data[src, h_idx]
+                    if tgt != 0 && active[tgt] && to_del_mask[tgt]
+                        ok = false
+                    end
+                end
+                src += 1
             end
+            ok || break
         end
-        !ok && break
+        valid[1] = ok
     end
-    valid[1] = ok
 end
 
 # ── DPO deletion ──────────────────────────────────────────────────────────────
@@ -53,8 +50,9 @@ end
     to_del   :: AbstractVector{Bool}    # true = delete this G-element
 )
     i = @index(Global, Linear)
-    i > length(active) && return
-    to_del[i] && (active[i] = false)
+    if i <= length(active)
+        to_del[i] && (active[i] = false)
+    end
 end
 
 # ── SPO cascade deletion ──────────────────────────────────────────────────────
@@ -65,13 +63,12 @@ end
     changed  :: AbstractVector{Bool}     # signal: any new deletions?
 )
     i = @index(Global, Linear)
-    i > length(fk_col) && return
-    active[i] || return                  # source already deleted
-    tgt = fk_col[i]
-    tgt == 0 && return
-    if !active[tgt]                      # points to deleted element
-        active[i]  = false
-        changed[1] = true
+    if i <= length(fk_col) && active[i]
+        tgt = fk_col[i]
+        if tgt != 0 && !active[tgt]     # points to deleted element
+            active[i]  = false
+            changed[1] = true
+        end
     end
 end
 

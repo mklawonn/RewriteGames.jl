@@ -12,8 +12,9 @@ mapping (old element index → new element index, 0 = deleted).
     live_ids :: AbstractVector{Int32}   # output: cumulative count of live elements
 )
     i = @index(Global, Linear)
-    i > length(active) && return
-    live_ids[i] = active[i] ? Int32(1) : Int32(0)
+    if i <= length(active)
+        live_ids[i] = active[i] ? Int32(1) : Int32(0)
+    end
 end
 
 @kernel function scatter_kernel!(
@@ -22,10 +23,12 @@ end
     new_ids  :: AbstractVector{Int32}    # old_id → new_id (0 = deleted)
 )
     i = @index(Global, Linear)
-    i > length(src) && return
-    new_i = new_ids[i]
-    new_i == 0 && return
-    dst[new_i] = src[i]
+    if i <= length(src)
+        new_i = new_ids[i]
+        if new_i != 0
+            dst[new_i] = src[i]
+        end
+    end
 end
 
 @kernel function remap_fk_kernel!(
@@ -33,10 +36,12 @@ end
     new_ids  :: AbstractVector{Int32}    # old_id → new_id for the target type
 )
     i = @index(Global, Linear)
-    i > length(fk_col) && return
-    old_tgt = fk_col[i]
-    old_tgt == 0 && return
-    fk_col[i] = new_ids[old_tgt]
+    if i <= length(fk_col)
+        old_tgt = fk_col[i]
+        if old_tgt != 0
+            fk_col[i] = new_ids[old_tgt]
+        end
+    end
 end
 
 """

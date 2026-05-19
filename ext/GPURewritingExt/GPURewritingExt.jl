@@ -48,7 +48,7 @@ import Catlab.CategoricalAlgebra:
     set_subpart!, add_parts!, add_part!, homomorphism, homomorphisms,
     ACSetTransformation, AttrVar
 
-import AlgebraicRewriting: left, right, can_match
+import AlgebraicRewriting: left, right
 
 import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
                      select_action, _collect_player_apps
