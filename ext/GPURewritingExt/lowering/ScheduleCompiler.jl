@@ -184,7 +184,7 @@ function compile_schedule(gs::GameSched, world,
             end
 
         elseif hasproperty(box, :rule) || (box isa AlgebraicRewriting.Schedules.RuleApps.RuleApp)
-            ridx = _register_rule!(box isa PlayerRuleApp ? box.rule : box.rule)
+            ridx = _register_rule!(box.rule)
             push!(boxes, CompiledBox(BOX_NATIVE_RULE, UInt16(ridx), UInt16(ridx),
                                      :_none, in_w, out_ws,
                                      (0f0, 0f0, 0f0, 0f0), UInt16(0)))

@@ -115,7 +115,7 @@ function agent(gs::GameSched; n::Symbol)
                                 Names(merge(gs._N.from_name, Dict(string(n) => interface)))
     
     # Build AR agent loop
-    inner = agent(gs._inner; n=n, ret=:out)
+    inner = agent(gs._inner; n=n)
 
     # Return a GameSched that has the loop but keeps the metadata.
     # Note: we use gs._steps here so that compile_schedule sees the inner steps.
