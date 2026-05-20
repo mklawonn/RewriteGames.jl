@@ -1,3 +1,4 @@
+
 """
 DPO pushout — GPU addition phase (Prealloc-Combine strategy).
 
@@ -60,7 +61,6 @@ Apply the DPO pushout to `g` in-place:
 3. Return the `k_to_h` mapping (K-element flat index → new H-element flat index)
    needed by `IncrementalUpdate`.
 """
-
 function apply_pushout!(g::GPUACSet,
                         match::Vector{Int32},
                         cube::AdhesiveCube,
@@ -73,12 +73,6 @@ function apply_pushout!(g::GPUACSet,
         return Dict(o => Int32[] for o in schema.obj_types)
     end
 
-                        match::Vector{Int32},
-                        cube::AdhesiveCube,
-                        rule,
-                        schema::SchemaInfo,
-                        enc::AttributeEncoder,
-                        backend)::Dict{Symbol, Vector{Int32}}
     R = codom(right(rule))
     K = dom(right(rule))
     r_hom = right(rule)   # K → R
