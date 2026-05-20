@@ -147,9 +147,23 @@ function apply_pushout!(g::GPUACSet,
                     tgt_type = schema.hom_cod[h]
                     # Is tgt_r a new element or preserved from K?
                     tgt_global = if tgt_r ∈ k_img_r[tgt_type]
-                        # preserved: find its H-index via the match
-                        # (simplified: use the K→H map built above)
-                        Int32(0)   # filled in below via k_to_h
+                        # preserved: find its H-index via the match and K->R/K->L maps
+                        # 1. Find k such that r_hom(k) == tgt_r
+                        # 2. image in G is match[l_hom(k)]
+                        
+                        found_k = 0
+                        for k in 1:cube.n_k_elems
+                            if Int(cube.k_to_r[k]) == Int(cube.r_offset[tgt_type] + (tgt_r - 1))
+                                found_k = k
+                                break
+                            end
+                        end
+                        
+                        if found_k != 0
+                            match[Int(cube.k_to_l[found_k])]
+                        else
+                            Int32(0)
+                        end
                     else
                         # new: find in r_to_global
                         new_idx = findfirst(==(tgt_r), new_r_elems[tgt_type])
