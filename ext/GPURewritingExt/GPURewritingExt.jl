@@ -274,17 +274,20 @@ function _pin_initial!(domains, initial, csp, G, schema)
 end
 
 function _assignment_to_hom(sol::Vector{Int32}, L, G, csp::CSPProblem, schema::SchemaInfo)
-    comps = Pair{Symbol, Vector{Int}}[]
+    comps = Dict{Symbol, Vector{Int}}()
     S     = acset_schema(L)
     for o in ob(S)
         base = get(csp.var_offset, o, 0)
         base == 0 && continue
         n  = nparts(L, o)
         vs = Int[Int(sol[base + i - 1]) for i in 1:n]
-        push!(comps, o => vs)
+        comps[o] = vs
     end
     try
-        return ACSetTransformation(L, G; comps...)
+        # Use homomorphism search to bind AttrVars based on the combinatorial match found by GPU
+        𝒞 = Catlab.CategoricalAlgebra.infer_acset_cat(G)
+        homs = homomorphisms(L, G; initial=comps, cat=𝒞)
+        return isempty(homs) ? nothing : first(homs)
     catch
         return nothing
     end
