@@ -68,11 +68,25 @@ function precompute_adhesive_cube(rule, schema::SchemaInfo)::AdhesiveCube
                             Dict(o => 1 for o in schema.obj_types))
     end
 
-    L    = codom(left(rule))
-    R    = codom(right(rule))
-    K    = dom(left(rule))      # interface / gluing object
-    l_hom = left(rule)          # K → L
-    r_hom = right(rule)         # K → R
+
+    # Extract underlying AlgebraicRewriting rule if we were passed a box
+    inner_rule = if hasproperty(rule, :rule)
+        rule.rule
+    else
+        rule
+    end
+    
+    # Handle RuleApp which has .rule
+    if hasproperty(inner_rule, :rule) && hasmethod(left, Tuple{typeof(inner_rule.rule)})
+        inner_rule = inner_rule.rule
+    end
+
+    L     = codom(left(inner_rule))
+    R     = codom(right(inner_rule))
+    K     = dom(left(inner_rule))
+    l_hom = left(inner_rule)
+    r_hom = right(inner_rule)
+
 
     # Compute block offsets and total element counts
     l_offset = Dict{Symbol,Int}()
