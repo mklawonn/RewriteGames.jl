@@ -222,22 +222,10 @@ Catlab.CategoricalAlgebra.right(r::_MockRule) = r._right
 
 function _init_domains_from_world(csp::CSPProblem, G, schema::SchemaInfo)
     domains = zeros(UInt64, Int(csp.n_vars))
-    for o in schema.obj_types
-        n = nparts(G, o)
+    for v in 1:Int(csp.n_vars)
+        n = Int(csp.domain_sizes[v])
         mask = n < 64 ? (UInt64(1) << n) - UInt64(1) : typemax(UInt64)
-        base = get(csp.var_offset, o, 0)
-        base == 0 && continue
-        n_vars_o = count(v -> begin
-            in_b = v >= base
-            for other in schema.obj_types
-                ob_v = get(csp.var_offset, other, 0)
-                other != o && ob_v > base && ob_v <= v && (in_b = false)
-            end
-            in_b
-        end, 1:Int(csp.n_vars))
-        for i in 0:(n_vars_o-1)
-            domains[base+i] = mask
-        end
+        domains[v] = mask
     end
     domains
 end

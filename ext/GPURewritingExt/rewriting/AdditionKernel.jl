@@ -61,6 +61,7 @@ Apply the DPO pushout to `g` in-place:
 3. Populate new R-elements with pointers to preserved and other new elements.
 4. Return the `r_to_local` mapping (R-element index → new G-element index).
 """
+
 function apply_pushout!(g::GPUACSet,
                         match::Vector{Int32},
                         cube::AdhesiveCube,
@@ -76,7 +77,7 @@ function apply_pushout!(g::GPUACSet,
     K = dom(right(rule))
     r_hom = right(rule)
 
-    # 1. Identify which elements are new (not in image of K → R)
+    # 1. Identify which elements are new
     k_img_r = Dict{Symbol, Set{Int}}()
     for o in schema.obj_types; k_img_r[o] = Set{Int}(); end
     for k in 1:cube.n_k_elems
@@ -198,3 +199,4 @@ function apply_pushout!(g::GPUACSet,
 
     return r_to_local
 end
+
