@@ -178,7 +178,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         for o in schema.obj_types
             haskey(var_offset, o) || continue
             for i in parts(dom_L, o)
-                tgt = subpart(h, o, i)
+                tgt = h[o](i)
                 v_idx = var_offset[o] + (tgt - 1)
                 push!(agent_var_map, Int32(v_idx))
             end
@@ -190,7 +190,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         for o in schema.obj_types
             haskey(var_offset, o) || continue
             for i in parts(dom_L, o)
-                tgt = subpart(h, o, i)
+                tgt = h[o](i)
                 v_idx = var_offset[o] + (tgt - 1)
                 push!(agent_var_map, Int32(v_idx))
             end
