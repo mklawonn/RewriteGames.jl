@@ -53,13 +53,13 @@ end
 # ── Host orchestration ───────────────────────────────────────────────────────
 
 """
-    apply_pushout!(g, match, cube, rule, schema, enc) -> Dict{Symbol, Vector{Int32}}
+    apply_pushout!(g, match, cube, rule, schema, enc, backend) -> Dict{Symbol, Vector{Int32}}
 
 Apply the DPO pushout to `g` in-place:
-1. Grow GPU arrays if needed.
-2. Write new R-elements using `addition_kernel!`.
-3. Return the `k_to_h` mapping (K-element flat index → new H-element flat index)
-   needed by `IncrementalUpdate`.
+1. Identify which elements are new.
+2. Grow GPU arrays if needed.
+3. Populate new R-elements with pointers to preserved and other new elements.
+4. Return the `r_to_local` mapping (R-element index → new G-element index).
 """
 function apply_pushout!(g::GPUACSet,
                         match::Vector{Int32},
@@ -69,19 +69,16 @@ function apply_pushout!(g::GPUACSet,
                         enc::AttributeEncoder,
                         backend)::Dict{Symbol, Vector{Int32}}
     if rule === nothing
-        # Read-only query (e.g. agent loop interface): nothing to add
         return Dict(o => Int32[] for o in schema.obj_types)
     end
 
     R = codom(right(rule))
     K = dom(right(rule))
-    r_hom = right(rule)   # K → R
+    r_hom = right(rule)
 
-    # Determine which R-elements are new (not in image of K → R)
+    # 1. Identify which elements are new (not in image of K → R)
     k_img_r = Dict{Symbol, Set{Int}}()
-    for o in schema.obj_types
-        k_img_r[o] = Set{Int}()
-    end
+    for o in schema.obj_types; k_img_r[o] = Set{Int}(); end
     for k in 1:cube.n_k_elems
         r_idx = Int(cube.k_to_r[k])
         r_idx == 0 && continue
@@ -96,18 +93,24 @@ function apply_pushout!(g::GPUACSet,
         new_r_elems[o] = [i for i in 1:nr if Int(off + i - 1) ∉ k_img_r[o]]
     end
 
-    # Map each new R-element to a global slot in the GPUACSet
-    # (extend arrays if needed)
-    r_to_global = Dict{Symbol, Vector{Int32}}()
+    # 2. Assign slots and grow arrays
+    r_to_local = Dict{Symbol, Vector{Int32}}()
+    g_offset = _global_offset(g, schema)
+    
     for o in schema.obj_types
         new_elems = new_r_elems[o]
-        isempty(new_elems) && (r_to_global[o] = Int32[]; continue)
+        if isempty(new_elems)
+            r_to_local[o] = Int32[]
+            continue
+        end
 
         n_cur   = g.n_alloc[o]
         n_add   = length(new_elems)
         n_total = n_cur + n_add
+        globals = Int32[Int32(n_cur + j) for j in 1:n_add]
+        r_to_local[o] = globals
 
-        # Grow GPU arrays
+        # Grow arrays
         new_active = CUDA.zeros(Bool, n_total)
         copyto!(new_active, 1, g.active[o], 1, n_cur)
         g.active[o] = new_active
@@ -125,68 +128,73 @@ function apply_pushout!(g::GPUACSet,
             copyto!(new_av, 1, g.attrs[a], 1, n_cur)
             g.attrs[a] = new_av
         end
-
-        # Record global indices assigned to new R-elements
-        globals = Int32[Int32(n_cur + j) for j in 1:n_add]
-        r_to_global[o] = globals
+        
         g.n_alloc[o] = n_total
         g.n_live[o][] += n_add
+    end
 
-        # Set active flags and data for new elements on host, then upload
+    # 3. Populate new elements (Host-side for simplicity, then upload)
+    for o in schema.obj_types
+        new_elems = new_r_elems[o]
+        isempty(new_elems) && continue
+        
+        globals = r_to_local[o]
+        
+        # Update active flags
         host_active = Array(g.active[o])
-        for gidx in globals
-            host_active[gidx] = true
-        end
+        for gidx in globals; host_active[gidx] = true; end
         g.active[o] = CuArray(host_active)
-
-        for (j, r_elem) in enumerate(new_elems)
-            gidx = Int(globals[j])
-            for h in schema.homs
-                schema.hom_dom[h] == o || continue
+        
+        # Update FKs
+        for h in schema.homs
+            schema.hom_dom[h] == o || continue
+            host_fk = Array(g.homs[h])
+            tgt_type = schema.hom_cod[h]
+            off_r_tgt = cube.r_offset[tgt_type]
+            
+            for (j, r_elem) in enumerate(new_elems)
+                gidx = Int(globals[j])
                 tgt_r = subpart(R, r_elem, h)
-                if tgt_r > 0
-                    tgt_type = schema.hom_cod[h]
-                    # Is tgt_r a new element or preserved from K?
-                    off_r = cube.r_offset[tgt_type]
-                    tgt_r_flat = Int(off_r + tgt_r - 1)
-                    
-                    tgt_global = if tgt_r_flat ∈ k_img_r[tgt_type]
-                        # preserved: find its G-index via the match and K->R/K->L maps
-                        found_k = 0
-                        for k in 1:cube.n_k_elems
-                            if Int(cube.k_to_r[k]) == tgt_r_flat
-                                found_k = k
-                                break
-                            end
+                tgt_r == 0 && continue
+                
+                tgt_r_flat = Int(off_r_tgt + tgt_r - 1)
+                
+                if tgt_r_flat ∈ k_img_r[tgt_type]
+                    # Preserved element: find in world
+                    found_k = 0
+                    for k in 1:cube.n_k_elems
+                        if Int(cube.k_to_r[k]) == tgt_r_flat
+                            found_k = k; break
                         end
-                        
-                        if found_k != 0
-                            match[Int(cube.k_to_l[found_k])]
-                        else
-                            Int32(0)
-                        end
-                    else
-                        # new: find its global index assigned in this pass
-                        new_idx = findfirst(==(tgt_r), new_r_elems[tgt_type])
-                        new_idx === nothing ? Int32(0) :
-                            get(r_to_global, tgt_type, Int32[])[new_idx]
                     end
-                    host_fk = Array(g.homs[h])
-                    host_fk[gidx] = tgt_global
-                    g.homs[h] = CuArray(host_fk)
+                    if found_k != 0
+                        flat_g = Int(match[Int(cube.k_to_l[found_k])])
+                        host_fk[gidx] = Int32(flat_g - g_offset[tgt_type])
+                    end
+                else
+                    # New element: find in r_to_local
+                    new_idx = findfirst(==(tgt_r), new_r_elems[tgt_type])
+                    if new_idx !== nothing
+                        host_fk[gidx] = r_to_local[tgt_type][new_idx]
+                    end
                 end
             end
-
-            for a in schema.attrs
-                schema.attr_dom[a] == o || continue
+            g.homs[h] = CuArray(host_fk)
+        end
+        
+        # Update attributes
+        for a in schema.attrs
+            schema.attr_dom[a] == o || continue
+            host_av = Array(g.attrs[a])
+            for (j, r_elem) in enumerate(new_elems)
+                gidx = Int(globals[j])
                 raw = subpart(R, r_elem, a)
                 raw isa AttrVar && continue
-                host_av = Array(g.attrs[a])
                 host_av[gidx] = encode_value(enc, a, raw)
-                g.attrs[a] = CuArray(host_av)
             end
+            g.attrs[a] = CuArray(host_av)
         end
     end
 
-    return r_to_global
+    return r_to_local
 end
