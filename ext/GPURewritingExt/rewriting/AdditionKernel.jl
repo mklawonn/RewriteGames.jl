@@ -92,7 +92,8 @@ function apply_pushout!(g::GPUACSet,
     new_r_elems = Dict{Symbol, Vector{Int}}()
     for o in schema.obj_types
         nr = nparts(R, o)
-        new_r_elems[o] = [i for i in 1:nr if i ∉ k_img_r[o]]
+        off = cube.r_offset[o]
+        new_r_elems[o] = [i for i in 1:nr if Int(off + i - 1) ∉ k_img_r[o]]
     end
 
     # Map each new R-element to a global slot in the GPUACSet
@@ -146,14 +147,14 @@ function apply_pushout!(g::GPUACSet,
                 if tgt_r > 0
                     tgt_type = schema.hom_cod[h]
                     # Is tgt_r a new element or preserved from K?
-                    tgt_global = if tgt_r ∈ k_img_r[tgt_type]
-                        # preserved: find its H-index via the match and K->R/K->L maps
-                        # 1. Find k such that r_hom(k) == tgt_r
-                        # 2. image in G is match[l_hom(k)]
-                        
+                    off_r = cube.r_offset[tgt_type]
+                    tgt_r_flat = Int(off_r + tgt_r - 1)
+                    
+                    tgt_global = if tgt_r_flat ∈ k_img_r[tgt_type]
+                        # preserved: find its G-index via the match and K->R/K->L maps
                         found_k = 0
                         for k in 1:cube.n_k_elems
-                            if Int(cube.k_to_r[k]) == Int(cube.r_offset[tgt_type] + (tgt_r - 1))
+                            if Int(cube.k_to_r[k]) == tgt_r_flat
                                 found_k = k
                                 break
                             end
@@ -165,7 +166,7 @@ function apply_pushout!(g::GPUACSet,
                             Int32(0)
                         end
                     else
-                        # new: find in r_to_global
+                        # new: find its global index assigned in this pass
                         new_idx = findfirst(==(tgt_r), new_r_elems[tgt_type])
                         new_idx === nothing ? Int32(0) :
                             get(r_to_global, tgt_type, Int32[])[new_idx]
