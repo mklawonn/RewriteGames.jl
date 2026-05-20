@@ -60,7 +60,19 @@ Apply the DPO pushout to `g` in-place:
 3. Return the `k_to_h` mapping (K-element flat index → new H-element flat index)
    needed by `IncrementalUpdate`.
 """
+
 function apply_pushout!(g::GPUACSet,
+                        match::Vector{Int32},
+                        cube::AdhesiveCube,
+                        rule,
+                        schema::SchemaInfo,
+                        enc::AttributeEncoder,
+                        backend)::Dict{Symbol, Vector{Int32}}
+    if rule === nothing
+        # Read-only query (e.g. agent loop interface): nothing to add
+        return Dict(o => Int32[] for o in schema.obj_types)
+    end
+
                         match::Vector{Int32},
                         cube::AdhesiveCube,
                         rule,
