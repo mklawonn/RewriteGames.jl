@@ -55,6 +55,9 @@ import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
 
 # ── Lowering layer ────────────────────────────────────────────────────────────
 include("lowering/SchemaInfo.jl")
+include("lowering/RuleRegistry.jl")
+include("lowering/DeviceData.jl")
+include("lowering/FlattenRegistry.jl")
 include("lowering/AttributeEncoder.jl")
 include("solver/TCNBytecode.jl")        # TCNBytecode needed by CSPLowering
 include("lowering/CSPLowering.jl")
@@ -75,6 +78,7 @@ include("rewriting/IncrementalUpdate.jl")
 include("control/TrajectoryLogger.jl")
 include("control/StreamCompaction.jl")
 include("control/Scheduler.jl")
+include("control/MasterScheduler.jl")
 
 # ── Reconstruction layer ──────────────────────────────────────────────────────
 include("reconstruction/Decode.jl")

@@ -27,7 +27,7 @@ end
 
 Encode `world` and upload every column to the GPU.
 """
-function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder)::GPUACSet
+function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspace=1000)::GPUACSet
     active = Dict{Symbol, CuVector{Bool}}()
     homs   = Dict{Symbol, CuVector{Int32}}()
     attrs  = Dict{Symbol, CuVector{Int32}}()
@@ -36,19 +36,23 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder)::GPUACSe
 
     for o in schema.obj_types
         n = nparts(world, o)
-        n_alloc[o] = n
+        n_alloc[o] = n + headspace
         n_live[o]  = Ref(n)
-        active[o]  = CUDA.ones(Bool, n)    # all elements start live
+        act = CUDA.zeros(Bool, n + headspace)
+        if n > 0; act[1:n] .= true; end
+        active[o] = act
     end
 
     for h in schema.homs
         owner = schema.hom_dom[h]
         n     = nparts(world, owner)
         if n == 0
-            homs[h] = CuArray(Int32[])
+            homs[h] = CUDA.zeros(Int32, headspace)
         else
             host_fk = Int32[subpart(world, i, h) for i in 1:n]
-            homs[h] = CuArray(host_fk)
+            fk = CUDA.zeros(Int32, n + headspace)
+            if n > 0; copyto!(fk, 1, host_fk, 1, n); end
+            homs[h] = fk
         end
     end
 
@@ -56,10 +60,12 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder)::GPUACSe
         owner = schema.attr_dom[a]
         n     = nparts(world, owner)
         if n == 0
-            attrs[a] = CuArray(Int32[])
+            attrs[a] = CUDA.zeros(Int32, headspace)
         else
             host_av = Int32[encode_value(enc, a, subpart(world, i, a)) for i in 1:n]
-            attrs[a] = CuArray(host_av)
+            av = CUDA.zeros(Int32, n + headspace)
+            if n > 0; copyto!(av, 1, host_av, 1, n); end
+            attrs[a] = av
         end
     end
 
