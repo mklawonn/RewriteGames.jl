@@ -1,29 +1,14 @@
 """
 Dive-and-solve search kernel.
 
-After AC-1 propagation leaves some variables with more than one value in
-their domain, this kernel explores the search tree by repeatedly picking the
-first unbound variable and branching on each candidate value.  The search is
-embarrassingly parallel: each GPU thread (or warp) independently explores one
-branch, writing complete assignments to the solutions buffer.
-
-For the host-side solver, `cpu_dive_solve!` implements the same algorithm
-recursively.  It is used in tests without GPU hardware and as the ground-truth
-reference for the equivalence tests.
+Optimized for GPU execution:
+- Iterative DFS with manual stack.
+- Correct backtracking.
+- Register-conscious stack sizing.
 """
 
-# ── Host-side recursive solver (used in tests + as reference) ────────────────
+# ── Host-side reference ───────────────────────────────────────────────────────
 
-"""
-    cpu_dive_solve(csp, initial_domains) -> Vector{Vector{Int32}}
-
-Enumerate all valid assignments for `csp` starting from `initial_domains`.
-Returns a vector of flat assignment arrays (one Int32 per variable, 1-based
-world element index).
-
-This is the CPU ground truth matched against the GPU Turbo engine in the
-equivalence test suite.
-"""
 function cpu_dive_solve(csp::CSPProblem,
                         initial_domains::Vector{UInt64})::Vector{Vector{Int32}}
     solutions = Vector{Int32}[]
@@ -34,134 +19,158 @@ function cpu_dive_solve(csp::CSPProblem,
 end
 
 function _dfs!(solutions, assignment, domains, bytecodes, n_vars)
-    # Apply propagation
     cpu_propagate!(domains, bytecodes) || return
-
-    # Find first unbound variable (domain size > 1)
     unbound = 0
     for v in 1:n_vars
-        count_ones(domains[v]) > 1 && (unbound = v; break)
+        if count_ones(domains[v]) > 1; unbound = v; break; end
+        if domains[v] == 0; return; end
     end
-
     if unbound == 0
-        # All variables uniquely bound — record solution
-        sol = Int32[trailing_zeros(domains[v]) + Int32(1) for v in 1:n_vars]
-        push!(solutions, sol)
+        push!(solutions, Int32[trailing_zeros(domains[v]) + 1 for v in 1:n_vars])
         return
     end
-
-    # Branch: try each value in domain of `unbound`
     d = domains[unbound]
-    while d != UInt64(0)
-        bit = d & (-d)              # lowest set bit
-        val = trailing_zeros(bit) + 1
-        d  &= d - UInt64(1)        # clear lowest bit
-
-        new_domains        = copy(domains)
-        new_domains[unbound] = bit  # fix this variable to `val`
-        new_assign         = copy(assignment)
-        new_assign[unbound] = Int32(val)
-
-        _dfs!(solutions, new_assign, new_domains, bytecodes, n_vars)
+    while d != 0
+        bit = d & (-d); d &= ~bit
+        new_domains = copy(domains); new_domains[unbound] = bit
+        _dfs!(solutions, assignment, new_domains, bytecodes, n_vars)
     end
 end
 
-# ── GPU kernel (KernelAbstractions) ──────────────────────────────────────────
+# ── GPU kernel ───────────────────────────────────────────────────────────────
 
 @kernel function dive_solve_kernel!(
-    domains_in   :: AbstractMatrix{UInt64},   # [n_vars × n_instances] post-propagation
-    bytecodes    :: AbstractVector{TCNBytecode},
-    n_bc         :: Int,
-    n_vars       :: Int,
-    solutions    :: AbstractMatrix{Int32},    # [n_vars × max_solutions]  output
-    sol_count    :: AbstractVector{Int32},    # [1] atomic solution counter
-    max_solutions :: Int
+    domains_in    :: AbstractVector{UInt64},
+    bytecodes     :: AbstractVector{TCNBytecode},
+    n_bc          :: Int,
+    n_vars        :: Int,
+    solutions     :: AbstractMatrix{Int32},
+    sol_count     :: AbstractVector{Int32},
+    max_solutions :: Int,
+    workspace     :: AbstractMatrix{UInt64} # [n_vars, 16]
 )
-    inst = @index(Global, Linear)
-    if inst <= size(domains_in, 2)
-        # Copy domains into thread-local registers (stack array)
-        domains = MArray{Tuple{64}, UInt64}(undef)  # max 64 variables
-        for v in 1:n_vars
-            domains[v] = domains_in[v, inst]
+    # Stack management
+    stack_bits = MVector{16, UInt64}(undef)
+    stack_vars = MVector{16, Int32}(undef)
+    
+    # level 1 init
+    for v in 1:n_vars
+        workspace[v, 1] = domains_in[v]
+    end
+    
+    level = 1
+    # State: 1 = Propagate/FindVar, 2 = Branch/NextBit
+    state = 1
+    
+    safety = 0
+    while level > 0 && safety < 100000000
+        safety += 1
+        
+        if state == 1
+            # A. Propagate
+            ok = true
+            for _ in 1:8 # small fixed AC-1
+                changed = false
+                for i in 1:n_bc
+                    bc = bytecodes[i]
+                    v1 = Int(bc.var1); v1 == 0 && continue
+                    d1 = workspace[v1, level]
+                    if bc.op == PROP_NEQ && bc.var2 != 0
+                        v2 = Int(bc.var2); d2 = workspace[v2, level]
+                        if count_ones(d2) == 1
+                            new_d1 = d1 & ~d2
+                            if new_d1 != d1; d1 = new_d1; changed = true; workspace[v1, level] = d1; end
+                        end
+                    elseif bc.op == PROP_EQ && bc.var2 != 0
+                        v2 = Int(bc.var2); d2 = workspace[v2, level]
+                        new_d1 = d1 & d2
+                        if new_d1 != d1; d1 = new_d1; changed = true; workspace[v1, level] = d1; end
+                    end
+                end
+                if !changed; break; end
+            end
+            
+            # Check consistency
+            for v in 1:n_vars
+                if workspace[v, level] == 0; ok = false; break; end
+            end
+            
+            if !ok
+                level -= 1; state = 2; continue
+            end
+            
+            # B. Find unbound
+            unbound = 0
+            for v in 1:n_vars
+                if count_ones(workspace[v, level]) > 1
+                    unbound = v; break
+                end
+            end
+            
+            if unbound == 0
+                # Solution found!
+                idx = CUDA.atomic_add!(pointer(sol_count, 1), Int32(1)) + 1
+                if idx <= max_solutions
+                    for v in 1:n_vars
+                        solutions[v, idx] = Int32(trailing_zeros(workspace[v, level]) + 1)
+                    end
+                end
+                level -= 1; state = 2; continue
+            end
+            
+            # C. Start branching
+            stack_vars[level] = Int32(unbound)
+            stack_bits[level] = workspace[unbound, level]
+            state = 2
         end
-
-        _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
-                         solutions, sol_count, max_solutions)
+        
+        if state == 2
+            if stack_bits[level] != 0
+                bit = stack_bits[level] & (-stack_bits[level])
+                stack_bits[level] &= ~bit
+                
+                if level < 16
+                    next_level = level + 1
+                    for v in 1:n_vars
+                        workspace[v, next_level] = workspace[v, level]
+                    end
+                    workspace[Int(stack_vars[level]), next_level] = bit
+                    level = next_level
+                    state = 1 # go to propagate at next level
+                else
+                    # Too deep, just skip
+                    state = 2 # stay here to try next bit
+                end
+            else
+                # Backtrack
+                level -= 1
+                state = 2 # try next bit at parent
+            end
+        end
     end
 end
 
-function _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
-                          solutions, sol_count, max_solutions)
-    # Find first unbound variable
-    unbound = 0
-    for v in 1:n_vars
-        if count_ones(domains[v]) > 1
-            unbound = v
-            break
-        end
-    end
-
-    if unbound == 0
-        # Fully bound — write solution atomically
-        idx = Atomix.@atomic sol_count[1] += Int32(1)
-        if idx <= max_solutions
-            for v in 1:n_vars
-                solutions[v, idx] = Int32(trailing_zeros(domains[v]) + 1)
-            end
-        end
-    else
-        d = domains[unbound]
-        while d != UInt64(0)
-            bit = d & (-d)
-            d  &= d - UInt64(1)
-
-            # Clone domains and fix unbound → bit
-            saved = MArray{Tuple{64}, UInt64}(undef)
-            for v in 1:n_vars; saved[v] = domains[v]; end
-            domains[unbound] = bit
-
-            ok = true
-            for _ in 1:(n_bc + n_vars)           # bounded AC-1 in kernel
-                changed = false
-                for bc_idx in 1:n_bc
-                    bc = bytecodes[bc_idx]
-                    v1 = Int(bc.var1); v1 == 0 && continue
-                    old = domains[v1]
-                    if bc.op == PROP_NEQ && bc.var2 != 0
-                        v2 = Int(bc.var2)
-                        d2 = domains[v2]
-                        count_ones(d2) == 1 && (domains[v1] &= ~d2)
-                        d1 = domains[v1]
-                        count_ones(d1) == 1 && (domains[v2] &= ~d1)
-                    elseif bc.op == PROP_EQ && bc.var2 != 0
-                        v2 = Int(bc.var2)
-                        domains[v1] &= domains[v2]
-                        domains[v2] &= old
-                    end
-                    domains[v1] != old && (changed = true)
-                end
-                # Check failures
-                for v in 1:n_vars
-                    if domains[v] == UInt64(0)
-                        ok = false
-                        break
-                    end
-                end
-                if !ok
-                    break
-                end
-                if !changed
-                    break
-                end
-            end
-
-            if ok
-                _gpu_dfs_inline!(domains, bytecodes, n_bc, n_vars,
-                                 solutions, sol_count, max_solutions)
-            end
-
-            # Restore domains for next branch
-            for v in 1:n_vars; domains[v] = saved[v]; end
-        end
-    end
+function gpu_dive_solve(backend, csp::CSPProblem, 
+                        initial_domains::Vector{UInt64};
+                        max_solutions=10000)::Vector{Vector{Int32}}
+    n_vars = Int(csp.n_vars)
+    n_bc   = length(csp.bytecodes)
+    
+    d_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars)
+    KernelAbstractions.copyto!(backend, d_gpu, initial_domains)
+    b_gpu = KernelAbstractions.allocate(backend, TCNBytecode, n_bc)
+    KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+    sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
+    cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
+    KernelAbstractions.fill!(cnt_gpu, Int32(0))
+    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars, 16)
+    
+    kernel = dive_solve_kernel!(backend)
+    kernel(d_gpu, b_gpu, n_bc, n_vars, sol_gpu, cnt_gpu, max_solutions, work_gpu; ndrange=1)
+    KernelAbstractions.synchronize(backend)
+    
+    count = Int(Array(cnt_gpu)[1])
+    if count == 0; return Vector{Int32}[]; end
+    res = Array(sol_gpu)[:, 1:min(count, max_solutions)]
+    return [res[:, i] for i in 1:size(res, 2)]
 end

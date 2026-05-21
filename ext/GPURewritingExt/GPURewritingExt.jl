@@ -9,7 +9,7 @@ in the active environment.  Provides:
 
   - `gpu_run_game_sched!(gs, initial_world, agents; ...)` — GPU analog of
     `run_game_sched!`, returning the same `Vector{Experience}` type.
-  - `gpu_homomorphisms(L, G; ...)` — GPU Turbo solver for use in equivalence
+  - `turbo_homomorphisms(L, G; ...)` — GPU Turbo solver for use in equivalence
     tests against Catlab's CPU homomorphism search.
 
 ## Architecture
@@ -40,7 +40,7 @@ using Catlab
 using AlgebraicRewriting
 using KernelAbstractions
 using CUDA
-using Atomix
+using Atomix, StaticArrays
 using Random: Xoshiro
 
 import Catlab.CategoricalAlgebra:
@@ -147,7 +147,7 @@ function RewriteGames.gpu_run_game_sched!(
 end
 
 """
-    gpu_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
+    turbo_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
 
 GPU Turbo solver for homomorphism enumeration.  Returns the same set as
 Catlab's `homomorphisms(L, G; monic=monic, initial=initial)` but computed
@@ -158,7 +158,7 @@ and compared against the CPU ground truth.
 
 Falls back to the CPU solver when `!CUDA.functional()`.
 """
-function RewriteGames.gpu_homomorphisms(L, G;
+function RewriteGames.turbo_homomorphisms(L, G;
                            backend = CUDA.functional() ? CUDA.CUDABackend() : nothing,
                            monic   = false,
                            initial :: Union{Nothing, NamedTuple, Dict} = nothing)
@@ -185,7 +185,11 @@ function RewriteGames.gpu_homomorphisms(L, G;
         _pin_initial!(domains, initial, csp, G, schema)
     end
 
-    solutions = cpu_dive_solve(csp, domains)
+    if backend === nothing
+        solutions = cpu_dive_solve(csp, domains)
+    else
+        solutions = gpu_dive_solve(backend, csp, domains)
+    end
 
     # Convert flat Int32 assignments to ACSetTransformations
     result = ACSetTransformation[]
@@ -201,7 +205,7 @@ function RewriteGames.gpu_homomorphisms(L, G;
     result
 end
 
-# ── Helpers for gpu_homomorphisms ─────────────────────────────────────────────
+# ── Helpers for turbo_homomorphisms ─────────────────────────────────────────────
 
 struct _MockRule
     _left  :: Any

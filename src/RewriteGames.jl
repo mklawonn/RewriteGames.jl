@@ -88,13 +88,13 @@ and `CUDA` to be loaded.  See the `GPURewritingExt` extension for details.
 function gpu_run_game_sched! end
 
 """
-    gpu_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
+    turbo_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
 
 GPU Turbo homomorphism enumerator.  Returns the same set as Catlab's
 `homomorphisms(L, G)` computed via the CSP propagation + dive-solve engine.
 Requires `KernelAbstractions` and `CUDA`.
 """
-function gpu_homomorphisms end
+function turbo_homomorphisms end
 
 # ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -140,6 +140,6 @@ export
 
     # GPU extension (available when KernelAbstractions + CUDA are loaded)
     gpu_run_game_sched!,
-    gpu_homomorphisms
+    turbo_homomorphisms
 
 end # module RewriteGames
