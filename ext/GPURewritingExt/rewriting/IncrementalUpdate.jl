@@ -144,11 +144,15 @@ function _init_domains(csp::CSPProblem, g::GPUACSet,
                         g_offset::Dict{Symbol,Int})::Vector{UInt64}
     domains = zeros(UInt64, Int(csp.n_vars))
     for o in schema.obj_types
-        n_live = g.n_live[o][]
-        mask   = n_live < 64 ? (UInt64(1) << n_live) - UInt64(1) : typemax(UInt64)
-        base   = get(csp.var_offset, o, 0)
+        # Build mask from active flags
+        active_host = Array(g.active[o])
+        mask = UInt64(0)
+        for i in 1:min(64, length(active_host))
+            if active_host[i]; mask |= (UInt64(1) << (i - 1)); end
+        end
+        
+        base = get(csp.var_offset, o, 0)
         base == 0 && continue
-        # Determine how many vars are in this type's block
         n_vars_here = count(v -> _var_to_type(v, csp, schema) == o,
                             1:Int(csp.n_vars))
         for i in 0:(n_vars_here-1)
@@ -157,7 +161,6 @@ function _init_domains(csp::CSPProblem, g::GPUACSet,
     end
     domains
 end
-
 function _apply_attr_masks!(domains::Vector{UInt64}, csp::CSPProblem,
                              g::GPUACSet, schema::SchemaInfo,
                              enc::AttributeEncoder,

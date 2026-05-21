@@ -96,12 +96,12 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
     enc    = state.enc
 
     for (box_idx, box) in enumerate(sched.boxes)
-        wire_active[Int(box.in_wire)] || continue
+        (Int(box.in_wire) > 0 && Int(box.in_wire) <= length(wire_active) && wire_active[Int(box.in_wire)]) || continue
 
         if box.box_type == BOX_WEAKEN
             for ow in box.out_wires
                 ow == 0 && break
-                wire_active[Int(ow)] = true
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
             end
             wire_active[Int(box.in_wire)] = false
 
@@ -109,8 +109,24 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
             p = Float64(box.params[1])
             branch = rand(state.rng) < p ? 1 : 2
             ow = box.out_wires[branch]
-            ow != 0 && (wire_active[Int(ow)] = true)
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
             wire_active[Int(box.in_wire)] = false
+
+        elseif box.box_type == BOX_NESTED_SCHED
+            sub_sched_idx = Int(box.sub_sched_idx)
+            if sub_sched_idx != 0 && sub_sched_idx <= length(sched.sub_schedules)
+                sub_sched = sched.sub_schedules[sub_sched_idx]
+                sub_wire_active = falses(sub_sched.n_wires)
+                for iw in sub_sched.init_wires; sub_wire_active[iw] = true; end
+                if _run_gpu_boxes!(state, sub_sched, sub_wire_active, terminal_fn, winner_wires, pinned_agent)
+                    iter_changed = true
+                end
+                
+                # Propagate to out-wire (assuming sub-sched returned properly)
+                ow = box.out_wires[1]
+                (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
+                wire_active[Int(box.in_wire)] = false
+            end
 
         elseif box.box_type == BOX_AGENT_LOOP
             # Enumerate agent matches
@@ -137,7 +153,7 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
             
             # After loop, propagate world to success output
             ow = box.out_wires[1]
-            ow != 0 && (wire_active[Int(ow)] = true)
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
             wire_active[Int(box.in_wire)] = false
 
         elseif box.box_type ∈ (BOX_PLAYER_RULE, BOX_NATIVE_RULE)
@@ -150,7 +166,7 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
             if isempty(matches)
                 # No matches: fire pass/fail wire (out_wires[2])
                 ow = box.out_wires[2]
-                ow != 0 && (wire_active[Int(ow)] = true)
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
                 wire_active[Int(box.in_wire)] = false
                 continue
             end
@@ -162,6 +178,9 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
                     # Download current world snapshot for agent
                     snap = download_acset(g, enc, state.world_type)
                     gs   = GameState(snap, state.turn[])
+                    # Use a dummy box descriptor to satisfy select_action
+                    # Use a minimal Action that satisfies the interface without full box construction
+                    actions = [Action(nothing, m) for m in matches]
                     actions = [Action(nothing, m) for m in matches]
                     chosen  = select_action(agent, gs, actions)
                     chosen === nothing ? nothing : chosen.match
@@ -173,7 +192,7 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
             end
 
             if chosen_match !== nothing
-                pre_snap = g   # reference before mutation (for logging)
+                pre_snap = download_acset(g, enc, state.world_type)
 
                 # DPO deletion
                 to_del, dangling_ok = build_to_del_mask(chosen_match, cube, schema, g)
@@ -182,17 +201,8 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
                     _apply_deletion!(g, to_del, schema)
 
                     # DPO addition
-                    added_g = apply_pushout!(g, chosen_match, cube,
-                                             _get_rule(sched, box),
-                                             schema, enc, nothing)
-
-                    # Trajectory logging
-                    if state.trajectory !== nothing
-                        log_deletions!(state.trajectory, schema, deleted_g,
-                                       state.turn[], box_idx)
-                        log_additions!(state.trajectory, schema, added_g,
-                                       state.turn[], box_idx)
-                    end
+                    # Important: apply mutation to g itself
+                    apply_pushout!(g, chosen_match, cube, _get_rule(sched, box), schema, enc, nothing)
 
                     # Terminal check
                     snap = download_acset(g, enc, state.world_type)
@@ -202,7 +212,7 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
                     # Record step for Experience reconstruction
                     push!(state.step_log, (
                         pre_state      = pre_snap,
-                        post_state     = g,
+                        post_state     = download_acset(g, enc, state.world_type),
                         match          = chosen_match,
                         csp            = csp,
                         player         = box.player,
@@ -219,12 +229,12 @@ function _run_gpu_boxes!(state, sched, wire_active, terminal_fn, winner_wires, p
 
                     iter_changed = true
                     ow = box.out_wires[1]
-                    ow != 0 && (wire_active[Int(ow)] = true)
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
                     wire_active[Int(box.in_wire)] = false
                 end
             else
                 ow = box.out_wires[2]
-                ow != 0 && (wire_active[Int(ow)] = true)
+            (Int(ow) > 0 && Int(ow) <= length(wire_active)) && (wire_active[Int(ow)] = true)
                 wire_active[Int(box.in_wire)] = false
             end
         end # box dispatch
@@ -292,5 +302,5 @@ function _collect_deleted(match::Vector{Int32}, cube::AdhesiveCube,
 end
 
 function _get_rule(sched::CompiledGPUSched, box::CompiledBox)
-    nothing
+    (box.csp_idx > 0 && box.csp_idx <= length(sched.rules)) ? sched.rules[Int(box.csp_idx)] : nothing
 end

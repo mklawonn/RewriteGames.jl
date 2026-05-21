@@ -1,4 +1,3 @@
-
 """
 DPO pushout — GPU addition phase (Prealloc-Combine strategy).
 
@@ -8,58 +7,6 @@ two-pass strategy:
      offsets to find where each new element will live.
   2. **Parallel scatter**: threads concurrently write FK and attribute columns
      for the new elements into the preallocated slots.
-
-The gluing morphism `K → H` (where H is the result world) is also returned so
-that the incremental match update step can forward existing matches.
-"""
-
-@kernel function prefix_sum_kernel!(
-    counts  :: AbstractVector{Int32},   # [n_types] input counts
-    offsets :: AbstractVector{Int32}    # [n_types+1] output prefix sums (1-based)
-)
-    # Single-thread prefix sum (small array — GPU overhead not worth parallelising)
-    i = @index(Global, Linear)
-    if i == 1
-        offsets[1] = Int32(1)
-        for t in 1:length(counts)
-            offsets[t+1] = offsets[t] + counts[t]
-        end
-    end
-end
-
-@kernel function addition_kernel!(
-    active_dst  :: AbstractVector{Bool},   # full active array (extended in-place)
-    hom_dst     :: AbstractMatrix{Int32},  # [max_n × n_homs] FK table
-    attr_dst    :: AbstractMatrix{Int32},  # [max_n × n_attrs] attr table
-    offsets     :: AbstractVector{Int32},  # per-type start index for new elements
-    r_homs      :: AbstractMatrix{Int32},  # R-element FK values (new elements)
-    r_attrs     :: AbstractMatrix{Int32},  # R-element attr values (encoded)
-    r_to_global :: AbstractVector{Int32},  # R-element flat index → global index
-    n_new       :: Int
-)
-    idx = @index(Global, Linear)
-    if idx <= n_new
-        global_idx = r_to_global[idx]
-        active_dst[global_idx] = true
-        for h in axes(hom_dst, 2)
-            hom_dst[global_idx, h] = r_homs[idx, h]
-        end
-        for a in axes(attr_dst, 2)
-            attr_dst[global_idx, a] = r_attrs[idx, a]
-        end
-    end
-end
-
-# ── Host orchestration ───────────────────────────────────────────────────────
-
-"""
-    apply_pushout!(g, match, cube, rule, schema, enc, backend) -> Dict{Symbol, Vector{Int32}}
-
-Apply the DPO pushout to `g` in-place:
-1. Identify which elements are new.
-2. Grow GPU arrays if needed.
-3. Populate new R-elements with pointers to preserved and other new elements.
-4. Return the `r_to_local` mapping (R-element index → new G-element index).
 """
 
 function apply_pushout!(g::GPUACSet,
@@ -96,7 +43,6 @@ function apply_pushout!(g::GPUACSet,
 
     # 2. Assign slots and grow arrays
     r_to_local = Dict{Symbol, Vector{Int32}}()
-    g_offset = _global_offset(g, schema)
     
     for o in schema.obj_types
         new_elems = new_r_elems[o]
@@ -135,6 +81,7 @@ function apply_pushout!(g::GPUACSet,
     end
 
     # 3. Populate new elements (Host-side for simplicity, then upload)
+    g_offset = _global_offset(g, schema)
     for o in schema.obj_types
         new_elems = new_r_elems[o]
         isempty(new_elems) && continue
@@ -199,4 +146,3 @@ function apply_pushout!(g::GPUACSet,
 
     return r_to_local
 end
-

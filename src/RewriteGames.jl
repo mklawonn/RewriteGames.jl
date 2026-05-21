@@ -114,6 +114,7 @@ export
     # Wiring-diagram schedule
     PlayerRuleApp, GameSched,
     mk_game_sched, player_migrate,
+    merge_wires, coin,
     view_sched,
     run_game_sched!,
 

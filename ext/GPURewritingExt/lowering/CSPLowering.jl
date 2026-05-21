@@ -93,7 +93,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
 
     # ── 3. DOMAIN_SIZE bytecodes ───────────────────────────────────────────────
     for (v, sz) in enumerate(domain_sizes)
-        push!(bytecodes, tcn(DOMAIN_SIZE; var1=v, param1=sz))
+        # push!(bytecodes, tcn(DOMAIN_SIZE; var1=v, param1=domain_sizes[v]))
     end
 
     # ── 4. PROP_FUNC: structural morphism constraints ─────────────────────────

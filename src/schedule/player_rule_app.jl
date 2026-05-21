@@ -58,6 +58,18 @@ function agent(p::PlayerRuleApp; n::Symbol)
     return agent(tryrule(p); n=n)
 end
 
+function ⊗(p1::PlayerRuleApp, p2::PlayerRuleApp)
+    I_state = _pra_interface(p1)
+    N_local = Names(Dict("I" => I_state))
+    mk_game_sched(NamedTuple(), (init1=:I, init2=:I), N_local,
+                  NamedTuple{(p1.name, p2.name)}((p1, p2)),
+                  quote
+                      s1, f1 = $(p1.name)(init1)
+                      s2, f2 = $(p2.name)(init2)
+                      return s1, s2, f1, f2
+                  end; cat=p1.cat)
+end
+
 function ⋅(p1::PlayerRuleApp, p2::PlayerRuleApp)
     I_state = _pra_interface(p1)
     N_local = Names(Dict("I" => I_state))
@@ -124,10 +136,32 @@ function agent(gs::GameSched; n::Symbol)
               gs._trace_names, gs._ret_names, gs._trace_args, gs._init_args,
               gs._body, new_N, n, gs.cat)
 end
+function ⋅(gs1::GameSched, gs2::GameSched)
+    # Chain outputs of gs1 to inputs of gs2
+    N_local = gs1._N
+    # Use inner schedules directly for mk_sched
+    mk_game_sched(gs1._trace_args, gs1._init_args, N_local,
+                  NamedTuple{(:gs1, :gs2)}((gs1, gs2)),
+                  quote
+                      out1 = gs1($(gs1._init_names...))
+                      out2 = gs2(out1)
+                      return out2
+                  end; cat=gs1.cat)
+end
+
 
 function mk_game_sched(trace_args, init_args, N, boxes, body; cat=nothing, kwargs...)
+    # Infer interface from Names if possible
+    _I = first(values(N.from_name))
     ar_boxes = map(boxes) do v
-        v isa PlayerRuleApp ? v._inner : v isa GameSched ? v._inner : v
+        if v isa PlayerRuleApp; v._inner
+        elseif v isa GameSched; v._inner
+        elseif v isa AlgebraicRewriting.Schedules.Queries.Query; v
+        elseif v isa AlgebraicRewriting.Schedules.RuleApps.RuleApp; v
+        elseif v isa AlgebraicRewriting.Schedules.Wiring.Schedule; v
+        elseif hasproperty(v, :rule); RuleApp(:_tmp, v, _I; cat=cat)
+        else; AlgebraicRewriting.Schedules.Queries.Query(:_dummy, _I)
+        end
     end
     inner = mk_sched(trace_args, init_args, N, ar_boxes, body)
     player_map = Dict{Symbol, PlayerRuleApp}()
@@ -159,8 +193,9 @@ function _flatten_call!(steps, call::Expr, out_names, tmp_ctr)
         if arg isa Symbol; push!(in_names, arg)
         elseif arg isa Expr && arg.head === :vect; append!(in_names, [a for a in arg.args if a isa Symbol])
         elseif arg isa Expr && arg.head === :call
-            tmp_ctr[] += 0; tmp = Symbol("_gstmp_$(tmp_ctr[])")
-            # Flat inlining for now
+            tmp_ctr[] += 1; tmp = Symbol("_gstmp_$(tmp_ctr[])")
+            _flatten_call!(steps, arg, [tmp], tmp_ctr)
+            push!(in_names, tmp)
         end
     end
     push!(steps, BoxStep(box_sym, in_names, out_names))

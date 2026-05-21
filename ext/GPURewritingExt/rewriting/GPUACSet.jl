@@ -127,3 +127,14 @@ function download_acset(g::GPUACSet, enc::AttributeEncoder, world_type)
 
     result
 end
+
+function Base.deepcopy(g::GPUACSet)
+    GPUACSet(
+        g.schema,
+        Dict(k => copy(v) for (k,v) in pairs(g.active)),
+        Dict(k => copy(v) for (k,v) in pairs(g.homs)),
+        Dict(k => copy(v) for (k,v) in pairs(g.attrs)),
+        copy(g.n_alloc),
+        Dict(k => Ref(v[]) for (k,v) in pairs(g.n_live))
+    )
+end
