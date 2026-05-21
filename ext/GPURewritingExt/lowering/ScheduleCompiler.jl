@@ -146,7 +146,7 @@ function compile_schedule(gs::GameSched, world,
                              UInt16(_wire!(step.outputs[i])) : UInt16(0), 4)
 
         if box isa PlayerRuleApp
-            ridx = _register_rule!(box)
+            ridx = _register_rule!(box.rule)
             push!(boxes, CompiledBox(BOX_PLAYER_RULE, UInt16(ridx), UInt16(ridx),
                                      box.player, in_w, out_ws,
                                      (0f0, 0f0, 0f0, 0f0), UInt16(0)))
@@ -185,7 +185,7 @@ function compile_schedule(gs::GameSched, world,
             end
 
         elseif hasproperty(box, :rule) || (box isa AlgebraicRewriting.Schedules.RuleApps.RuleApp)
-            ridx = _register_rule!(box)
+            ridx = _register_rule!(box.rule)
             push!(boxes, CompiledBox(BOX_NATIVE_RULE, UInt16(ridx), UInt16(ridx),
                                      :_none, in_w, out_ws,
                                      (0f0, 0f0, 0f0, 0f0), UInt16(0)))

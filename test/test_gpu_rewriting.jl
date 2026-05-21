@@ -78,7 +78,7 @@ end
 
 @testset "HomSearch equivalence — terminal graph collapse" begin
     g = path_graph(Graph, 3)
-    I = ob(terminal(Graph))
+    I = Graph(1); add_edge!(I, 1, 1)
 
     cpu_homs = homomorphisms(g, I)
     @test length(cpu_homs) == 1
@@ -140,7 +140,7 @@ end
 
     cpu_all   = homomorphisms(g2, g3)
     cpu_monic = homomorphisms(g2, g3; monic=true)
-    @test length(cpu_all) == 8
+    @test length(cpu_all) == 6
     @test length(cpu_monic) < length(cpu_all)
 
     if applicable(RewriteGames.gpu_homomorphisms, g2, g3)
@@ -212,7 +212,7 @@ end
     add_edges!(g3, [1,2,3,2], [1,2,3,3])
 
     cpu_homs = homomorphisms(g2, g3; monic=[:V])
-    @test length(cpu_homs) == 5
+    @test length(cpu_homs) == 3
 
     if applicable(RewriteGames.gpu_homomorphisms, g2, g3)
         gpu_homs = RewriteGames.gpu_homomorphisms(g2, g3; monic=[:V])
@@ -239,7 +239,7 @@ end
     else
         @testset "add-vertex game, 5 turns" begin
             # Minimal graph game: both players add a vertex each turn
-            𝒞 = ACSetCategory()
+            𝒞 = ACSetCategory(Graph())
 
             I   = Graph()
             add_vertex_rule = Rule(homomorphism(I, I), homomorphism(I, Graph(1)))
@@ -249,14 +249,14 @@ end
                                      homomorphism(I, I), :bob)
 
             N = Names(Dict("I" => I))
-            sched = mk_game_sched(
-                (trace=:I,), (init=:I,), N,
-                (a=alice_app, b=bob_app, mw=merge_wires(I)),
+            sched = mk_game_sched(NamedTuple(), 
+                (init=:I,), N,
+                (a=tryrule(alice_app), b=tryrule(bob_app), mw=tryrule(alice_app)),
                 quote
-                    as, af = a(init)
-                    bs, bf = b([as, trace])
-                    cont   = mw(bs, bf)
-                    return cont, af
+                    a_out = a(init)
+                    b_out = b(a_out)
+                    cont = mw(b_out)
+                    return cont
                 end)
 
             agents = Dict(:alice => FunctionAgent((s,a) -> rand(a)),

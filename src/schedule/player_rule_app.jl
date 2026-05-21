@@ -21,8 +21,8 @@ function PlayerRuleApp(name::Symbol, rule, in_hom, out_hom, player::Symbol;
                         cat=nothing, fast_match_fn=nothing, use_cache=false,
                         match_limit=nothing, view_fn=nothing)
     inner = if in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation
-        cat === nothing ? RuleApp(name, rule, in_hom, out_hom) :
-                          RuleApp(name, rule, in_hom, out_hom; cat=cat)
+        cat === nothing ? RuleApp(name, rule, in_hom) :
+                          RuleApp(name, rule, in_hom; cat=cat)
     else
         cat === nothing ? RuleApp(name, rule, in_hom) :
                           RuleApp(name, rule, in_hom; cat=cat)
