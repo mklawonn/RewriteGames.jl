@@ -9,9 +9,11 @@ Layout per object type `o`:
   homs[h]    :: CuVector{Int32}  — foreign key for morphism h (1-based, 0=unset)
   attrs[a]   :: CuVector{Int32}  — encoded integer attribute value (0=wildcard)
 
-`n_alloc[o]` is the allocated array capacity; `n_live[o]` is the current
-count of non-tombstoned elements.  Both are host-side integers; only the
-arrays themselves live on the GPU.
+`n_alloc[o]` is the high-water mark: slots 1..n_alloc[o] have been assigned
+(live or tombstoned).  The CuArray capacity is `length(g.active[o])` which
+may exceed `n_alloc[o]` due to 2× over-allocation; spare slots have
+`active = false` and are ready for the next addition without reallocation.
+`n_live[o]` is the count of currently active (non-tombstoned) elements.
 """
 struct GPUACSet
     schema  :: SchemaInfo
@@ -36,7 +38,7 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspac
 
     for o in schema.obj_types
         n = nparts(world, o)
-        n_alloc[o] = n + headspace
+        n_alloc[o] = n              # high-water mark; spare slots up to n+headspace
         n_live[o]  = Ref(n)
         act = CUDA.zeros(Bool, n + headspace)
         if n > 0; act[1:n] .= true; end

@@ -9,6 +9,8 @@ box_type values:
   2 = WEAKEN       (pass-through; no matching needed)
   3 = COIN         (stochastic split; params[1] = probability of output wire 1)
   4 = NATIVE_RULE  (automatic rule application, no agent)
+  5 = AGENT_LOOP   (loop over agent interface matches, dispatch sub-schedule)
+  6 = NESTED_SCHED (nested schedule — only used as fallback; prefer inlining)
 
 `csp_idx` indexes into `CompiledGPUSched.csps` (0 = no CSP).
 `adh_idx` indexes into `CompiledGPUSched.adhesive_cubes` (0 = no cube).
@@ -20,6 +22,7 @@ function _p_idx(s::Symbol)
     s === :red  && return UInt8(2)
     return UInt8(0)
 end
+_p_idx(::Nothing) = UInt8(0)
 
 struct CompiledBox
     box_type      :: UInt8
@@ -32,12 +35,12 @@ struct CompiledBox
     sub_sched_idx :: UInt16                  # index into sub_schedules
 end
 
-const BOX_PLAYER_RULE = UInt8(0)
-const BOX_QUERY       = UInt8(1)
-const BOX_WEAKEN      = UInt8(2)
-const BOX_COIN        = UInt8(3)
-const BOX_NATIVE_RULE = UInt8(4)
-const BOX_AGENT_LOOP = UInt8(5)
+const BOX_PLAYER_RULE  = UInt8(0)
+const BOX_QUERY        = UInt8(1)
+const BOX_WEAKEN       = UInt8(2)
+const BOX_COIN         = UInt8(3)
+const BOX_NATIVE_RULE  = UInt8(4)
+const BOX_AGENT_LOOP   = UInt8(5)
 const BOX_NESTED_SCHED = UInt8(6)
 
 """
@@ -45,13 +48,15 @@ const BOX_NESTED_SCHED = UInt8(6)
 
 GPU state machine compiled from a `GameSched`.
 
-- `boxes`:           ordered list of boxes (executed sequentially per turn).
-- `wire_names`:      wire index → original wire name (for debugging/decoding).
-- `csps`:            one `CSPProblem` per unique rule.
-- `adhesive_cubes`:  one `AdhesiveCube` per unique rule.
-- `init_wires`:      wire indices that receive the initial world.
-- `trace_wires`:     wire indices that carry the world across iterations.
-- `exit_wires`:      wire indices that signal episode termination.
+- `boxes`:          flat ordered list of boxes (executed sequentially per turn).
+- `wire_names`:     wire index → original wire name (for debugging).
+- `csps`:           one `CSPProblem` per unique rule.
+- `adhesive_cubes`: one `AdhesiveCube` per unique rule.
+- `init_wires`:     wire indices that receive the initial world.
+- `trace_wires`:    wire indices that carry the world across iterations.
+- `exit_wires`:     wire indices that signal episode termination.
+- `box_players`:    player symbol per box (`:_none` for non-player boxes).
+- `sub_schedules`:  sub-schedules used by AGENT_LOOP boxes.
 """
 struct CompiledGPUSched
     boxes           :: Vector{CompiledBox}
@@ -65,78 +70,225 @@ struct CompiledGPUSched
     n_wires         :: Int
     sub_schedules   :: Vector{CompiledGPUSched}
     rules           :: Vector{Any}
+    box_players     :: Vector{Symbol}
     device_boxes    :: Any
     registry        :: DeviceRuleRegistry
 end
 
-"""
-    compile_schedule(gs, world, schema, enc) -> CompiledGPUSched
+# ── Agent-interface helper ──────────────────────────────────────────────────
 
-Walk `gs._steps` (the parsed wiring-diagram body) and produce a
-`CompiledGPUSched`.  Rules are deduplicated by object identity so that a
-single CSP / adhesive cube serves all boxes sharing the same rule.
-"""
-
-function _register_agent_interface!(registry, csps, cubes, rules_list, L, world, schema, enc)
+function _register_agent_interface!(rule_registry, csps, cubes, rules_list,
+                                    L, world, schema, enc; n_chunks::Int=1)
     key = (:interface, objectid(L))
-    if !haskey(registry, key)
-        # Build identity rule wrapping L
-        S = acset_schema(L)
+    if !haskey(rule_registry, key)
+        S   = acset_schema(L)
         cat = Catlab.CategoricalAlgebra.infer_acset_cat(L)
         init = Dict{Symbol, Any}(o => collect(1:nparts(L, o)) for o in ob(S))
         homs = homomorphisms(L, L; cat=cat, initial=init)
         id_L = isempty(homs) ? nothing : first(homs)
         if id_L === nothing
-             # fallback for variable categories where identity is hard to construct
-             # just use codom(left(rule)) logic by mocking a rule
-             # Use a mock that just provides L
-             push!(csps, lower_rule_to_csp((L=L, monic=true), world, schema, enc))
-        push!(rules_list, nothing) # Interface has no DPO rule object
+            push!(csps, lower_rule_to_csp((L=L, monic=true), world, schema, enc;
+                                          n_chunks=n_chunks))
         else
-             # In this context _MockRule and lower_rule_to_csp expect L
-             # but we can just pass L if we update lower_rule_to_csp or a mock
-             push!(csps, lower_rule_to_csp(_MockRule(id_L, id_L, true), world, schema, enc))
+            push!(csps, lower_rule_to_csp(_MockRule(id_L, id_L, true), world, schema, enc;
+                                          n_chunks=n_chunks))
         end
-        push!(cubes, precompute_adhesive_cube(nothing, schema)) # Dummy cube
-        registry[key] = length(csps)
+        push!(rules_list, nothing)
+        push!(cubes, precompute_adhesive_cube(nothing, schema; enc=enc))
+        rule_registry[key] = length(csps)
     end
-    registry[key]
+    rule_registry[key]
 end
 
+# ── Recursive step processor with inlining ─────────────────────────────────
+
+"""
+    _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cubes,
+                    rule_registry, wire_index, wire_set, box_players, sub_schedules,
+                    world, schema, enc; wire_subst, wire_prefix)
+
+Compile `steps` into `boxes`, inlining any non-agent-loop nested `GameSched`
+boxes rather than emitting `BOX_NESTED_SCHED`.
+
+`wire_subst`  maps a wire name used at this level to the global wire name it
+              should resolve to (used for inlining init/ret wire connections).
+`wire_prefix` is prepended to internal wire names to avoid collisions.
+"""
+function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cubes,
+                         rule_registry, wire_index, wire_set, box_players, sub_schedules,
+                         world, schema, enc;
+                         wire_subst  :: Dict{Symbol,Symbol} = Dict{Symbol,Symbol}(),
+                         wire_prefix :: String              = "",
+                         n_chunks    :: Int                 = 1)
+
+    function _w!(name::Symbol)
+        resolved = get(wire_subst, name, nothing)
+        if resolved !== nothing
+            name = resolved
+        elseif !isempty(wire_prefix)
+            name = Symbol(wire_prefix * string(name))
+        end
+        haskey(wire_index, name) && return wire_index[name]
+        push!(wire_set, name)
+        wire_index[name] = length(wire_set)
+        return wire_index[name]
+    end
+
+    function _reg!(app)
+        rule = hasproperty(app, :rule) ? app.rule : app
+        key  = (objectid(rule),
+                hasproperty(app, :in_hom)   ? objectid(app.in_hom)   :
+                hasproperty(app, :in_agent) ? objectid(app.in_agent) : 0)
+        if !haskey(rule_registry, key)
+            push!(csps,           lower_rule_to_csp(app, world, schema, enc;
+                                                    n_chunks=n_chunks))
+            push!(rules_list,     rule)
+            push!(adhesive_cubes, precompute_adhesive_cube(rule, schema; enc=enc))
+            rule_registry[key] = length(csps)
+        end
+        rule_registry[key]
+    end
+
+    # Helper to resolve a step wire name via current substitution / prefix
+    function _resolve_wire(name::Symbol)
+        resolved = get(wire_subst, name, nothing)
+        if resolved !== nothing; return resolved; end
+        isempty(wire_prefix) ? name : Symbol(wire_prefix * string(name))
+    end
+
+    for step in steps
+        box    = all_boxes[step.box]
+        in_w   = UInt16(_w!(first(step.inputs)))
+        out_ws = ntuple(i -> i <= length(step.outputs) ?
+                             UInt16(_w!(step.outputs[i])) : UInt16(0), 4)
+
+        if box isa PlayerRuleApp
+            ridx = _reg!(box)
+            push!(boxes, CompiledBox(BOX_PLAYER_RULE, UInt16(ridx), UInt16(ridx),
+                                     _p_idx(box.player), in_w, out_ws,
+                                     (0f0,0f0,0f0,0f0), UInt16(0)))
+            push!(box_players, box.player)
+
+        elseif box isa GameSched && box._agent_name !== nothing
+            # Agent loop: compile recursively as a sub-schedule
+            sub = compile_schedule(box, world, schema, enc; n_chunks=n_chunks)
+            push!(sub_schedules, sub)
+            sub_idx = UInt16(length(sub_schedules))
+
+            iface_idx = UInt16(0)
+            if box._N !== nothing && haskey(box._N.from_name, string(box._agent_name))
+                iface = box._N[string(box._agent_name)]
+                iface_idx = UInt16(_register_agent_interface!(rule_registry, csps,
+                                                              adhesive_cubes, rules_list,
+                                                              iface, world, schema, enc;
+                                                              n_chunks=n_chunks))
+            end
+
+            push!(boxes, CompiledBox(BOX_AGENT_LOOP, iface_idx, UInt16(0),
+                                     _p_idx(box._agent_name), in_w, out_ws,
+                                     (0f0,0f0,0f0,0f0), sub_idx))
+            push!(box_players, box._agent_name)
+
+        elseif box isa GameSched && box._agent_name === nothing
+            # Inline the sub-schedule by building a wire substitution map
+            sub_subst = copy(wire_subst)
+
+            for (i, init_n) in enumerate(box._init_names)
+                parent_w = i <= length(step.inputs) ? step.inputs[i] : init_n
+                sub_subst[init_n] = _resolve_wire(parent_w)
+            end
+            for (i, ret_n) in enumerate(box._ret_names)
+                parent_w = i <= length(step.outputs) ? step.outputs[i] : ret_n
+                sub_subst[ret_n] = _resolve_wire(parent_w)
+            end
+            for trace_n in box._trace_names
+                sub_subst[trace_n] = Symbol(wire_prefix * string(step.box) * "__trace_" * string(trace_n))
+            end
+
+            new_prefix = wire_prefix * string(step.box) * "__"
+            _process_steps!(box._steps, box._all_boxes, boxes, csps, rules_list,
+                             adhesive_cubes, rule_registry, wire_index, wire_set,
+                             box_players, sub_schedules, world, schema, enc;
+                             wire_subst=sub_subst, wire_prefix=new_prefix,
+                             n_chunks=n_chunks)
+
+        elseif hasproperty(box, :rule) ||
+               (box isa AlgebraicRewriting.Schedules.RuleApps.RuleApp)
+            ridx = _reg!(box)
+            push!(boxes, CompiledBox(BOX_NATIVE_RULE, UInt16(ridx), UInt16(ridx),
+                                     _p_idx(:_none), in_w, out_ws,
+                                     (0f0,0f0,0f0,0f0), UInt16(0)))
+            push!(box_players, :_none)
+
+        else
+            # Utility box (MergeWires, Coin, etc.): emit one BOX_WEAKEN per input
+            # to correctly implement "take first active input" semantics.
+            for in_name in step.inputs
+                iw = UInt16(_w!(in_name))
+                push!(boxes, CompiledBox(BOX_WEAKEN, UInt16(0), UInt16(0),
+                                         _p_idx(:_none), iw, out_ws,
+                                         (0f0,0f0,0f0,0f0), UInt16(0)))
+                push!(box_players, :_none)
+            end
+        end
+    end
+end
+
+# ── Top-level compile_schedule ──────────────────────────────────────────────
+
+"""
+    compile_schedule(gs, world, schema, enc) -> CompiledGPUSched
+
+Compile a `GameSched` to a flat `CompiledGPUSched` suitable for GPU execution.
+Nested non-agent-loop sub-schedules are inlined; agent-loop sub-schedules are
+kept as recursive sub-schedules.
+"""
 function compile_schedule(gs::GameSched, world,
-                          schema::SchemaInfo,
-                          enc::AttributeEncoder)::CompiledGPUSched
-    if _p_idx(gs._agent_name) !== nothing
-        # Wrap the steps in an AGENT_LOOP by creating a virtual schedule
-        # First compile the inner schedule (without the agent name)
+                           schema::SchemaInfo,
+                           enc::AttributeEncoder;
+                           n_chunks::Int = 1)::CompiledGPUSched
+
+    # ── Agent-loop top-level wrapping ────────────────────────────────────────
+    if gs._agent_name !== nothing
         inner_gs = GameSched(gs._inner, gs._player_map, gs._all_boxes, gs._steps,
                              gs._init_names, gs._trace_names, gs._ret_names,
-                             gs._trace_args, gs._init_args, gs._body, gs._N, nothing, gs.cat)
-        sub = compile_schedule(inner_gs, world, schema, enc)
-        
-        # Now build the wrapper
-        wire_set = [:_init, :_exit]
+                             gs._trace_args, gs._init_args, gs._body, gs._N,
+                             nothing, gs.cat)
+        sub = compile_schedule(inner_gs, world, schema, enc; n_chunks=n_chunks)
+
+        wire_set   = [:_init, :_exit]
         wire_index = Dict(:_init => 1, :_exit => 2)
-        
-        interface = gs._N[string(_p_idx(gs._agent_name))]
-        csps = CSPProblem[]
+
+        csps           = CSPProblem[]
         adhesive_cubes = AdhesiveCube[]
-        rules_list = Any[]
-        iface_idx = _register_agent_interface!(Dict(), csps, adhesive_cubes, rules_list,
-                                               interface, world, schema, enc)
-        
-        # Note: sub-schedule out-wires need to map back to parent if needed,
-        # but for top-level agent loop we just fire exit.
-        box = CompiledBox(BOX_AGENT_LOOP, UInt16(iface_idx), UInt16(0),
-                          _p_idx(gs._agent_name), UInt16(1), (UInt16(2), UInt16(0), UInt16(0), UInt16(0)),
-                          (0f0, 0f0, 0f0, 0f0), UInt16(1))
-        
-        return CompiledGPUSched([box], wire_set, wire_index, csps, adhesive_cubes,
-                                 [1], Int[], [2], 2, [sub], rules_list, CuArray(boxes), _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
+        rules_list     = Any[]
+        rule_registry  = Dict{Any, Int}()
+
+        iface_idx = UInt16(0)
+        if gs._N !== nothing && haskey(gs._N.from_name, string(gs._agent_name))
+            iface = gs._N[string(gs._agent_name)]
+            iface_idx = UInt16(_register_agent_interface!(rule_registry, csps,
+                                                          adhesive_cubes, rules_list,
+                                                          iface, world, schema, enc;
+                                                          n_chunks=n_chunks))
+        end
+
+        box = CompiledBox(BOX_AGENT_LOOP, iface_idx, UInt16(0),
+                          _p_idx(gs._agent_name), UInt16(1),
+                          (UInt16(2), UInt16(0), UInt16(0), UInt16(0)),
+                          (0f0,0f0,0f0,0f0), UInt16(1))
+
+        device_boxes = isempty([box]) ? CUDA.zeros(UInt8, 0) : CuArray([box])
+        return CompiledGPUSched(
+            [box], wire_set, wire_index, csps, adhesive_cubes,
+            [1], Int[], [2], 2, [sub], rules_list, [gs._agent_name],
+            device_boxes,
+            _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
     end
-    # ── 1. Collect and index all wires ────────────────────────────────────────
-    wire_set = Symbol[]
-    wire_index = Dict{Symbol,Int}()
+
+    # ── 1. Global wire index ─────────────────────────────────────────────────
+    wire_set   = Symbol[]
+    wire_index = Dict{Symbol, Int}()
 
     function _wire!(name::Symbol)
         haskey(wire_index, name) && return wire_index[name]
@@ -145,101 +297,40 @@ function compile_schedule(gs::GameSched, world,
         return wire_index[name]
     end
 
-    for step in gs._steps
-        for w in step.inputs;  _wire!(w); end
-        for w in step.outputs; _wire!(w); end
-    end
     for w in gs._init_names;  _wire!(w); end
     for w in gs._trace_names; _wire!(w); end
     for w in gs._ret_names;   _wire!(w); end
 
-    # ── 2. Compile unique rules (CSP + adhesive cube) ─────────────────────────
-    rule_registry = Dict{Any, Int}()   # rule object_id → csp index
+    # ── 2. Rule registry ──────────────────────────────────────────────────────
+    rule_registry  = Dict{Any, Int}()
     csps           = CSPProblem[]
     rules_list     = Any[]
     adhesive_cubes = AdhesiveCube[]
 
-    function _register_rule!(app)
-        rule = hasproperty(app, :rule) ? app.rule : app
-        key = (objectid(rule), hasproperty(app, :in_hom) ? objectid(app.in_hom) : (hasproperty(app, :in_agent) ? objectid(app.in_agent) : 0))
-        if !haskey(rule_registry, key)
-            push!(csps,           lower_rule_to_csp(app, world, schema, enc))
-            push!(rules_list,     rule)
-            push!(adhesive_cubes, precompute_adhesive_cube(rule, schema))
-            rule_registry[key] = length(csps)
-        end
-        rule_registry[key]
-    end
-
-    # Pre-register all PlayerRuleApp rules
+    # Pre-register all PlayerRuleApp rules (ensures stable ordering)
     all_pras = _collect_player_apps(gs)
     for (_, pra) in all_pras
-        _register_rule!(pra)
-    end
-
-    # ── 3. Compile each BoxStep ───────────────────────────────────────────────
-    boxes = CompiledBox[]
-    sub_schedules = CompiledGPUSched[]
-
-    for step in gs._steps
-        box    = gs._all_boxes[step.box]
-        in_w   = UInt16(_wire!(first(step.inputs)))
-        out_ws = ntuple(i -> i <= length(step.outputs) ?
-                             UInt16(_wire!(step.outputs[i])) : UInt16(0), 4)
-
-        if box isa PlayerRuleApp
-            ridx = _register_rule!(box)
-            push!(boxes, CompiledBox(BOX_PLAYER_RULE, UInt16(ridx), UInt16(ridx),
-                                     _p_idx(box.player), in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
-
-        elseif box isa GameSched
-            if _p_idx(box._agent_name) !== nothing
-                # Agent loop: compile recursively as a sub-schedule
-                sub = compile_schedule(box, world, schema, enc)
-                push!(sub_schedules, sub)
-                
-                # Find interface for agent loop
-                interface = nothing
-                if box._N !== nothing && haskey(box._N.from_name, string(_p_idx(box._agent_name)))
-                    interface = box._N[string(_p_idx(box._agent_name))]
-                end
-                
-                if interface !== nothing
-                    iface_idx = _register_agent_interface!(rule_registry, csps, adhesive_cubes, rules_list, 
-                                                           interface, world, schema, enc)
-                    push!(boxes, CompiledBox(BOX_AGENT_LOOP, UInt16(iface_idx), UInt16(0),
-                                             _p_idx(box._agent_name), in_w, out_ws,
-                                             (0f0, 0f0, 0f0, 0f0),
-                                             UInt16(length(sub_schedules))))
-                else
-                    push!(boxes, CompiledBox(BOX_AGENT_LOOP, UInt16(0), UInt16(0),
-                                             _p_idx(box._agent_name), in_w, out_ws,
-                                             (0f0, 0f0, 0f0, 0f0),
-                                             UInt16(length(sub_schedules))))
-                end
-            else
-                # Plain nested schedule: compile as sub-schedule
-                sub = compile_schedule(box, world, schema, enc)
-                push!(sub_schedules, sub)
-                push!(boxes, CompiledBox(BOX_NESTED_SCHED, UInt16(0), UInt16(0),
-                                         _p_idx(:_none), in_w, out_ws,
-                                         (0f0, 0f0, 0f0, 0f0),
-                                         UInt16(length(sub_schedules))))
-            end
-        elseif hasproperty(box, :rule) || (box isa AlgebraicRewriting.Schedules.RuleApps.RuleApp)
-            ridx = _register_rule!(box)
-            push!(boxes, CompiledBox(BOX_NATIVE_RULE, UInt16(ridx), UInt16(ridx),
-                                     _p_idx(:_none), in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
-        else
-            # Utility box (merge_wires, etc.) — wire pass-through
-            push!(boxes, CompiledBox(BOX_WEAKEN, UInt16(0), UInt16(0),
-                                     _p_idx(:_none), in_w, out_ws,
-                                     (0f0, 0f0, 0f0, 0f0), UInt16(0)))
+        rule = pra.rule
+        key  = (objectid(rule), objectid(pra.in_hom))
+        if !haskey(rule_registry, key)
+            push!(csps,           lower_rule_to_csp(pra, world, schema, enc;
+                                                    n_chunks=n_chunks))
+            push!(rules_list,     rule)
+            push!(adhesive_cubes, precompute_adhesive_cube(rule, schema; enc=enc))
+            rule_registry[key] = length(csps)
         end
     end
 
+    # ── 3. Compile steps (with inlining) ──────────────────────────────────────
+    boxes         = CompiledBox[]
+    box_players   = Symbol[]
+    sub_schedules = CompiledGPUSched[]
+
+    _process_steps!(gs._steps, gs._all_boxes, boxes, csps, rules_list, adhesive_cubes,
+                    rule_registry, wire_index, wire_set, box_players, sub_schedules,
+                    world, schema, enc; n_chunks=n_chunks)
+
+    # ── 4. Compute control wire sets ──────────────────────────────────────────
     init_wires  = [wire_index[w] for w in gs._init_names  if haskey(wire_index, w)]
     trace_wires = [wire_index[w] for w in gs._trace_names if haskey(wire_index, w)]
     n_ret       = length(gs._ret_names)
@@ -248,9 +339,13 @@ function compile_schedule(gs::GameSched, world,
                    for i in (n_trace+1):n_ret
                    if haskey(wire_index, gs._ret_names[i])]
 
-    CompiledGPUSched(boxes, wire_set, wire_index,
-                     csps, adhesive_cubes,
-                     init_wires, trace_wires, exit_wires,
-                     length(wire_set), sub_schedules,
-                     rules_list, CuArray(boxes), _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
+    device_boxes = isempty(boxes) ? CUDA.zeros(UInt8, 0) : CuArray(boxes)
+    CompiledGPUSched(
+        boxes, wire_set, wire_index,
+        csps, adhesive_cubes,
+        init_wires, trace_wires, exit_wires,
+        length(wire_set), sub_schedules,
+        rules_list, box_players,
+        device_boxes,
+        _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
 end

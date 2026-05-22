@@ -51,7 +51,15 @@ import Catlab.CategoricalAlgebra:
 import Catlab.CategoricalAlgebra: left, right
 
 import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
-                     select_action, _collect_player_apps
+                     select_action, _collect_player_apps,
+                     AbstractGPUPlayer, GPUFunctionPlayer, select_action_gpu
+
+# ── GPU player dispatch ───────────────────────────────────────────────────────
+
+function RewriteGames.select_action_gpu(p::GPUFunctionPlayer, g, enc, schema,
+                                         cands, n_sols::Int, turn::Int)::Int
+    clamp(Int(p.f(g, cands, n_sols, turn)), 1, max(n_sols, 1))
+end
 
 # ── Lowering layer ────────────────────────────────────────────────────────────
 include("lowering/SchemaInfo.jl")
@@ -60,6 +68,7 @@ include("lowering/DeviceData.jl")
 include("lowering/FlattenRegistry.jl")
 include("lowering/AttributeEncoder.jl")
 include("solver/TCNBytecode.jl")        # TCNBytecode needed by CSPLowering
+include("solver/BitwiseDomain.jl")      # multi-chunk bitset helpers
 include("lowering/CSPLowering.jl")
 include("lowering/AdhesiveCubes.jl")
 include("lowering/ScheduleCompiler.jl")
@@ -118,36 +127,63 @@ function RewriteGames.gpu_run_game_sched!(
     agents        :: Dict;
     backend                                                    = CUDA.CUDABackend(),
     T_max         :: Int                                       = 1000,
-    terminal      :: Function                                  = (W) -> (false, nothing),
+    terminal      :: Function                                  = _DEFAULT_TERMINAL,
     winner_wires  :: Dict{Symbol, Union{Symbol,Nothing}}       =
                         Dict{Symbol,Union{Symbol,Nothing}}(),
     log_trajectory :: Bool                                     = false,
     compact_every  :: Int                                      = 100,
+    discretizers  :: Dict{Symbol, Pair{Function,Function}}    = Dict{Symbol,Pair{Function,Function}}(),
+    max_world_size :: Union{Int,Nothing}                       = nothing,
 )::Vector{Experience}
 
     # ── Phase 1: Host-side compilation ────────────────────────────────────────
-    schema = extract_schema_info(initial_world)
-    enc    = build_encoder(initial_world, schema)
-    sched  = compile_schedule(gs, initial_world, schema, enc)
+    schema   = extract_schema_info(initial_world)
+    enc      = build_encoder(initial_world, schema; discretizers = discretizers)
+    max_n    = isempty(schema.obj_types) ? 1 :
+               maximum(nparts(initial_world, o) for o in schema.obj_types; init=1)
+    # MAX_CHUNKS = 4 limits the solver kernel to 256 elements per type.
+    # Clamp here so nc never exceeds what the MVector{MAX_CHUNKS} can index.
+    n_chunks = min(cld(max(max_world_size !== nothing ? max_world_size : max_n, 1), 64),
+                   MAX_CHUNKS)
+    sched    = compile_schedule(gs, initial_world, schema, enc; n_chunks=n_chunks)
 
-    # ── Upload initial world to GPU ───────────────────────────────────────────
-    g = upload_acset(initial_world, schema, enc)
-
+    # ── Phase 2: Upload initial world to GPU ─────────────────────────────────
+    g          = upload_acset(initial_world, schema, enc)
     world_type = typeof(initial_world)
 
-    # ── Build scheduler state ─────────────────────────────────────────────────
+    # ── Phase 3: Build scheduler state ───────────────────────────────────────
     state = GPUSchedulerState(sched, g, schema, enc, world_type, agents;
                               log_trajectory = log_trajectory,
                               compact_every  = compact_every)
 
     # ── Phase 4: Execute on GPU ───────────────────────────────────────────────
-    run_gpu_schedule!(state;
-                      T_max        = T_max,
-                      terminal_fn  = terminal,
-                      winner_wires = winner_wires)
+    gpu_events = run_gpu_schedule!(state;
+                                   T_max        = T_max,
+                                   terminal_fn  = terminal,
+                                   winner_wires = winner_wires)
 
     # ── Phase 5: Decode results ───────────────────────────────────────────────
-    reconstruct_experiences(state.step_log, schema, enc, world_type, agents)
+    # state.g is updated after each rewrite; download the final world from it
+    final_world = download_acset(state.g, enc, world_type)
+
+    exps = Experience[]
+    for ev in gpu_events
+        bidx = Int(ev.box_idx)
+        1 <= bidx <= length(sched.boxes) || continue
+        player = sched.box_players[bidx]
+        player == :_none && continue
+
+        turn_n     = Int(ev.turn)
+        state_pre  = GameState(initial_world, turn_n)
+        state_post = GameState(final_world, turn_n + 1)
+
+        push!(exps, Experience(
+            player, state_pre, Action[], nothing,
+            state_post, false, nothing,
+            Dict{Symbol,Any}(), Symbol[], nothing,
+        ))
+    end
+    exps
 end
 
 """
@@ -167,12 +203,15 @@ function RewriteGames.turbo_homomorphisms(L, G;
                            monic   = false,
                            initial :: Union{Nothing, NamedTuple, Dict} = nothing)
 
-    schema = extract_schema_info(G)
-    enc    = build_encoder(G, schema)
+    schema   = extract_schema_info(G)
+    enc      = build_encoder(G, schema)
+    max_n    = isempty(schema.obj_types) ? 1 :
+               maximum(nparts(G, o) for o in schema.obj_types)
+    n_chunks = cld(max(max_n, 1), 64)
 
     # Build a mock rule wrapping L so lower_rule_to_csp can access left(rule)
     mock_rule = _make_identity_rule(L, monic)
-    csp = lower_rule_to_csp(mock_rule, G, schema, enc)
+    csp = lower_rule_to_csp(mock_rule, G, schema, enc; n_chunks=n_chunks)
 
     g_offset = Dict{Symbol,Int}()
     cursor = 0
@@ -229,16 +268,22 @@ Catlab.CategoricalAlgebra.left(r::_MockRule)  = r._left
 Catlab.CategoricalAlgebra.right(r::_MockRule) = r._right
 
 function _init_domains_from_world(csp::CSPProblem, G, schema::SchemaInfo)
-    domains = zeros(UInt64, Int(csp.n_vars))
-    for v in 1:Int(csp.n_vars)
-        n = Int(csp.domain_sizes[v])
-        mask = n < 64 ? (UInt64(1) << n) - UInt64(1) : typemax(UInt64)
-        domains[v] = mask
+    nc = csp.n_chunks
+    nv = Int(csp.n_vars)
+    domains = zeros(UInt64, nv * nc)
+    for v in 1:nv
+        n   = Int(csp.domain_sizes[v])
+        off = (v - 1) * nc
+        for i in 1:min(n, nc * 64)
+            ci, bi = elem_to_chunk(i)
+            ci <= nc && (domains[off + ci] |= UInt64(1) << bi)
+        end
     end
     domains
 end
 
-function _apply_attr_masks_world!(domains, csp, G, schema, enc)
+function _apply_attr_masks_world!(domains::Vector{UInt64}, csp, G, schema, enc)
+    nc = csp.n_chunks
     for bc in csp.bytecodes
         bc.op != PROP_ATTR_EQ && continue
         v     = Int(bc.var1)
@@ -247,16 +292,20 @@ function _apply_attr_masks_world!(domains, csp, G, schema, enc)
         a     = schema.attrs[a_idx]
         owner = schema.attr_dom[a]
         n     = nparts(G, owner)
-        mask  = UInt64(0)
-        for i in 1:min(n, 63)
+        mask  = zeros(UInt64, nc)
+        for i in 1:min(n, nc * 64)
             raw = subpart(G, i, a)
-            encode_value(enc, a, raw) == req && (mask |= UInt64(1) << (i-1))
+            encode_value(enc, a, raw) == req || continue
+            ci, bi = elem_to_chunk(i)
+            ci <= nc && (mask[ci] |= UInt64(1) << bi)
         end
-        domains[v] &= mask
+        off = (v - 1) * nc
+        for c in 1:nc; domains[off + c] &= mask[c]; end
     end
 end
 
-function _pin_initial!(domains, initial, csp, G, schema)
+function _pin_initial!(domains::Vector{UInt64}, initial, csp, G, schema)
+    nc = csp.n_chunks
     entries = initial isa NamedTuple ? pairs(initial) :
               initial isa Dict       ? pairs(initial) : ()
     for (obj, mapping) in entries
@@ -265,17 +314,23 @@ function _pin_initial!(domains, initial, csp, G, schema)
         if mapping isa AbstractVector
             for (i, tgt) in enumerate(mapping)
                 tgt == 0 && continue
-                tgt > 63 && continue
                 v = base + (i - 1)
                 v > Int(csp.n_vars) && continue
-                domains[v] = UInt64(1) << (tgt - 1)
+                ci, bi = elem_to_chunk(tgt)
+                ci > nc && continue
+                off = (v - 1) * nc
+                for c in 1:nc; domains[off + c] = UInt64(0); end
+                domains[off + ci] = UInt64(1) << bi
             end
         elseif mapping isa Dict
             for (src, tgt) in mapping
-                tgt > 63 && continue
                 v = base + (src - 1)
                 v > Int(csp.n_vars) && continue
-                domains[v] = UInt64(1) << (tgt - 1)
+                ci, bi = elem_to_chunk(tgt)
+                ci > nc && continue
+                off = (v - 1) * nc
+                for c in 1:nc; domains[off + c] = UInt64(0); end
+                domains[off + ci] = UInt64(1) << bi
             end
         end
     end

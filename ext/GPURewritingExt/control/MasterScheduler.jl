@@ -1,14 +1,7 @@
 using CUDA
 using Random
 
-# --- Device-side Constants ---
-const BOX_PLAYER_RULE  = UInt8(0)
-const BOX_QUERY        = UInt8(1)
-const BOX_WEAKEN       = UInt8(2)
-const BOX_COIN         = UInt8(3)
-const BOX_NATIVE_RULE  = UInt8(4)
-const BOX_AGENT_LOOP   = UInt8(5)
-const BOX_NESTED_SCHED = UInt8(6)
+# BOX_* constants are defined in ScheduleCompiler.jl
 
 # Device-side Xoshiro128Plus state
 struct XoshiroState
@@ -42,6 +35,8 @@ struct GpuRewriteEvent
     box_idx :: Int32
     success :: Bool
 end
+
+Base.zero(::Type{GpuRewriteEvent}) = GpuRewriteEvent(Int32(0), Int32(0), false)
 
 # --- Native Matching & Rewriting Helpers ---
 
@@ -135,7 +130,7 @@ function master_scheduler_kernel(boxes, wire_active, n_wires,
                         end
                         
                         # Log event
-                        ev_idx = CUDA.atomic_add!(n_events_ref, Int32(1)) + Int32(1)
+                        ev_idx = CUDA.atomic_add!(pointer(n_events_ref, 1), Int32(1)) + Int32(1)
                         if ev_idx <= length(event_log)
                             event_log[ev_idx] = GpuRewriteEvent(Int32(iter), Int32(b_idx), true)
                         end

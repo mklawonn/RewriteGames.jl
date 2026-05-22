@@ -5,43 +5,11 @@ For a match `m : L → G`, the elements of `L` that are not in the image of
 `K → L` must be deleted from `G`.  In DPO mode this is simply a flag flip;
 in SPO mode foreign-key chains are additionally cascaded.
 
-The `dangling_check_kernel!` must be called (and its output inspected) before
-`dpo_deletion_kernel!` to ensure the match satisfies the dangling condition.
+`build_to_del_mask`      — builds the flat deletion bitmask on the host.
+`gpu_dangling_ok`        — checks the dangling condition entirely on GPU.
+`dpo_deletion_kernel!`   — clears active flags in-place (GPU).
+`spo_cascade_kernel!`    — cascades deletions through FK chains (GPU).
 """
-
-# ── Dangling condition check ──────────────────────────────────────────────────
-
-@kernel function dangling_check_kernel!(
-    active      :: AbstractVector{Bool},      # current element active flags (all types)
-    hom_data    :: AbstractMatrix{Int32},     # [max_n × n_homs] foreign key table
-    hom_offsets :: AbstractVector{Int32},     # start offset per morphism in flat layout
-    hom_sizes   :: AbstractVector{Int32},     # element count per morphism domain type
-    match       :: AbstractVector{Int32},     # flat match: L-variable → G-element
-    to_del_mask :: AbstractVector{Bool},      # true if this L-element is being deleted
-    n_del       :: Int,
-    valid       :: AbstractVector{Bool}       # output: match satisfies dangling cond?
-)
-    inst = @index(Global, Linear)
-    if inst == 1   # single-instance check
-        ok = true
-        for h_idx in 1:length(hom_offsets)
-            off  = Int(hom_offsets[h_idx])
-            n_h  = Int(hom_sizes[h_idx])
-            src  = 1
-            while ok && src <= n_h
-                if active[off + src]
-                    tgt = hom_data[src, h_idx]
-                    if tgt != 0 && active[tgt] && to_del_mask[tgt]
-                        ok = false
-                    end
-                end
-                src += 1
-            end
-            ok || break
-        end
-        valid[1] = ok
-    end
-end
 
 # ── DPO deletion ──────────────────────────────────────────────────────────────
 
@@ -51,7 +19,9 @@ end
 )
     i = @index(Global, Linear)
     if i <= length(active)
-        to_del[i] && (active[i] = false)
+        if to_del[i]
+            active[i] = false
+        end
     end
 end
 
@@ -72,27 +42,85 @@ end
     end
 end
 
-# ── Host-side helper: compute the to_del mask on CPU, upload to GPU ───────────
+# ── Parallel dangling-condition check ─────────────────────────────────────────
 
 """
-    build_to_del_mask(match, cube, schema, g) -> (CuVector{Bool}, Bool)
+Per-hom GPU kernel: each active, non-deleted source element checks whether
+its FK target is being deleted.  Writes 1 into `results[i]` on violation.
+No atomics — each thread owns its own output slot.
+"""
+@kernel function dangling_check_per_hom_kernel!(
+    results    :: AbstractVector{Bool},
+    active_src :: AbstractVector{Bool},
+    fk         :: AbstractVector{Int32},
+    to_del_src :: AbstractVector{Bool},
+    to_del_tgt :: AbstractVector{Bool},
+)
+    i = @index(Global, Linear)
+    if i <= length(active_src)
+        if active_src[i] && !to_del_src[i]
+            tgt = Int(fk[i])
+            if tgt != 0 && tgt <= length(to_del_tgt) && to_del_tgt[tgt]
+                results[i] = true
+            end
+        end
+    end
+end
 
-Build a flat Boolean mask over all G-elements indicating which are deleted by
-the rewrite.  Also performs the dangling condition check on the host (fast
-path for single-match execution).
+"""
+    gpu_dangling_ok(to_del, g, schema, backend) -> Bool
 
-Returns `(mask, dangling_ok)` where `dangling_ok` is false if the match
-violates the dangling condition under DPO.
+Check the DPO dangling condition entirely on GPU.  For each schema morphism,
+launch `dangling_check_per_hom_kernel!` and reduce the result with `sum`.
+Returns `true` if the match is safe (no dangling edges).
+"""
+function gpu_dangling_ok(to_del::CuVector{Bool}, g::GPUACSet,
+                          schema::SchemaInfo, backend)::Bool
+    g_off = Dict{Symbol, Int}()
+    cursor = 0
+    for o in schema.obj_types
+        g_off[o] = cursor
+        cursor += g.n_alloc[o]
+    end
+
+    for h in schema.homs
+        src_type = schema.hom_dom[h]
+        tgt_type = schema.hom_cod[h]
+        n_src = g.n_alloc[src_type]
+        n_tgt = g.n_alloc[tgt_type]
+        (n_src == 0 || n_tgt == 0) && continue
+
+        to_del_src = to_del[g_off[src_type]+1 : g_off[src_type]+n_src]
+        to_del_tgt = to_del[g_off[tgt_type]+1 : g_off[tgt_type]+n_tgt]
+
+        results = CUDA.zeros(Bool, n_src)
+        dangling_check_per_hom_kernel!(backend, 256)(
+            results, g.active[src_type], g.homs[h],
+            to_del_src, to_del_tgt; ndrange=n_src)
+        KernelAbstractions.synchronize(backend)
+        Int(sum(results)) > 0 && return false
+    end
+    true
+end
+
+# ── Host-side helper: build the to_del mask ───────────────────────────────────
+
+"""
+    build_to_del_mask(match, cube, schema, g) -> CuVector{Bool}
+
+Build a flat Boolean mask over all G-elements indicating which are deleted
+by the rewrite.  The mask is computed on the host from the match and cube
+(no GPU download needed), then uploaded.
+
+Use `gpu_dangling_ok` afterwards to check the dangling condition on GPU.
 """
 function build_to_del_mask(match::Vector{Int32},
                            cube::AdhesiveCube,
                            schema::SchemaInfo,
-                           g::GPUACSet)::Tuple{CuVector{Bool}, Bool}
-    # Compute total G-element count (flat layout matching GPUACSet order)
+                           g::GPUACSet)::CuVector{Bool}
     total = sum(g.n_alloc[o] for o in schema.obj_types; init=0)
     to_del_host = zeros(Bool, total)
 
-    # Flat offset into G-element space per object type
     g_offset = Dict{Symbol, Int}()
     cursor = 0
     for o in schema.obj_types
@@ -100,38 +128,14 @@ function build_to_del_mask(match::Vector{Int32},
         cursor += g.n_alloc[o]
     end
 
-    # Mark deleted elements: L-elements not in image(K → L)
     k_img_l = Set{Int}(Int(x) for x in cube.k_to_l)
     for (flat_l, l_type_idx) in enumerate(cube.l_types)
-        flat_l ∈ k_img_l && continue   # preserved by K
+        flat_l ∈ k_img_l && continue
         g_elem = Int(match[flat_l])
         g_elem == 0 && continue
         o = schema.obj_types[l_type_idx]
         to_del_host[g_offset[o] + g_elem] = true
     end
 
-    # Dangling check: for every active source pointing to a to-be-deleted target,
-    # the match violates DPO.
-    dangling_ok = true
-    for h in schema.homs
-        owner = schema.hom_dom[h]
-        fk    = Array(g.homs[h])
-        act   = Array(g.active[owner])
-        off_o = g_offset[owner]
-        off_c = g_offset[schema.hom_cod[h]]
-        for (src_local, (alive, tgt)) in enumerate(zip(act, fk))
-            alive || continue
-            tgt == 0 && continue
-            src_flat = off_o + src_local
-            to_del_host[src_flat] && continue  # source is also deleted — ok
-            tgt_flat = off_c + Int(tgt)
-            if to_del_host[tgt_flat]
-                dangling_ok = false
-                break
-            end
-        end
-        dangling_ok || break
-    end
-
-    CuArray(to_del_host), dangling_ok
+    CuArray(to_del_host)
 end

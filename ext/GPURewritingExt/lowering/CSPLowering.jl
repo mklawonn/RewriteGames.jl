@@ -10,6 +10,8 @@ Fields:
 - `bytecodes`:   Constraint packets in execution order.
 - `nac_groups`:  Number of distinct NAC groups (0 if no NACs).
 - `pac_groups`:  Number of distinct PAC groups (0 if no PACs).
+- `n_chunks`:    Number of UInt64 words per domain variable (= ceil(max_world_size/64)).
+- `hom_forward`: `hom_forward[h][(w-1)*n_chunks + c]` = chunk c of h(w)'s bitmask.
 """
 struct CSPProblem
     n_vars        :: Int32
@@ -19,6 +21,8 @@ struct CSPProblem
     nac_groups    :: Int32
     pac_groups    :: Int32
     agent_var_map :: Vector{Int32}       # mapping from agent interface elements to L variables
+    hom_forward   :: Vector{Vector{UInt64}}
+    n_chunks      :: Int                 # number of UInt64 words per domain variable
 end
 
 """
@@ -40,7 +44,9 @@ Bytecodes emitted (in order):
 6. `PAC_REIF`     — one per constraint in each positive application condition.
 """
 function lower_rule_to_csp(rule, world, schema::SchemaInfo,
-                            enc::AttributeEncoder)::CSPProblem
+                            enc::AttributeEncoder;
+                            n_chunks::Int = cld(max(1, isempty(schema.obj_types) ? 1 :
+                                maximum(nparts(world, o) for o in schema.obj_types)), 64))::CSPProblem
     
     
     # Extract underlying AlgebraicRewriting rule if we were passed a box
@@ -129,7 +135,11 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
     end
 
     # ── 6. PROP_NEQ: monic constraints (all distinct within each type) ─────────
-    if hasproperty(rule, :monic) && rule.monic === true
+    # Check both the outer wrapper (PlayerRuleApp) and the inner AlgebraicRewriting rule
+    _monic_src = hasproperty(rule, :monic) ? rule :
+                 hasproperty(inner_rule, :monic) ? inner_rule : nothing
+    _monic = _monic_src !== nothing ? _monic_src.monic : false
+    if _monic === true
         for o in schema.obj_types
             cnt = nparts(L, o)
             cnt == 0 && continue
@@ -139,8 +149,8 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
                       tcn(PROP_NEQ; var1=base+(i-1), var2=base+(j-1)))
             end
         end
-    elseif hasproperty(rule, :monic) && rule.monic isa AbstractVector
-        for o in rule.monic
+    elseif _monic isa AbstractVector
+        for o in _monic
             haskey(var_offset, o) || continue
             cnt = nparts(L, o)
             base = var_offset[o]
@@ -197,8 +207,25 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         end
     end
 
+    # ── Precompute world hom forward bitmasks for PROP_FUNC propagation ─────
+    # hom_forward[h][(w-1)*n_chunks + c] = chunk c of bitmask for element w.
+    nc = n_chunks
+    hom_forward = Vector{UInt64}[]
+    for h in schema.homs
+        nA = nparts(world, schema.hom_dom[h])
+        fwd = zeros(UInt64, max(nA, 1) * nc)
+        for w in 1:nA
+            target = subpart(world, w, h)
+            if target > 0
+                ci, bi = elem_to_chunk(target)
+                ci <= nc && (fwd[(w-1)*nc + ci] |= UInt64(1) << bi)
+            end
+        end
+        push!(hom_forward, fwd)
+    end
+
     CSPProblem(Int32(n_vars), var_offset, domain_sizes, bytecodes,
-               nac_count, pac_count, agent_var_map)
+               nac_count, pac_count, agent_var_map, hom_forward, nc)
 end
 
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)

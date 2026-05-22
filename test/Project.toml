@@ -1,5 +1,7 @@
 [deps]
 AlgebraicRewriting = "725a01d3-f174-5bbd-84e1-b9417bad95d9"
-Catlab = "134e5e36-593f-5add-ad60-77f754baafbe"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Catlab = "134e5e36-593f-5add-ad60-77f754baafbe"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+RewriteGames = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

@@ -7,11 +7,13 @@ function _build_device_registry(rules_list, csps, cubes, schema, enc)
     # ── 1. Flatten CSP Bytecodes ─────────────────────────────────────────────
     all_bytecodes = TCNBytecode[]
     csp_offsets   = zeros(Int32, n_rules)
+    csp_lens      = zeros(Int32, n_rules)
     csp_n_vars    = zeros(Int32, n_rules)
 
     for i in 1:n_rules
         csp_offsets[i] = length(all_bytecodes)
         append!(all_bytecodes, csps[i].bytecodes)
+        csp_lens[i]    = length(csps[i].bytecodes)
         csp_n_vars[i]  = csps[i].n_vars
     end
 
@@ -97,6 +99,7 @@ function _build_device_registry(rules_list, csps, cubes, schema, enc)
     DeviceRuleRegistry(
         CuArray(all_bytecodes),
         CuArray(csp_offsets),
+        CuArray(csp_lens),
         CuArray(csp_n_vars),
         CuArray(vec(rhs_n_add)),
         CuArray(all_hom_data),

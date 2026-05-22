@@ -1,148 +1,222 @@
 """
-DPO pushout — GPU addition phase (Prealloc-Combine strategy).
+DPO pushout — GPU addition phase.
 
-New elements introduced by `R \\ K` are added to the GPU ACSet using a
-two-pass strategy:
-  1. **Prefix-sum prealloc**: count new elements per type, compute cumulative
-     offsets to find where each new element will live.
-  2. **Parallel scatter**: threads concurrently write FK and attribute columns
-     for the new elements into the preallocated slots.
+`apply_pushout!` adds R\\K elements to the GPUACSet using GPU scatter-write
+kernels.  Arrays use 2× over-allocation so that additions within the spare
+capacity require no reallocation.
+
+`_update_preserved!` patches attributes and FKs of K elements that differ
+in R, also via GPU scatter writes.
+
+All indices in `match` are GPU-local (1-based within the type's slot array,
+including tombstones).
 """
+
+# ── GPU scatter-write kernels ─────────────────────────────────────────────────
+
+@kernel function activate_slots_kernel!(active :: AbstractVector{Bool},
+                                         slots  :: AbstractVector{Int32})
+    i = @index(Global, Linear)
+    if i <= length(slots)
+        active[slots[i]] = true
+    end
+end
+
+@kernel function write_fk_kernel!(fk     :: AbstractVector{Int32},
+                                   slots  :: AbstractVector{Int32},
+                                   values :: AbstractVector{Int32})
+    i = @index(Global, Linear)
+    if i <= length(slots)
+        fk[slots[i]] = values[i]
+    end
+end
+
+@kernel function write_attr_kernel!(attr   :: AbstractVector{Int32},
+                                     slots  :: AbstractVector{Int32},
+                                     values :: AbstractVector{Int32})
+    i = @index(Global, Linear)
+    if i <= length(slots)
+        attr[slots[i]] = values[i]
+    end
+end
+
+# ── apply_pushout! ────────────────────────────────────────────────────────────
 
 function apply_pushout!(g::GPUACSet,
                         match::Vector{Int32},
                         cube::AdhesiveCube,
                         rule,
                         schema::SchemaInfo,
-                        enc::AttributeEncoder,
-                        backend)::Dict{Symbol, Vector{Int32}}
-    if rule === nothing
+                        enc::AttributeEncoder)::Dict{Symbol, Vector{Int32}}
+    if rule === nothing || isempty(cube.new_r_fk) && cube.n_r_elems == 0
         return Dict(o => Int32[] for o in schema.obj_types)
     end
 
-    R = codom(right(rule))
-    K = dom(right(rule))
-    r_hom = right(rule)
-
-    # 1. Identify which elements are new
-    k_img_r = Dict{Symbol, Set{Int}}()
-    for o in schema.obj_types; k_img_r[o] = Set{Int}(); end
-    for k in 1:cube.n_k_elems
-        r_idx = Int(cube.k_to_r[k])
-        r_idx == 0 && continue
-        o = schema.obj_types[Int(cube.r_types[r_idx])]
-        push!(k_img_r[o], r_idx)
+    # Determine new elements per type from precomputed cube data
+    new_r_counts = Dict{Symbol, Int}(o => 0 for o in schema.obj_types)
+    for (o, fk_o) in cube.new_r_fk
+        new_r_counts[o] = isempty(fk_o) ? 0 :
+            length(first(values(fk_o)))
+    end
+    # Fall back to counting from r_types if no FK data (pure-deletion rules)
+    if all(v == 0 for v in values(new_r_counts)) && cube.n_r_elems > 0
+        k_img_r_flat = Set{Int}(Int(x) for x in cube.k_to_r)
+        for r_flat in 1:cube.n_r_elems
+            r_flat ∈ k_img_r_flat && continue
+            o = schema.obj_types[Int(cube.r_types[r_flat])]
+            new_r_counts[o] += 1
+        end
     end
 
-    new_r_elems = Dict{Symbol, Vector{Int}}()
-    for o in schema.obj_types
-        nr = nparts(R, o)
-        off = cube.r_offset[o]
-        new_r_elems[o] = [i for i in 1:nr if Int(off + i - 1) ∉ k_img_r[o]]
-    end
-
-    # 2. Assign slots and grow arrays
+    # 1. Assign GPU-slot indices; grow arrays when spare capacity exhausted
     r_to_local = Dict{Symbol, Vector{Int32}}()
-    
     for o in schema.obj_types
-        new_elems = new_r_elems[o]
-        if isempty(new_elems)
+        n_add = new_r_counts[o]
+        if n_add == 0
             r_to_local[o] = Int32[]
             continue
         end
+        n_cur  = g.n_alloc[o]
+        n_next = n_cur + n_add
+        cap    = length(g.active[o])
 
-        n_cur   = g.n_alloc[o]
-        n_add   = length(new_elems)
-        n_total = n_cur + n_add
         globals = Int32[Int32(n_cur + j) for j in 1:n_add]
         r_to_local[o] = globals
 
-        # Grow arrays
-        new_active = CUDA.zeros(Bool, n_total)
-        copyto!(new_active, 1, g.active[o], 1, n_cur)
-        g.active[o] = new_active
-
-        for h in schema.homs
-            schema.hom_dom[h] == o || continue
-            new_fk = CUDA.zeros(Int32, n_total)
-            copyto!(new_fk, 1, g.homs[h], 1, n_cur)
-            g.homs[h] = new_fk
+        if n_next > cap
+            new_cap = max(2 * cap, n_next)
+            new_active = CUDA.zeros(Bool, new_cap)
+            n_cur > 0 && copyto!(new_active, 1, g.active[o], 1, n_cur)
+            g.active[o] = new_active
+            for h in schema.homs
+                schema.hom_dom[h] == o || continue
+                new_fk = CUDA.zeros(Int32, new_cap)
+                n_cur > 0 && copyto!(new_fk, 1, g.homs[h], 1, n_cur)
+                g.homs[h] = new_fk
+            end
+            for a in schema.attrs
+                schema.attr_dom[a] == o || continue
+                new_av = CUDA.zeros(Int32, new_cap)
+                n_cur > 0 && copyto!(new_av, 1, g.attrs[a], 1, n_cur)
+                g.attrs[a] = new_av
+            end
         end
-
-        for a in schema.attrs
-            schema.attr_dom[a] == o || continue
-            new_av = CUDA.zeros(Int32, n_total)
-            copyto!(new_av, 1, g.attrs[a], 1, n_cur)
-            g.attrs[a] = new_av
-        end
-        
-        g.n_alloc[o] = n_total
+        g.n_alloc[o] = n_next
         g.n_live[o][] += n_add
     end
 
-    # 3. Populate new elements (Host-side for simplicity, then upload)
-    g_offset = _global_offset(g, schema)
+    # 2. GPU scatter: activate slots and write FKs + attrs using precomputed data
+    backend = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+
     for o in schema.obj_types
-        new_elems = new_r_elems[o]
-        isempty(new_elems) && continue
-        
-        globals = r_to_local[o]
-        
-        # Update active flags
-        host_active = Array(g.active[o])
-        for gidx in globals; host_active[gidx] = true; end
-        g.active[o] = CuArray(host_active)
-        
-        # Update FKs
+        n_add = new_r_counts[o]
+        n_add == 0 && continue
+        globals   = r_to_local[o]
+        d_globals = CuArray(globals)
+
+        activate_slots_kernel!(backend, 256)(g.active[o], d_globals; ndrange=n_add)
+
+        fk_o_pre   = get(cube.new_r_fk,   o, Dict{Symbol,Vector{Int32}}())
+        attr_o_pre = get(cube.new_r_attr,  o, Dict{Symbol,Vector{Int32}}())
+
         for h in schema.homs
             schema.hom_dom[h] == o || continue
-            host_fk = Array(g.homs[h])
             tgt_type = schema.hom_cod[h]
-            off_r_tgt = cube.r_offset[tgt_type]
-            
-            for (j, r_elem) in enumerate(new_elems)
-                gidx = Int(globals[j])
-                tgt_r = subpart(R, r_elem, h)
-                tgt_r == 0 && continue
-                
-                tgt_r_flat = Int(off_r_tgt + tgt_r - 1)
-                
-                if tgt_r_flat ∈ k_img_r[tgt_type]
-                    # Preserved element: find in world
-                    found_k = 0
-                    for k in 1:cube.n_k_elems
-                        if Int(cube.k_to_r[k]) == tgt_r_flat
-                            found_k = k; break
-                        end
-                    end
-                    if found_k != 0
-                        flat_g = Int(match[Int(cube.k_to_l[found_k])])
-                        host_fk[gidx] = Int32(flat_g - g_offset[tgt_type])
-                    end
-                else
-                    # New element: find in r_to_local
-                    new_idx = findfirst(==(tgt_r), new_r_elems[tgt_type])
-                    if new_idx !== nothing
-                        host_fk[gidx] = r_to_local[tgt_type][new_idx]
+            fk_pre   = get(fk_o_pre, h, nothing)
+            fk_vals  = zeros(Int32, n_add)
+            if fk_pre !== nothing
+                for j in 1:n_add
+                    val = fk_pre[j]
+                    if val < 0
+                        # K-preserved target: match[k_to_l[-val]]
+                        k_flat = Int(-val)
+                        l_flat = Int(cube.k_to_l[k_flat])
+                        fk_vals[j] = match[l_flat]
+                    elseif val > 0
+                        # New element target: r_to_local[tgt_type][val]
+                        tgt_slots = r_to_local[tgt_type]
+                        val <= length(tgt_slots) && (fk_vals[j] = tgt_slots[val])
                     end
                 end
             end
-            g.homs[h] = CuArray(host_fk)
+            write_fk_kernel!(backend, 256)(g.homs[h], d_globals, CuArray(fk_vals); ndrange=n_add)
         end
-        
-        # Update attributes
+
         for a in schema.attrs
             schema.attr_dom[a] == o || continue
-            host_av = Array(g.attrs[a])
-            for (j, r_elem) in enumerate(new_elems)
-                gidx = Int(globals[j])
-                raw = subpart(R, r_elem, a)
-                raw isa AttrVar && continue
-                host_av[gidx] = encode_value(enc, a, raw)
-            end
-            g.attrs[a] = CuArray(host_av)
+            attr_pre  = get(attr_o_pre, a, nothing)
+            attr_vals = attr_pre !== nothing ? copy(attr_pre) : zeros(Int32, n_add)
+            write_attr_kernel!(backend, 256)(g.attrs[a], d_globals, CuArray(attr_vals); ndrange=n_add)
         end
     end
 
-    return r_to_local
+    r_to_local
+end
+
+# ── _update_preserved! ────────────────────────────────────────────────────────
+
+"""
+    _update_preserved!(g, match, cube, rule, schema, enc, r_to_local)
+
+Patch attributes and foreign keys of preserved (K) elements that differ
+between L and R.  Uses precomputed `cube.k_attr_pre` and `cube.k_fk_pre`
+to avoid any access to the original Catlab rule ACSet at rewrite time.
+`match[flat_l]` gives the GPU-local slot index for each L-variable.
+"""
+function _update_preserved!(g::GPUACSet, match::Vector{Int32},
+                             cube::AdhesiveCube, rule,
+                             schema::SchemaInfo, enc::AttributeEncoder,
+                             r_to_local::Dict{Symbol, Vector{Int32}})
+    rule === nothing && return
+    isempty(cube.k_attr_pre) && isempty(cube.k_fk_pre) && return
+
+    attr_slots = Dict{Symbol, Vector{Int32}}()
+    attr_vals  = Dict{Symbol, Vector{Int32}}()
+    hom_slots  = Dict{Symbol, Vector{Int32}}()
+    hom_vals   = Dict{Symbol, Vector{Int32}}()
+
+    for (a, pairs) in cube.k_attr_pre
+        for (k_flat, val) in pairs
+            l_flat  = Int(cube.k_to_l[k_flat])
+            g_local = Int(match[l_flat])
+            g_local == 0 && continue
+            push!(get!(attr_slots, a, Int32[]), Int32(g_local))
+            push!(get!(attr_vals,  a, Int32[]), val)
+        end
+    end
+
+    for (h, pairs) in cube.k_fk_pre
+        tgt_type = schema.hom_cod[h]
+        for (k_flat, enc_val) in pairs
+            l_flat  = Int(cube.k_to_l[k_flat])
+            g_local = Int(match[l_flat])
+            g_local == 0 && continue
+            g_tgt = if enc_val < 0
+                k2 = Int(-enc_val)
+                l2 = Int(cube.k_to_l[k2])
+                Int(match[l2])
+            elseif enc_val > 0
+                slots = r_to_local[tgt_type]
+                Int(enc_val) <= length(slots) ? Int(slots[Int(enc_val)]) : 0
+            else
+                0
+            end
+            g_tgt == 0 && continue
+            push!(get!(hom_slots, h, Int32[]), Int32(g_local))
+            push!(get!(hom_vals,  h, Int32[]), Int32(g_tgt))
+        end
+    end
+
+    backend = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+
+    for (a, slots) in attr_slots
+        isempty(slots) && continue
+        write_attr_kernel!(backend, 256)(
+            g.attrs[a], CuArray(slots), CuArray(attr_vals[a]); ndrange=length(slots))
+    end
+    for (h, slots) in hom_slots
+        isempty(slots) && continue
+        write_fk_kernel!(backend, 256)(
+            g.homs[h], CuArray(slots), CuArray(hom_vals[h]); ndrange=length(slots))
+    end
 end

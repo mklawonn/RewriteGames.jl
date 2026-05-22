@@ -35,3 +35,28 @@ Base.:(==)(a::Action, b::Action) = a.entry === b.entry && a.match === b.match
 Base.hash(a::Action, h::UInt)    = hash(objectid(a.entry), hash(objectid(a.match), h))
 
 Base.show(io::IO, a::Action) = print(io, "Action(:$(a.entry.name))")
+
+# ─── GPU Player ───────────────────────────────────────────────────────────────
+
+"""
+    AbstractGPUPlayer <: AbstractAgent
+
+Supertype for GPU-resident players.  Concrete subtypes implement:
+
+    select_action_gpu(player, g, enc, schema, candidates, n_sols, turn) -> Int
+
+where `candidates` is a GPU-resident matrix of shape `[n_vars × n_sols]` and
+the return value is a 1-based index into its columns.
+"""
+abstract type AbstractGPUPlayer <: AbstractAgent end
+
+"""
+    GPUFunctionPlayer(f)
+
+Wrap a function `f(g, candidates, n_sols, turn) -> Int` as a GPU player.
+`g` is the GPU-resident `GPUACSet`; `candidates` is a GPU-resident
+`[n_vars × n_sols]` Int32 matrix.  No world download occurs.
+"""
+struct GPUFunctionPlayer <: AbstractGPUPlayer
+    f :: Function
+end

@@ -13,4 +13,5 @@ using Test
     include("test_schedule.jl")
     include("test_json_serialization.jl")
     include("test_gpu_rewriting.jl")
+    include("test_gpu_schedule.jl")
 end
