@@ -620,10 +620,10 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         # Apply PROP_ATTR_EQ masks on-device (B2)
         _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
 
-        # Synchronize once before the solve (only mandatory sync before dive kernel)
+        # Synchronize once before the solve (only mandatory sync before kernel launch)
         KernelAbstractions.synchronize(backend)
-        gpu_dive_solve(backend, csp, d_gpu, hf_flat, hf_offs;
-                       scratch = scratch)
+        gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs;
+                        scratch = scratch)
     else
         if CUDA.functional()
             # CUDA available but no scratch (shouldn't normally happen)
