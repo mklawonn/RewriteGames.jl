@@ -589,7 +589,8 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
     # GPU player path: pass candidates matrix directly, no world download
     if agent isa AbstractGPUPlayer
         n_sols = length(solutions)
-        cands  = CuArray(reduce(hcat, solutions))   # [n_vars × n_sols] on GPU
+        cands  = CUDA.functional() ? CuArray(reduce(hcat, solutions)) :
+                                     reduce(hcat, solutions)
         idx    = select_action_gpu(agent, g, enc, schema, cands, n_sols, turn)
         return solutions[clamp(Int(idx), 1, n_sols)]
     end
