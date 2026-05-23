@@ -293,27 +293,41 @@ end
 end
 
 """
-    gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; max_solutions)
+    gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; max_solutions, scratch)
 
 Variant that accepts pre-built, GPU-resident domain and hom-forward arrays.
-Used by the GPU scheduler to avoid CPU↔GPU transfers during solve setup.
 `d_gpu`       — domain array of length `n_vars * nc` (will be consumed/modified).
 `hf_flat_gpu` — flat hom-forward data.
 `hf_offs_gpu` — per-morphism 0-based word offsets (length n_homs + 1).
+`scratch`     — pre-allocated `GPUScratchBuffers`; when provided, reuses bytecode,
+                solution, count, and workspace buffers with no CUDA allocations.
 """
 function gpu_dive_solve(backend, csp::CSPProblem,
                         d_gpu, hf_flat_gpu, hf_offs_gpu;
-                        max_solutions::Int = 10_000)::Vector{Vector{Int32}}
+                        max_solutions::Int = 10_000,
+                        scratch = nothing)::Vector{Vector{Int32}}
     n_vars = Int(csp.n_vars)
     n_bc   = length(csp.bytecodes)
     nc     = csp.n_chunks
 
-    b_gpu   = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
-    n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
-    sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
-    cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
-    KernelAbstractions.fill!(cnt_gpu, Int32(0))
-    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+    if scratch !== nothing
+        # Use pre-allocated buffers from GPUScratchBuffers (B1: zero allocations)
+        b_gpu    = scratch.buf_bytecodes
+        sol_gpu  = scratch.buf_solutions
+        cnt_gpu  = scratch.buf_sol_count
+        work_gpu = scratch.buf_workspace
+
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+        KernelAbstractions.fill!(cnt_gpu, Int32(0))
+        # sol_gpu and work_gpu are scratch; their stale values are overwritten by the kernel
+    else
+        b_gpu    = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+        sol_gpu  = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
+        cnt_gpu  = KernelAbstractions.allocate(backend, Int32, 1)
+        KernelAbstractions.fill!(cnt_gpu, Int32(0))
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+    end
 
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,

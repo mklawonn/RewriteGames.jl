@@ -17,11 +17,11 @@ may exceed `n_alloc[o]` due to 2× over-allocation; spare slots have
 """
 struct GPUACSet
     schema  :: SchemaInfo
-    active  :: Dict{Symbol, CuVector{Bool}}    # per object type
-    homs    :: Dict{Symbol, CuVector{Int32}}   # per morphism
-    attrs   :: Dict{Symbol, CuVector{Int32}}   # per attribute
-    n_alloc :: Dict{Symbol, Int}               # capacity per obj type
-    n_live  :: Dict{Symbol, Ref{Int}}          # live count per obj type
+    active  :: Dict{Symbol, Any}   # CuVector{Bool} on GPU, Vector{Bool} on CPU
+    homs    :: Dict{Symbol, Any}   # CuVector{Int32} on GPU, Vector{Int32} on CPU
+    attrs   :: Dict{Symbol, Any}   # CuVector{Int32} on GPU, Vector{Int32} on CPU
+    n_alloc :: Dict{Symbol, Int}   # high-water mark per obj type
+    n_live  :: Dict{Symbol, Ref{Int}}
 end
 
 """
@@ -30,17 +30,20 @@ end
 Encode `world` and upload every column to the GPU.
 """
 function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspace=1000)::GPUACSet
-    active = Dict{Symbol, CuVector{Bool}}()
-    homs   = Dict{Symbol, CuVector{Int32}}()
-    attrs  = Dict{Symbol, CuVector{Int32}}()
+    active  = Dict{Symbol, Any}()
+    homs    = Dict{Symbol, Any}()
+    attrs   = Dict{Symbol, Any}()
     n_alloc = Dict{Symbol, Int}()
     n_live  = Dict{Symbol, Ref{Int}}()
 
+    use_cuda = CUDA.functional()
+    _zeros(T, n) = use_cuda ? CUDA.zeros(T, n) : zeros(T, n)
+
     for o in schema.obj_types
         n = nparts(world, o)
-        n_alloc[o] = n              # high-water mark; spare slots up to n+headspace
+        n_alloc[o] = n
         n_live[o]  = Ref(n)
-        act = CUDA.zeros(Bool, n + headspace)
+        act = _zeros(Bool, n + headspace)
         if n > 0; act[1:n] .= true; end
         active[o] = act
     end
@@ -49,11 +52,11 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspac
         owner = schema.hom_dom[h]
         n     = nparts(world, owner)
         if n == 0
-            homs[h] = CUDA.zeros(Int32, headspace)
+            homs[h] = _zeros(Int32, headspace)
         else
             host_fk = Int32[subpart(world, i, h) for i in 1:n]
-            fk = CUDA.zeros(Int32, n + headspace)
-            if n > 0; copyto!(fk, 1, host_fk, 1, n); end
+            fk = _zeros(Int32, n + headspace)
+            copyto!(fk, 1, host_fk, 1, n)
             homs[h] = fk
         end
     end
@@ -62,11 +65,11 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspac
         owner = schema.attr_dom[a]
         n     = nparts(world, owner)
         if n == 0
-            attrs[a] = CUDA.zeros(Int32, headspace)
+            attrs[a] = _zeros(Int32, headspace)
         else
             host_av = Int32[encode_value(enc, a, subpart(world, i, a)) for i in 1:n]
-            av = CUDA.zeros(Int32, n + headspace)
-            if n > 0; copyto!(av, 1, host_av, 1, n); end
+            av = _zeros(Int32, n + headspace)
+            copyto!(av, 1, host_av, 1, n)
             attrs[a] = av
         end
     end

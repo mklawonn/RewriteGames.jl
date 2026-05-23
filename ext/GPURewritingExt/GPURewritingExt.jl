@@ -174,6 +174,10 @@ function RewriteGames.gpu_run_game_sched!(
         player == :_none && continue
 
         turn_n     = Int(ev.turn)
+        # NOTE (B13): state_pre is always the episode-start world, not the per-turn
+        # pre-rewrite state.  For RL workflows that need the correct intermediate
+        # pre-states, pass `track_pre_states=true` (unimplemented; see GPU_PLAN.md
+        # Bottleneck 13 for the trajectory-replay approach).
         state_pre  = GameState(initial_world, turn_n)
         state_post = GameState(final_world, turn_n + 1)
 

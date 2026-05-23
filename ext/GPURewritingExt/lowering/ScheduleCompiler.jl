@@ -72,7 +72,7 @@ struct CompiledGPUSched
     rules           :: Vector{Any}
     box_players     :: Vector{Symbol}
     device_boxes    :: Any
-    registry        :: DeviceRuleRegistry
+    registry        :: Any   # DeviceRuleRegistry when CUDA functional, nothing otherwise
 end
 
 # ── Agent-interface helper ──────────────────────────────────────────────────
@@ -278,12 +278,12 @@ function compile_schedule(gs::GameSched, world,
                           (UInt16(2), UInt16(0), UInt16(0), UInt16(0)),
                           (0f0,0f0,0f0,0f0), UInt16(1))
 
-        device_boxes = isempty([box]) ? CUDA.zeros(UInt8, 0) : CuArray([box])
+        device_boxes = CUDA.functional() ? CuArray([box]) : nothing
         return CompiledGPUSched(
             [box], wire_set, wire_index, csps, adhesive_cubes,
             [1], Int[], [2], 2, [sub], rules_list, [gs._agent_name],
             device_boxes,
-            _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
+            CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
     end
 
     # ── 1. Global wire index ─────────────────────────────────────────────────
@@ -339,7 +339,7 @@ function compile_schedule(gs::GameSched, world,
                    for i in (n_trace+1):n_ret
                    if haskey(wire_index, gs._ret_names[i])]
 
-    device_boxes = isempty(boxes) ? CUDA.zeros(UInt8, 0) : CuArray(boxes)
+    device_boxes = CUDA.functional() ? CuArray(boxes) : nothing
     CompiledGPUSched(
         boxes, wire_set, wire_index,
         csps, adhesive_cubes,
@@ -347,5 +347,5 @@ function compile_schedule(gs::GameSched, world,
         length(wire_set), sub_schedules,
         rules_list, box_players,
         device_boxes,
-        _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc))
+        CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
 end

@@ -1,4 +1,5 @@
 function _build_device_registry(rules_list, csps, cubes, schema, enc)
+    CUDA.functional() || return nothing
     n_rules = length(csps)
     n_obj   = length(schema.obj_types)
     n_hom   = length(schema.homs)

@@ -47,7 +47,8 @@ function apply_pushout!(g::GPUACSet,
                         cube::AdhesiveCube,
                         rule,
                         schema::SchemaInfo,
-                        enc::AttributeEncoder)::Dict{Symbol, Vector{Int32}}
+                        enc::AttributeEncoder;
+                        scratch = nothing)::Dict{Symbol, Vector{Int32}}
     if rule === nothing || isempty(cube.new_r_fk) && cube.n_r_elems == 0
         return Dict(o => Int32[] for o in schema.obj_types)
     end
@@ -85,18 +86,19 @@ function apply_pushout!(g::GPUACSet,
 
         if n_next > cap
             new_cap = max(2 * cap, n_next)
-            new_active = CUDA.zeros(Bool, new_cap)
+            _z = CUDA.functional() ? (T, n) -> CUDA.zeros(T, n) : (T, n) -> zeros(T, n)
+            new_active = _z(Bool, new_cap)
             n_cur > 0 && copyto!(new_active, 1, g.active[o], 1, n_cur)
             g.active[o] = new_active
             for h in schema.homs
                 schema.hom_dom[h] == o || continue
-                new_fk = CUDA.zeros(Int32, new_cap)
+                new_fk = _z(Int32, new_cap)
                 n_cur > 0 && copyto!(new_fk, 1, g.homs[h], 1, n_cur)
                 g.homs[h] = new_fk
             end
             for a in schema.attrs
                 schema.attr_dom[a] == o || continue
-                new_av = CUDA.zeros(Int32, new_cap)
+                new_av = _z(Int32, new_cap)
                 n_cur > 0 && copyto!(new_av, 1, g.attrs[a], 1, n_cur)
                 g.attrs[a] = new_av
             end
@@ -106,13 +108,24 @@ function apply_pushout!(g::GPUACSet,
     end
 
     # 2. GPU scatter: activate slots and write FKs + attrs using precomputed data
-    backend = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+    backend  = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+    use_scratch = scratch !== nothing && CUDA.functional()
 
     for o in schema.obj_types
         n_add = new_r_counts[o]
         n_add == 0 && continue
-        globals   = r_to_local[o]
-        d_globals = CuArray(globals)
+        globals = r_to_local[o]
+
+        # Upload slot indices — reuse staging buffer or allocate
+        if use_scratch
+            if length(scratch.buf_pushout_slots) < n_add
+                scratch.buf_pushout_slots = CUDA.zeros(Int32, n_add * 2)
+            end
+            d_globals = @view scratch.buf_pushout_slots[1:n_add]
+            copyto!(d_globals, globals)
+        else
+            d_globals = CUDA.functional() ? CuArray(globals) : globals
+        end
 
         activate_slots_kernel!(backend, 256)(g.active[o], d_globals; ndrange=n_add)
 
@@ -139,14 +152,32 @@ function apply_pushout!(g::GPUACSet,
                     end
                 end
             end
-            write_fk_kernel!(backend, 256)(g.homs[h], d_globals, CuArray(fk_vals); ndrange=n_add)
+            if use_scratch
+                if length(scratch.buf_pushout_vals) < n_add
+                    scratch.buf_pushout_vals = CUDA.zeros(Int32, n_add * 2)
+                end
+                d_vals = @view scratch.buf_pushout_vals[1:n_add]
+                copyto!(d_vals, fk_vals)
+            else
+                d_vals = CUDA.functional() ? CuArray(fk_vals) : fk_vals
+            end
+            write_fk_kernel!(backend, 256)(g.homs[h], d_globals, d_vals; ndrange=n_add)
         end
 
         for a in schema.attrs
             schema.attr_dom[a] == o || continue
             attr_pre  = get(attr_o_pre, a, nothing)
             attr_vals = attr_pre !== nothing ? copy(attr_pre) : zeros(Int32, n_add)
-            write_attr_kernel!(backend, 256)(g.attrs[a], d_globals, CuArray(attr_vals); ndrange=n_add)
+            if use_scratch
+                if length(scratch.buf_pushout_vals) < n_add
+                    scratch.buf_pushout_vals = CUDA.zeros(Int32, n_add * 2)
+                end
+                d_vals = @view scratch.buf_pushout_vals[1:n_add]
+                copyto!(d_vals, attr_vals)
+            else
+                d_vals = CUDA.functional() ? CuArray(attr_vals) : attr_vals
+            end
+            write_attr_kernel!(backend, 256)(g.attrs[a], d_globals, d_vals; ndrange=n_add)
         end
     end
 
@@ -166,7 +197,8 @@ to avoid any access to the original Catlab rule ACSet at rewrite time.
 function _update_preserved!(g::GPUACSet, match::Vector{Int32},
                              cube::AdhesiveCube, rule,
                              schema::SchemaInfo, enc::AttributeEncoder,
-                             r_to_local::Dict{Symbol, Vector{Int32}})
+                             r_to_local::Dict{Symbol, Vector{Int32}};
+                             scratch = nothing)
     rule === nothing && return
     isempty(cube.k_attr_pre) && isempty(cube.k_fk_pre) && return
 
@@ -207,16 +239,47 @@ function _update_preserved!(g::GPUACSet, match::Vector{Int32},
         end
     end
 
-    backend = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+    backend     = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+    use_scratch = scratch !== nothing && CUDA.functional()
 
     for (a, slots) in attr_slots
         isempty(slots) && continue
-        write_attr_kernel!(backend, 256)(
-            g.attrs[a], CuArray(slots), CuArray(attr_vals[a]); ndrange=length(slots))
+        n = length(slots)
+        if use_scratch
+            if length(scratch.buf_pushout_slots) < n
+                scratch.buf_pushout_slots = CUDA.zeros(Int32, n * 2)
+            end
+            if length(scratch.buf_pushout_vals) < n
+                scratch.buf_pushout_vals = CUDA.zeros(Int32, n * 2)
+            end
+            d_slots = @view scratch.buf_pushout_slots[1:n]
+            d_vals  = @view scratch.buf_pushout_vals[1:n]
+            copyto!(d_slots, slots)
+            copyto!(d_vals, attr_vals[a])
+        else
+            d_slots = CUDA.functional() ? CuArray(slots)        : slots
+            d_vals  = CUDA.functional() ? CuArray(attr_vals[a]) : attr_vals[a]
+        end
+        write_attr_kernel!(backend, 256)(g.attrs[a], d_slots, d_vals; ndrange=n)
     end
     for (h, slots) in hom_slots
         isempty(slots) && continue
-        write_fk_kernel!(backend, 256)(
-            g.homs[h], CuArray(slots), CuArray(hom_vals[h]); ndrange=length(slots))
+        n = length(slots)
+        if use_scratch
+            if length(scratch.buf_pushout_slots) < n
+                scratch.buf_pushout_slots = CUDA.zeros(Int32, n * 2)
+            end
+            if length(scratch.buf_pushout_vals) < n
+                scratch.buf_pushout_vals = CUDA.zeros(Int32, n * 2)
+            end
+            d_slots = @view scratch.buf_pushout_slots[1:n]
+            d_vals  = @view scratch.buf_pushout_vals[1:n]
+            copyto!(d_slots, slots)
+            copyto!(d_vals, hom_vals[h])
+        else
+            d_slots = CUDA.functional() ? CuArray(slots)       : slots
+            d_vals  = CUDA.functional() ? CuArray(hom_vals[h]) : hom_vals[h]
+        end
+        write_fk_kernel!(backend, 256)(g.homs[h], d_slots, d_vals; ndrange=n)
     end
 end

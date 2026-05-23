@@ -14,15 +14,16 @@ Fields:
 - `hom_forward`: `hom_forward[h][(w-1)*n_chunks + c]` = chunk c of h(w)'s bitmask.
 """
 struct CSPProblem
-    n_vars        :: Int32
-    var_offset    :: Dict{Symbol, Int}   # obj type → first variable index (1-based)
-    domain_sizes  :: Vector{Int32}       # one per variable
-    bytecodes     :: Vector{TCNBytecode}
-    nac_groups    :: Int32
-    pac_groups    :: Int32
-    agent_var_map :: Vector{Int32}       # mapping from agent interface elements to L variables
-    hom_forward   :: Vector{Vector{UInt64}}
-    n_chunks      :: Int                 # number of UInt64 words per domain variable
+    n_vars            :: Int32
+    var_offset        :: Dict{Symbol, Int}   # obj type → first variable index (1-based)
+    domain_sizes      :: Vector{Int32}       # one per variable
+    bytecodes         :: Vector{TCNBytecode}
+    nac_groups        :: Int32
+    pac_groups        :: Int32
+    agent_var_map     :: Vector{Int32}       # mapping from agent interface elements to L variables
+    hom_forward       :: Vector{Vector{UInt64}}
+    n_chunks          :: Int                 # number of UInt64 words per domain variable
+    sorted_type_bases :: Vector{Tuple{Int, Symbol}}  # [(base, obj_type)] sorted by base, pre-computed
 end
 
 """
@@ -224,8 +225,10 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         push!(hom_forward, fwd)
     end
 
+    sorted_bases = sort([(base, o) for (o, base) in pairs(var_offset)], by=first)
+
     CSPProblem(Int32(n_vars), var_offset, domain_sizes, bytecodes,
-               nac_count, pac_count, agent_var_map, hom_forward, nc)
+               nac_count, pac_count, agent_var_map, hom_forward, nc, sorted_bases)
 end
 
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)
