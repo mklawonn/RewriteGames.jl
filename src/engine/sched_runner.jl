@@ -281,7 +281,7 @@ function _exec_native_rule!(step, box, world, wires, agent_match=nothing)
           Catlab.CategoricalAlgebra.homomorphisms(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)), world; cat=_cat, initial=initial_map, monic=box.rule.monic)
     matches = collect(gen)
     if !isempty(matches)
-        new_world = Catlab.CategoricalAlgebra.rewrite_match(box.rule, first(matches))
+        new_world = AlgebraicRewriting.rewrite_match(box.rule, first(matches))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
     else

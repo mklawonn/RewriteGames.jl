@@ -47,7 +47,7 @@ end
 # Single-kernel dangling check: one thread per source element, shared violation flag.
 # All morphisms are checked in successive launches sharing the same `violation` buffer.
 @kernel function dangling_check_all_homs_kernel!(
-    violation  :: AbstractVector{Bool},
+    violation  :: AbstractVector{Int32},
     active_src :: AbstractVector{Bool},
     fk         :: AbstractVector{Int32},
     to_del_src :: AbstractVector{Bool},
@@ -59,7 +59,7 @@ end
     if i <= Int(src_n) && active_src[i] && !to_del_src[i]
         tgt = Int(fk[i])
         if tgt != 0 && tgt <= Int(tgt_n) && to_del_tgt[tgt]
-            Atomix.@atomic violation[1] |= true
+            CUDA.atomic_or!(pointer(violation, 1), Int32(1))
         end
     end
 end
@@ -71,7 +71,7 @@ Check the DPO dangling condition entirely on GPU.  Launches one kernel per
 schema morphism with a shared `violation` flag; a single synchronize and a
 single scalar download replace the previous N-per-morphism version.
 
-`buf_violation` is a pre-allocated length-1 `CuVector{Bool}` from the
+`buf_violation` is a pre-allocated length-1 `CuVector{Int32}` from the
 `GPUScratchBuffers`; pass `nothing` to fall back to a local allocation.
 """
 function gpu_dangling_ok(to_del, g::GPUACSet,
@@ -85,8 +85,8 @@ function gpu_dangling_ok(to_del, g::GPUACSet,
     end
 
     viol = buf_violation !== nothing ? buf_violation :
-                                      KernelAbstractions.allocate(backend, Bool, 1)
-    KernelAbstractions.fill!(viol, false)
+                                      KernelAbstractions.allocate(backend, Int32, 1)
+    KernelAbstractions.fill!(viol, Int32(0))
 
     for h in schema.homs
         src_type = schema.hom_dom[h]
@@ -108,7 +108,7 @@ function gpu_dangling_ok(to_del, g::GPUACSet,
             ndrange = n_src)
     end
     KernelAbstractions.synchronize(backend)
-    !Array(viol)[1]
+    Array(viol)[1] == Int32(0)
 end
 
 # ── Single-sync pipeline kernels ─────────────────────────────────────────────

@@ -150,3 +150,116 @@ end
     exps_gpu = gpu_run_game_sched!(gs, G, agents; T_max=1)
     @test length(exps_cpu) == length(exps_gpu)
 end
+
+# ── 7. BOX_NATIVE_RULE — add vertex ──────────────────────────────────────────
+#
+# RuleApp (no player) compiles to BOX_NATIVE_RULE and routes through
+# _gpu_native_pipeline!.  We pair a native rule with a PlayerRuleApp so the
+# player's experience count tells us whether the native rule fired.
+#
+# Wire routing: every output wire is explicitly returned (no discard) because
+# the wiring-diagram theory does not support `delete` on world-state wires.
+
+@testset "GPU schedule — native add_v (BOX_NATIVE_RULE)" begin
+    rapp = RuleApp(:native_add_v, rule_add_v, I_empty)
+    pra  = PlayerRuleApp(:del_v, rule_del_v, I_empty, :alice)
+    # native add_v fires (empty pattern always matches) → world gains a vertex
+    # player del_v then fires on that vertex → 1 experience
+    gs = mk_game_sched((;), (init=:I,), N_empty, (native_add_v=rapp, del_v=pra),
+                        quote
+                            added, fail_n = native_add_v(init)
+                            success, fail_p = del_v(added)
+                            return success, fail_p, fail_n
+                        end)
+    agents = Dict(:alice => first_agent)
+
+    exps = gpu_run_game_sched!(gs, Graph(0), agents; T_max=2)
+    @test length(exps) == 1
+    @test exps[1].player == :alice
+end
+
+# ── 8. BOX_NATIVE_RULE — delete vertex ───────────────────────────────────────
+
+@testset "GPU schedule — native del_v (BOX_NATIVE_RULE)" begin
+    rapp = RuleApp(:native_del_v, rule_del_v, I_empty)
+    pra  = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
+    # native del_v fires if there are vertices; player add_v then runs
+    gs = mk_game_sched((;), (init=:I,), N_empty, (native_del_v=rapp, add_v=pra),
+                        quote
+                            deleted, fail_n = native_del_v(init)
+                            success, fail_p = add_v(deleted)
+                            return success, fail_p, fail_n
+                        end)
+    agents = Dict(:alice => first_agent)
+
+    # 3 vertices → native del fires → player add fires → 1 experience
+    exps = gpu_run_game_sched!(gs, Graph(3), agents; T_max=2)
+    @test length(exps) == 1
+
+    # 0 vertices → native del fails → schedule exits via fail_n wire → 0 experiences
+    exps_empty = gpu_run_game_sched!(gs, Graph(0), agents; T_max=2)
+    @test length(exps_empty) == 0
+end
+
+# ── 9. BOX_NATIVE_RULE — add edge (FK writes in new R elements) ───────────────
+
+@testset "GPU schedule — native add_e (BOX_NATIVE_RULE)" begin
+    rapp = RuleApp(:native_add_e, rule_add_e, I_empty)
+    pra  = PlayerRuleApp(:del_v, rule_del_v, I_empty, :alice)
+    gs = mk_game_sched((;), (init=:I,), N_empty, (native_add_e=rapp, del_v=pra),
+                        quote
+                            added, fail_n = native_add_e(init)
+                            success, fail_p = del_v(added)
+                            return success, fail_p, fail_n
+                        end)
+    agents = Dict(:alice => first_agent)
+
+    # 2 vertices → native add_e fires (monic match finds distinct pair)
+    exps = gpu_run_game_sched!(gs, Graph(2), agents; T_max=2)
+    @test length(exps) == 1
+
+    # 1 vertex → no distinct pair → native add_e fails → 0 experiences
+    exps_one = gpu_run_game_sched!(gs, Graph(1), agents; T_max=2)
+    @test length(exps_one) == 0
+end
+
+# ── 10. CPU/GPU equivalence — native add_v ────────────────────────────────────
+
+@testset "GPU schedule — CPU/GPU equivalence (native add_v)" begin
+    rapp = RuleApp(:native_add_v, rule_add_v, I_empty)
+    pra  = PlayerRuleApp(:del_v, rule_del_v, I_empty, :alice)
+    gs = mk_game_sched((;), (init=:I,), N_empty, (native_add_v=rapp, del_v=pra),
+                        quote
+                            added, fail_n = native_add_v(init)
+                            success, fail_p = del_v(added)
+                            return success, fail_p, fail_n
+                        end)
+    agents = Dict(:alice => first_agent)
+
+    for G in [Graph(0), Graph(2)]
+        exps_cpu = run_game_sched!(gs, G, agents; T_max=2, terminal=never_terminal)
+        exps_gpu = gpu_run_game_sched!(gs, G, agents; T_max=2)
+        @test length(exps_cpu) == length(exps_gpu)
+    end
+end
+
+# ── 11. CPU/GPU equivalence — native del_v ────────────────────────────────────
+
+@testset "GPU schedule — CPU/GPU equivalence (native del_v)" begin
+    rapp = RuleApp(:native_del_v, rule_del_v, I_empty)
+    pra  = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
+    gs = mk_game_sched((;), (init=:I,), N_empty, (native_del_v=rapp, add_v=pra),
+                        quote
+                            deleted, fail_n = native_del_v(init)
+                            success, fail_p = add_v(deleted)
+                            return success, fail_p, fail_n
+                        end)
+    agents = Dict(:alice => first_agent)
+
+    for n in [0, 1, 3]
+        G = Graph(n)
+        exps_cpu = run_game_sched!(gs, G, agents; T_max=2, terminal=never_terminal)
+        exps_gpu = gpu_run_game_sched!(gs, G, agents; T_max=2)
+        @test length(exps_cpu) == length(exps_gpu)
+    end
+end

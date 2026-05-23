@@ -24,7 +24,7 @@ mutable struct GPUScratchBuffers
     buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * MAX_CHUNKS × 16
     buf_type_mask     :: CuVector{UInt64}       # nc
     buf_to_del        :: CuVector{Bool}         # sum(n_alloc) (grown as world grows)
-    buf_violation     :: CuVector{Bool}         # [1] dangling-check flag
+    buf_violation     :: CuVector{Int32}        # [1] dangling-check flag (0=ok, 1=violated)
     buf_attr_mask     :: CuVector{UInt64}       # nc
     buf_pushout_slots :: CuVector{Int32}        # staging for slot indices (B5/B6, grown on demand)
     buf_pushout_vals  :: CuVector{Int32}        # staging for fk/attr values (B5/B6, grown on demand)
@@ -80,7 +80,7 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
             CUDA.zeros(UInt64, max(max_n_vars * nc_max, 1), 16),
             CUDA.zeros(UInt64, max(nc, 1)),
             CUDA.zeros(Bool,   max(total_alloc * 4, 1)),
-            CUDA.zeros(Bool,   1),
+            CUDA.zeros(Int32,  1),            # buf_violation
             CUDA.zeros(UInt64, max(nc, 1)),
             CUDA.zeros(Int32,  256),          # buf_pushout_slots initial capacity
             CUDA.zeros(Int32,  256),          # buf_pushout_vals initial capacity
