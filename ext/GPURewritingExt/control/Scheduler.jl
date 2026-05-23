@@ -28,6 +28,7 @@ mutable struct GPUScratchBuffers
     buf_attr_mask     :: CuVector{UInt64}       # nc
     buf_pushout_slots :: CuVector{Int32}        # staging for slot indices (B5/B6, grown on demand)
     buf_pushout_vals  :: CuVector{Int32}        # staging for fk/attr values (B5/B6, grown on demand)
+    cached_hf_offs    :: Vector{Int32}          # B15: cached CPU copy of hom_fwd_offs; skip GPU upload when unchanged
 end
 
 mutable struct GPUSchedulerState
@@ -50,7 +51,10 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
     traj = log_trajectory ? GPUTrajectoryLog(schema) : nothing
 
     scratch = if CUDA.functional()
-        nc = isempty(sched.csps) ? 1 : sched.csps[1].n_chunks
+        max_nc = isempty(sched.csps) ? 1 :
+                 maximum(Int(csp.n_chunks) for csp in sched.csps; init=1)
+        nc_max = _select_nc_max(max_nc)
+        nc     = max_nc   # for hf_flat sizing
         max_n_vars = isempty(sched.csps) ? 1 :
                      maximum(Int(csp.n_vars) for csp in sched.csps; init=1)
         max_n_bc   = isempty(sched.csps) ? 1 :
@@ -68,13 +72,14 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
             CuArray{TCNBytecode}(undef, max(max_n_bc, 1)),
             CUDA.zeros(Int32,  max(max_n_vars, 1), 10_000),
             CUDA.zeros(Int32,  1),
-            CUDA.zeros(UInt64, max(max_n_vars * MAX_CHUNKS, 1), 16),
+            CUDA.zeros(UInt64, max(max_n_vars * nc_max, 1), 16),
             CUDA.zeros(UInt64, max(nc, 1)),
             CUDA.zeros(Bool,   max(total_alloc * 4, 1)),
             CUDA.zeros(Bool,   1),
             CUDA.zeros(UInt64, max(nc, 1)),
             CUDA.zeros(Int32,  256),   # buf_pushout_slots initial capacity
             CUDA.zeros(Int32,  256),   # buf_pushout_vals initial capacity
+            Int32[],                   # cached_hf_offs: empty = always upload on first call
         )
     else
         nothing
@@ -154,7 +159,10 @@ function _build_hom_fwd_gpu!(backend, g::GPUACSet, schema::SchemaInfo, nc::Int,
             off, Int32(nc); ndrange = n)
     end
 
-    KernelAbstractions.copyto!(backend, scratch.buf_hf_offs, hom_fwd_offs)
+    if scratch.cached_hf_offs != hom_fwd_offs
+        KernelAbstractions.copyto!(backend, scratch.buf_hf_offs, hom_fwd_offs)
+        scratch.cached_hf_offs = copy(hom_fwd_offs)
+    end
 
     hf_flat, scratch.buf_hf_offs
 end

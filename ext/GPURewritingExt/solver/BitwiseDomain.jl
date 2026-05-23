@@ -14,7 +14,16 @@ MAX_CHUNKS caps the number of chunks for static allocation in GPU kernels.
 Increase it to support more than MAX_CHUNKS * 64 elements per type.
 """
 
-const MAX_CHUNKS = 4   # supports up to 256 elements per object type
+const MAX_CHUNKS = 4   # default; overridden per-rule via _select_nc_max
+
+function _select_nc_max(nc::Int)
+    nc <= 1  && return 1
+    nc <= 2  && return 2
+    nc <= 4  && return 4
+    nc <= 8  && return 8
+    nc <= 16 && return 16
+    error("nc=$(nc) exceeds maximum supported chunks (16 = 1024 elements/type)")
+end
 
 # Convert 1-based element index to (chunk_idx, bit_idx)
 @inline function elem_to_chunk(i::Int)

@@ -139,6 +139,46 @@ function download_acset(g::GPUACSet, enc::AttributeEncoder, world_type)
     result
 end
 
+"""
+    download_acset_compact(g, enc, world_type, backend) -> ACSet
+
+Compact `g` in-place (GPU-native prefix-sum, no tombstones remain), then
+download without the tombstone-skipping loop.  Use only when it is acceptable
+to mutate `g` (e.g., at episode end before discarding `g`).
+"""
+function download_acset_compact(g::GPUACSet, enc::AttributeEncoder, world_type, backend)
+    compact_gpu_acset!(g, g.schema, backend)
+    schema = g.schema
+    result = world_type()
+
+    for o in schema.obj_types
+        add_parts!(result, o, g.n_alloc[o])
+    end
+
+    for h in schema.homs
+        dom = schema.hom_dom[h]
+        n   = g.n_alloc[dom]
+        n == 0 && continue
+        host_fk = Array(g.homs[h])
+        for i in 1:n
+            host_fk[i] > 0 && set_subpart!(result, i, h, Int(host_fk[i]))
+        end
+    end
+
+    for a in schema.attrs
+        dom = schema.attr_dom[a]
+        n   = g.n_alloc[dom]
+        n == 0 && continue
+        host_av = Array(g.attrs[a])
+        for i in 1:n
+            v = decode_value(enc, a, host_av[i])
+            v !== nothing && set_subpart!(result, i, a, v)
+        end
+    end
+
+    result
+end
+
 function Base.deepcopy(g::GPUACSet)
     GPUACSet(
         g.schema,

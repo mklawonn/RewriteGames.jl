@@ -83,17 +83,18 @@ end
     solutions     :: AbstractMatrix{Int32},    # [n_vars × max_solutions]
     sol_count     :: AbstractVector{Int32},
     max_solutions :: Int,
-    workspace     :: AbstractMatrix{UInt64},   # [n_vars * MAX_CHUNKS × 16]
+    workspace     :: AbstractMatrix{UInt64},   # [n_vars * NM × 16]
     hom_fwd_flat  :: AbstractVector{UInt64},
-    hom_fwd_offs  :: AbstractVector{Int32}
-)
+    hom_fwd_offs  :: AbstractVector{Int32},
+    ::Val{NM}
+) where NM
     nc     = n_chunks
-    nc_max = MAX_CHUNKS
+    nc_max = NM
 
     stack_vars = MVector{16, Int32}(undef)
     stack_next = MVector{16, Int32}(undef)
-    new_d      = MVector{MAX_CHUNKS, UInt64}(undef)
-    reachable  = MVector{MAX_CHUNKS, UInt64}(undef)
+    new_d      = MVector{NM, UInt64}(undef)
+    reachable  = MVector{NM, UInt64}(undef)
 
     # Level-1 init: copy domains_in into workspace
     for v in 1:n_vars
@@ -329,9 +330,10 @@ function gpu_dive_solve(backend, csp::CSPProblem,
         work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
     end
 
+    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
-           work_gpu, hf_flat_gpu, hf_offs_gpu; ndrange=1)
+           work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
     KernelAbstractions.synchronize(backend)
 
     count = Int(Array(cnt_gpu)[1])
@@ -373,13 +375,348 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     hf_offs_gpu = KernelAbstractions.allocate(backend, Int32, length(hom_fwd_offs))
     KernelAbstractions.copyto!(backend, hf_offs_gpu, hom_fwd_offs)
 
+    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
-           work_gpu, hf_flat_gpu, hf_offs_gpu; ndrange=1)
+           work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
     KernelAbstractions.synchronize(backend)
 
     count = Int(Array(cnt_gpu)[1])
     count == 0 && return Vector{Int32}[]
     res = Array(sol_gpu)[:, 1:min(count, max_solutions)]
     return [res[:, i] for i in 1:size(res, 2)]
+end
+
+# ── EPS (Embarrassingly Parallel Search) Turbo kernel ────────────────────────
+
+"""
+EPS parallel solver kernel (B9).
+
+Each thread handles one subproblem: a copy of the initial propagated domains
+with `ub_var` pinned to one element from `ub_elements`.  Threads run
+independent DFS instances in parallel, writing solutions atomically.
+
+`workspace` must have at least `n_subs * n_vars * NM` rows and 16 columns.
+Thread `sub` uses rows `(sub-1)*n_vars*NM + 1 : sub*n_vars*NM`.
+"""
+@kernel function turbo_eps_kernel!(
+    domains_in    :: AbstractVector{UInt64},   # [n_vars * nc] propagated domains (read-only)
+    bytecodes     :: AbstractVector{TCNBytecode},
+    n_bc          :: Int,
+    n_vars        :: Int,
+    nc            :: Int,
+    solutions     :: AbstractMatrix{Int32},    # [n_vars × max_solutions]
+    sol_count     :: AbstractVector{Int32},
+    max_solutions :: Int,
+    workspace     :: AbstractMatrix{UInt64},   # [n_subs * n_vars * NM × 16]
+    hom_fwd_flat  :: AbstractVector{UInt64},
+    hom_fwd_offs  :: AbstractVector{Int32},
+    ub_var        :: Int,                      # first unbound variable (1-based)
+    ub_elements   :: AbstractVector{Int32},    # elements of ub_var's domain
+    ::Val{NM}
+) where NM
+    sub = @index(Global, Linear)
+    n_subs = length(ub_elements)
+    if sub <= n_subs
+        nc_max    = NM
+        ws_stride = n_vars * nc_max
+        ws_base   = (sub - 1) * ws_stride
+
+        stack_vars = MVector{16, Int32}(undef)
+        stack_next = MVector{16, Int32}(undef)
+        new_d      = MVector{NM, UInt64}(undef)
+        reachable  = MVector{NM, UInt64}(undef)
+
+        # Initialise workspace level 1 from domains_in
+        for v in 1:n_vars
+            off_d = (v - 1) * nc
+            off_w = ws_base + (v - 1) * nc_max
+            for c in 1:nc
+                workspace[off_w + c, 1] = domains_in[off_d + c]
+            end
+            for c in (nc + 1):nc_max
+                workspace[off_w + c, 1] = UInt64(0)
+            end
+        end
+
+        # Pin ub_var to ub_elements[sub]
+        elem   = Int(ub_elements[sub])
+        ci_e, bi_e = elem_to_chunk(elem)
+        off_ub = ws_base + (ub_var - 1) * nc_max
+        for c in 1:nc_max
+            workspace[off_ub + c, 1] = UInt64(0)
+        end
+        if ci_e <= nc_max
+            workspace[off_ub + ci_e, 1] = UInt64(1) << bi_e
+        end
+
+        level  = 1
+        state  = 1
+        safety = 0
+
+        while level > 0 && safety < 100_000_000
+            safety += 1
+
+            if state == 1
+                # A. Propagate (inline AC-1)
+                ok = true
+                for _ in 1:8
+                    changed = false
+                    for i in 1:n_bc
+                        bc = bytecodes[i]
+                        v1 = Int(bc.var1); v1 == 0 && continue
+                        off1 = ws_base + (v1 - 1) * nc_max
+
+                        if bc.op == PROP_FUNC && bc.var2 != 0
+                            v2    = Int(bc.var2)
+                            off2  = ws_base + (v2 - 1) * nc_max
+                            h_idx = Int(bc.param1)
+                            n_homs = length(hom_fwd_offs) - 1
+                            if 1 <= h_idx <= n_homs
+                                off_h    = Int(hom_fwd_offs[h_idx])
+                                n_elems_h = (Int(hom_fwd_offs[h_idx+1]) - off_h) ÷ nc
+
+                                for c in 1:nc; new_d[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = workspace[off1 + c, level]
+                                    while chunk != 0
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w2 = off_h + (w - 1) * nc
+                                        for ci in 1:nc
+                                            (hom_fwd_flat[off_w2 + ci] &
+                                             workspace[off2 + ci, level]) != 0 &&
+                                                (new_d[c] |= lsb; break)
+                                        end
+                                    end
+                                end
+                                for c in 1:nc
+                                    old_c = workspace[off1 + c, level]
+                                    workspace[off1 + c, level] = new_d[c]
+                                    old_c != new_d[c] && (changed = true)
+                                end
+
+                                for c in 1:nc; reachable[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = new_d[c]
+                                    while chunk != 0
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w2 = off_h + (w - 1) * nc
+                                        for ci in 1:nc
+                                            reachable[ci] |= hom_fwd_flat[off_w2 + ci]
+                                        end
+                                    end
+                                end
+                                for c in 1:nc
+                                    new_c = workspace[off2 + c, level] & reachable[c]
+                                    new_c != workspace[off2 + c, level] && (changed = true)
+                                    workspace[off2 + c, level] = new_c
+                                end
+                            end
+
+                        elseif bc.op == PROP_NEQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = ws_base + (v2 - 1) * nc_max
+                            ones2 = 0
+                            for c in 1:nc; ones2 += count_ones(workspace[off2 + c, level]); end
+                            if ones2 == 1
+                                for c in 1:nc
+                                    new_c = workspace[off1 + c, level] &
+                                            ~workspace[off2 + c, level]
+                                    new_c != workspace[off1 + c, level] && (changed = true)
+                                    workspace[off1 + c, level] = new_c
+                                end
+                            end
+
+                        elseif bc.op == PROP_EQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = ws_base + (v2 - 1) * nc_max
+                            for c in 1:nc
+                                old1 = workspace[off1 + c, level]
+                                new1 = old1 & workspace[off2 + c, level]
+                                workspace[off1 + c, level] = new1
+                                old1 != new1 && (changed = true)
+                            end
+                        end
+                    end
+                    changed || break
+                end
+
+                # B. Consistency check
+                for v in 1:n_vars
+                    off_v = ws_base + (v - 1) * nc_max
+                    all_zero = true
+                    for c in 1:nc
+                        workspace[off_v + c, level] != UInt64(0) && (all_zero = false; break)
+                    end
+                    if all_zero; ok = false; break; end
+                end
+                if !ok; level -= 1; state = 2; continue; end
+
+                # C. Find first unbound variable
+                unbound = 0
+                for v in 1:n_vars
+                    off_v = ws_base + (v - 1) * nc_max
+                    ones  = 0
+                    for c in 1:nc; ones += count_ones(workspace[off_v + c, level]); end
+                    if ones > 1; unbound = v; break; end
+                end
+
+                if unbound == 0
+                    idx = CUDA.atomic_add!(pointer(sol_count, 1), Int32(1)) + 1
+                    if idx <= max_solutions
+                        for v in 1:n_vars
+                            off_v = ws_base + (v - 1) * nc_max
+                            elem2 = Int32(0)
+                            for c in 1:nc
+                                ch = workspace[off_v + c, level]
+                                if ch != UInt64(0)
+                                    bi   = trailing_zeros(ch)
+                                    elem2 = Int32((c - 1) * 64 + bi + 1)
+                                    break
+                                end
+                            end
+                            solutions[v, idx] = elem2
+                        end
+                    end
+                    level -= 1; state = 2; continue
+                end
+
+                stack_vars[level] = Int32(unbound)
+                stack_next[level] = Int32(1)
+                state = 2
+            end  # state == 1
+
+            if state == 2
+                v   = Int(stack_vars[level])
+                off = ws_base + (v - 1) * nc_max
+                ne  = Int(stack_next[level])
+                found_next = false
+
+                while ne <= nc * 64
+                    c_ne  = (ne - 1) >> 6 + 1
+                    bi_ne = (ne - 1) & 63
+                    if (workspace[off + c_ne, level] & (UInt64(1) << bi_ne)) != 0
+                        if level < 16
+                            stack_next[level] = Int32(ne + 1)
+                            next_lv = level + 1
+                            for vi in 1:n_vars
+                                ofi = ws_base + (vi - 1) * nc_max
+                                for c in 1:nc
+                                    workspace[ofi + c, next_lv] = workspace[ofi + c, level]
+                                end
+                            end
+                            for c in 1:nc_max; workspace[off + c, next_lv] = UInt64(0); end
+                            workspace[off + c_ne, next_lv] = UInt64(1) << bi_ne
+                            level = next_lv
+                            state = 1
+                            found_next = true
+                            break
+                        end
+                    end
+                    ne += 1
+                end
+
+                if !found_next
+                    stack_next[level] = Int32(1)
+                    level -= 1
+                    state = 2
+                end
+            end  # state == 2
+        end  # while
+    end  # if sub <= n_subs
+end
+
+"""
+    gpu_turbo_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; kwargs) -> solutions
+
+EPS parallel solver (B9): runs one parallel DFS thread per element of the
+first unbound variable in the initial propagated domain.  For a graph-matching
+rule with N valid matches the solver explores N subproblems simultaneously.
+
+Falls back to `gpu_dive_solve` when the domain is already fixed or empty.
+"""
+function gpu_turbo_solve(backend, csp::CSPProblem,
+                         d_gpu, hf_flat_gpu, hf_offs_gpu;
+                         max_solutions::Int = 10_000,
+                         scratch = nothing)::Vector{Vector{Int32}}
+    n_vars = Int(csp.n_vars)
+    n_bc   = length(csp.bytecodes)
+    nc     = csp.n_chunks
+    nc_max = _select_nc_max(nc)
+
+    # Download propagated domain to find first unbound variable + its elements.
+    # O(n_vars * nc) transfer — ~320 bytes for 10 vars, nc=4.
+    d_host = Array(d_gpu)
+    ub_var, ub_elements = _find_first_unbound(d_host, n_vars, nc)
+
+    # Fall back to sequential solver when no branching point exists
+    (ub_var == 0 || isempty(ub_elements)) &&
+        return gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
+                              max_solutions, scratch)
+
+    n_subs = length(ub_elements)
+
+    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
+
+    if scratch !== nothing
+        b_gpu   = scratch.buf_bytecodes
+        sol_gpu = scratch.buf_solutions
+        cnt_gpu = scratch.buf_sol_count
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+        KernelAbstractions.fill!(cnt_gpu, Int32(0))
+    else
+        b_gpu   = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+        sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
+        cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
+        KernelAbstractions.fill!(cnt_gpu, Int32(0))
+    end
+
+    ub_gpu = KernelAbstractions.allocate(backend, Int32, n_subs)
+    KernelAbstractions.copyto!(backend, ub_gpu, ub_elements)
+
+    kernel = turbo_eps_kernel!(backend)
+    kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
+           work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
+           ndrange = n_subs)
+    KernelAbstractions.synchronize(backend)
+
+    count = Int(Array(cnt_gpu)[1])
+    count == 0 && return Vector{Int32}[]
+    res = Array(sol_gpu)[:, 1:min(count, max_solutions)]
+    return [res[:, i] for i in 1:size(res, 2)]
+end
+
+"""
+Find the first variable with >1 element (the first EPS branch point).
+Returns `(ub_var, elements)` where `elements` lists the 1-based element
+indices in `ub_var`'s domain.  Returns `(0, Int32[])` if already fixed or
+any domain is empty.
+"""
+function _find_first_unbound(d_host::Vector{UInt64}, n_vars::Int, nc::Int)
+    for v in 1:n_vars
+        off = (v - 1) * nc
+        ones = 0
+        for c in 1:nc; ones += count_ones(d_host[off + c]); end
+        ones == 0 && return (0, Int32[])
+        if ones > 1
+            elems = Int32[]
+            for c in 1:nc
+                chunk = d_host[off + c]
+                while chunk != 0
+                    lsb = chunk & (-chunk); chunk &= ~lsb
+                    bi  = trailing_zeros(lsb)
+                    push!(elems, Int32((c - 1) * 64 + bi + 1))
+                end
+            end
+            return (v, elems)
+        end
+    end
+    return (0, Int32[])
 end
