@@ -57,7 +57,8 @@ import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
 # ── GPU player dispatch ───────────────────────────────────────────────────────
 
 function RewriteGames.select_action_gpu(p::GPUFunctionPlayer, g, enc, schema,
-                                         cands, n_sols::Int, turn::Int)::Int
+                                         cands::AbstractArray{Int32,2},
+                                         n_sols::Int, turn::Int)::Int
     clamp(Int(p.f(g, cands, n_sols, turn)), 1, max(n_sols, 1))
 end
 

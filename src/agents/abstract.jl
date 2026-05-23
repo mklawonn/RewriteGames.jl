@@ -45,8 +45,9 @@ Supertype for GPU-resident players.  Concrete subtypes implement:
 
     select_action_gpu(player, g, enc, schema, candidates, n_sols, turn) -> Int
 
-where `candidates` is a GPU-resident matrix of shape `[n_vars × n_sols]` and
-the return value is a 1-based index into its columns.
+where `candidates` is a GPU-resident `AbstractArray{Int32,2}` of shape
+`[n_vars × n_sols]` (a view into the solver scratch buffer) and the return
+value is a 1-based index into its columns.
 """
 abstract type AbstractGPUPlayer <: AbstractAgent end
 
@@ -55,7 +56,8 @@ abstract type AbstractGPUPlayer <: AbstractAgent end
 
 Wrap a function `f(g, candidates, n_sols, turn) -> Int` as a GPU player.
 `g` is the GPU-resident `GPUACSet`; `candidates` is a GPU-resident
-`[n_vars × n_sols]` Int32 matrix.  No world download occurs.
+`AbstractArray{Int32,2}` of shape `[n_vars × n_sols]` (a view into the solver
+scratch buffer).  No world download occurs.
 """
 struct GPUFunctionPlayer <: AbstractGPUPlayer
     f :: Function

@@ -634,51 +634,67 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               box, b_idx::Int, sched, state, turn::Int)::Bool
     scratch = state.scratch
 
-    solutions = if CUDA.functional() && scratch !== nothing
-        backend = CUDA.CUDABackend()
-        nc      = csp.n_chunks
+    # Detect agent early: GPU players get a fast path that skips bulk download
+    player_sym = box.box_type == BOX_PLAYER_RULE ? sched.box_players[b_idx] : nothing
+    agent      = player_sym !== nothing ? get(state.agents, player_sym, nothing) : nothing
 
-        # Build hom_fwd and domains into pre-allocated scratch buffers (B1)
+    chosen_sol = if agent isa AbstractGPUPlayer && CUDA.functional() && scratch !== nothing
+        # ── GPU player fast path: fill scratch.buf_solutions on device,
+        #    download only the 4-byte count + one chosen column ───────────────
+        backend          = CUDA.CUDABackend()
+        nc               = csp.n_chunks
         hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
         d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
-
-        # Apply PROP_ATTR_EQ masks on-device (B2)
         _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
-
-        # Synchronize once before the solve (only mandatory sync before kernel launch)
         KernelAbstractions.synchronize(backend)
-        gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs;
-                        scratch = scratch)
-    else
-        if CUDA.functional()
-            # CUDA available but no scratch (shouldn't normally happen)
-            backend = CUDA.CUDABackend()
-            nc      = csp.n_chunks
-            hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)
-            d_gpu            = _build_domains_gpu(backend, csp, g, schema)
-            _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc)
-            KernelAbstractions.synchronize(backend)
-            gpu_dive_solve(backend, csp, d_gpu, hf_flat, hf_offs)
-        else
-            hf        = _recompute_hom_forward_gpu(g, schema, csp.n_chunks)
-            fresh_csp = CSPProblem(csp.n_vars, csp.var_offset, csp.domain_sizes,
-                                   csp.bytecodes, csp.nac_groups, csp.pac_groups,
-                                   csp.agent_var_map, hf, csp.n_chunks,
-                                   csp.sorted_type_bases)
-            domains   = _init_gpu_domains(fresh_csp, g, schema)
-            _apply_attr_masks_gpu!(domains, fresh_csp, g, schema, enc)
-            cpu_dive_solve(fresh_csp, domains)
-        end
-    end
-    isempty(solutions) && return false
 
-    chosen_sol = if box.box_type == BOX_PLAYER_RULE
-        player_sym = sched.box_players[b_idx]
-        agent      = get(state.agents, player_sym, nothing)
-        _choose_gpu_match(solutions, agent, rule, csp, schema,
-                          g, enc, state.world_type, turn)
+        n_sols = _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
+                                          scratch = scratch)
+        n_sols == 0 && return false
+
+        n_vars     = Int(csp.n_vars)
+        candidates = @view scratch.buf_solutions[1:n_vars, 1:n_sols]
+        idx        = select_action_gpu(agent, g, enc, schema, candidates, n_sols, turn)
+        chosen_col = clamp(Int(idx), 1, n_sols)
+        Array(@view scratch.buf_solutions[1:n_vars, chosen_col])
     else
-        solutions[1]
+        # ── Standard path: solve on GPU/CPU, download all solutions, choose ──
+        solutions = if CUDA.functional() && scratch !== nothing
+            backend          = CUDA.CUDABackend()
+            nc               = csp.n_chunks
+            hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
+            d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
+            _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+            KernelAbstractions.synchronize(backend)
+            gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
+        else
+            if CUDA.functional()
+                backend          = CUDA.CUDABackend()
+                nc               = csp.n_chunks
+                hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)
+                d_gpu            = _build_domains_gpu(backend, csp, g, schema)
+                _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc)
+                KernelAbstractions.synchronize(backend)
+                gpu_dive_solve(backend, csp, d_gpu, hf_flat, hf_offs)
+            else
+                hf        = _recompute_hom_forward_gpu(g, schema, csp.n_chunks)
+                fresh_csp = CSPProblem(csp.n_vars, csp.var_offset, csp.domain_sizes,
+                                       csp.bytecodes, csp.nac_groups, csp.pac_groups,
+                                       csp.agent_var_map, hf, csp.n_chunks,
+                                       csp.sorted_type_bases)
+                domains   = _init_gpu_domains(fresh_csp, g, schema)
+                _apply_attr_masks_gpu!(domains, fresh_csp, g, schema, enc)
+                cpu_dive_solve(fresh_csp, domains)
+            end
+        end
+        isempty(solutions) && return false
+
+        if box.box_type == BOX_PLAYER_RULE
+            _choose_gpu_match(solutions, agent, rule, csp, schema,
+                              g, enc, state.world_type, turn)
+        else
+            solutions[1]
+        end
     end
     chosen_sol === nothing && return false
 

@@ -799,6 +799,61 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
 end
 
 """
+    _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; scratch) -> Int
+
+Variant of `gpu_turbo_solve` that fills `scratch.buf_solutions` on-device but
+downloads only the solution count (4 bytes) rather than all solutions.
+Returns the number of solutions found (0 if none).
+
+Used by the `AbstractGPUPlayer` fast path in `_gpu_solve_inplace!` so that
+the player can inspect `scratch.buf_solutions` directly without a bulk transfer.
+"""
+function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
+                                   d_gpu, hf_flat_gpu, hf_offs_gpu;
+                                   max_solutions::Int = 10_000,
+                                   scratch)::Int
+    n_vars = Int(csp.n_vars)
+    n_bc   = length(csp.bytecodes)
+    nc     = csp.n_chunks
+    nc_max = _select_nc_max(nc)
+
+    copyto!(scratch.buf_ub_info, Int32[n_vars + 1, 0, 1])
+    find_unbound_var_kernel!(backend, 256)(
+        scratch.buf_ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
+    compact_domain_kernel!(backend, 1)(
+        scratch.buf_ub_elems, scratch.buf_ub_info, d_gpu, nc; ndrange = 1)
+    KernelAbstractions.synchronize(backend)
+
+    ub_info = Array(scratch.buf_ub_info)
+    ub_var  = Int(ub_info[1])
+    n_subs  = Int(ub_info[2])
+    ok      = Int(ub_info[3])
+
+    ok == 0     && return 0
+    n_subs == 0 && return 0
+
+    b_gpu   = scratch.buf_bytecodes
+    sol_gpu = scratch.buf_solutions
+    cnt_gpu = scratch.buf_sol_count
+    n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+    KernelAbstractions.fill!(cnt_gpu, Int32(0))
+
+    if ub_var > n_vars
+        work_gpu = scratch.buf_workspace
+        dive_solve_kernel!(backend)(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu,
+            max_solutions, work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange = 1)
+    else
+        ub_gpu   = @view scratch.buf_ub_elems[1:n_subs]
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
+        turbo_eps_kernel!(backend)(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu,
+            max_solutions, work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
+            ndrange = n_subs)
+    end
+    KernelAbstractions.synchronize(backend)
+    CUDA.@allowscalar min(Int(scratch.buf_sol_count[1]), max_solutions)
+end
+
+"""
 Single-thread kernel: reads `sol_count` and `solutions[:,1]`, writes the
 chosen match to `buf_match` and sets `buf_fired[1]` = 1 (match found) or 0
 (no match).  Also zeros `buf_match` when no solution, ensuring stale data
