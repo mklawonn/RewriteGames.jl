@@ -387,6 +387,81 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     return [res[:, i] for i in 1:size(res, 2)]
 end
 
+# ── GPU branching-point detection kernels ────────────────────────────────────
+
+"""
+One thread per CSP variable: compute the popcount of each variable's bitset
+domain and record the first unbound variable via atomicMin.
+
+Output `ub_info` layout (length ≥ 3, all Int32):
+  [1] = ub_var  — initialized to n_vars+1 (sentinel "none"); atomicMin wins
+  [2] = n_subs  — filled by compact_domain_kernel! (0 here on entry)
+  [3] = ok_flag — initialized to 1; set to 0 when any domain is empty
+
+This kernel plus `compact_domain_kernel!` are launched on the same CUDA
+stream so their GPU-memory dependency is automatically ordered; a single
+synchronize suffices for both.
+"""
+@kernel function find_unbound_var_kernel!(
+    ub_info :: AbstractVector{Int32},
+    domains :: AbstractVector{UInt64},
+    n_vars  :: Int,
+    nc      :: Int,
+)
+    v = @index(Global, Linear)
+    if v <= n_vars
+        off  = (v - 1) * nc
+        ones = 0
+        for c in 1:nc
+            ones += count_ones(domains[off + c])
+        end
+        if ones == 0
+            CUDA.atomic_and!(pointer(ub_info, 3), Int32(0))
+        elseif ones > 1
+            CUDA.atomic_min!(pointer(ub_info, 1), Int32(v))
+        end
+    end
+end
+
+"""
+Single-thread kernel: reads `ub_var` written by `find_unbound_var_kernel!`
+directly from GPU memory, scatters the set bits of that variable's domain
+into `ub_elems` as 1-based element indices, and writes the count to
+`ub_info[2]`.  No-ops when ok==0 or ub_var is the "all-fixed" sentinel.
+"""
+@kernel function compact_domain_kernel!(
+    ub_elems :: AbstractVector{Int32},
+    ub_info  :: AbstractVector{Int32},
+    domains  :: AbstractVector{UInt64},
+    nc       :: Int,
+)
+    i = @index(Global, Linear)
+    if i == 1
+        ok     = Int(ub_info[3])
+        ub_var = Int(ub_info[1])
+        n_vars = length(domains) ÷ nc
+        if ok == 0 || ub_var > n_vars
+            ub_info[2] = Int32(0)
+        else
+            off = (ub_var - 1) * nc
+            cnt = Int32(0)
+            for c in 1:nc
+                chunk = domains[off + c]
+                while chunk != UInt64(0)
+                    lsb   = chunk & (-chunk)
+                    chunk &= ~lsb
+                    bi    = trailing_zeros(lsb)
+                    cnt  += Int32(1)
+                    if cnt <= length(ub_elems)
+                        ub_elems[cnt] = Int32((c - 1) * 64 + bi + 1)
+                    end
+                end
+            end
+            ub_info[2] = cnt
+        end
+    end
+end
+
 # ── EPS (Embarrassingly Parallel Search) Turbo kernel ────────────────────────
 
 """
@@ -639,6 +714,11 @@ EPS parallel solver (B9): runs one parallel DFS thread per element of the
 first unbound variable in the initial propagated domain.  For a graph-matching
 rule with N valid matches the solver explores N subproblems simultaneously.
 
+When `scratch` is provided, the branching-point detection runs entirely on
+GPU via two ordered kernels (`find_unbound_var_kernel!` and
+`compact_domain_kernel!`) with a single subsequent synchronize and a 12-byte
+scalar download — no domain array is transferred to the host.
+
 Falls back to `gpu_dive_solve` when the domain is already fixed or empty.
 """
 function gpu_turbo_solve(backend, csp::CSPProblem,
@@ -650,27 +730,53 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     nc     = csp.n_chunks
     nc_max = _select_nc_max(nc)
 
-    # Download propagated domain to find first unbound variable + its elements.
-    # O(n_vars * nc) transfer — ~320 bytes for 10 vars, nc=4.
-    d_host = Array(d_gpu)
-    ub_var, ub_elements = _find_first_unbound(d_host, n_vars, nc)
-
-    # Fall back to sequential solver when no branching point exists
-    (ub_var == 0 || isempty(ub_elements)) &&
-        return gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
-                              max_solutions, scratch)
-
-    n_subs = length(ub_elements)
-
-    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
-
+    # ── Detect branching point on GPU ─────────────────────────────────────────
     if scratch !== nothing
+        # Initialize ub_info: [ub_var=n_vars+1, n_subs=0, ok=1]
+        copyto!(scratch.buf_ub_info, Int32[n_vars + 1, 0, 1])
+
+        # Kernel 1: parallel popcount scan → atomicMin for ub_var, atomicAnd for ok
+        find_unbound_var_kernel!(backend, 256)(
+            scratch.buf_ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
+
+        # Kernel 2: single-thread bitset unpack — reads ub_var from GPU, writes elements
+        # Ordered automatically by CUDA stream; no intermediate synchronize needed.
+        compact_domain_kernel!(backend, 1)(
+            scratch.buf_ub_elems, scratch.buf_ub_info, d_gpu, nc; ndrange = 1)
+
+        KernelAbstractions.synchronize(backend)
+
+        # Download 3 Int32s (12 bytes total)
+        ub_info = Array(scratch.buf_ub_info)
+        ub_var  = Int(ub_info[1])
+        n_subs  = Int(ub_info[2])
+        ok      = Int(ub_info[3])
+
+        ok == 0        && return Vector{Int32}[]
+        ub_var > n_vars && return gpu_dive_solve(backend, csp, d_gpu,
+                                                  hf_flat_gpu, hf_offs_gpu;
+                                                  max_solutions, scratch)
+        n_subs == 0    && return Vector{Int32}[]
+
+        ub_gpu = @view scratch.buf_ub_elems[1:n_subs]
+
         b_gpu   = scratch.buf_bytecodes
         sol_gpu = scratch.buf_solutions
         cnt_gpu = scratch.buf_sol_count
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
     else
+        # CPU fallback: download domain, scan on host, upload element list.
+        # Used only outside the scheduler hot path (e.g. turbo_homomorphisms).
+        d_host = Array(d_gpu)
+        ub_var, ub_elements = _find_first_unbound(d_host, n_vars, nc)
+        (ub_var == 0 || isempty(ub_elements)) &&
+            return gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
+                                  max_solutions, scratch)
+        n_subs = length(ub_elements)
+        ub_gpu = KernelAbstractions.allocate(backend, Int32, n_subs)
+        KernelAbstractions.copyto!(backend, ub_gpu, ub_elements)
+
         b_gpu   = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
@@ -678,13 +784,12 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
     end
 
-    ub_gpu = KernelAbstractions.allocate(backend, Int32, n_subs)
-    KernelAbstractions.copyto!(backend, ub_gpu, ub_elements)
+    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
 
-    kernel = turbo_eps_kernel!(backend)
-    kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
-           work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
-           ndrange = n_subs)
+    turbo_eps_kernel!(backend)(
+        d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
+        work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
+        ndrange = n_subs)
     KernelAbstractions.synchronize(backend)
 
     count = Int(Array(cnt_gpu)[1])
@@ -694,14 +799,44 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
 end
 
 """
-Find the first variable with >1 element (the first EPS branch point).
-Returns `(ub_var, elements)` where `elements` lists the 1-based element
-indices in `ub_var`'s domain.  Returns `(0, Int32[])` if already fixed or
-any domain is empty.
+Single-thread kernel: reads `sol_count` and `solutions[:,1]`, writes the
+chosen match to `buf_match` and sets `buf_fired[1]` = 1 (match found) or 0
+(no match).  Also zeros `buf_match` when no solution, ensuring stale data
+from the previous step cannot leak into downstream guarded kernels.
+"""
+@kernel function write_match_from_sols_kernel!(
+    buf_match :: AbstractVector{Int32},
+    buf_fired :: AbstractVector{Int32},
+    solutions :: AbstractMatrix{Int32},
+    sol_count :: AbstractVector{Int32},
+    n_vars    :: Int,
+)
+    i = @index(Global, Linear)
+    if i == 1
+        if sol_count[1] > Int32(0)
+            buf_fired[1] = Int32(1)
+            for v in 1:n_vars
+                buf_match[v] = solutions[v, 1]
+            end
+        else
+            buf_fired[1] = Int32(0)
+            for v in 1:n_vars
+                buf_match[v] = Int32(0)
+            end
+        end
+    end
+end
+
+"""
+    _find_first_unbound(d_host, n_vars, nc) -> (ub_var, elements)
+
+CPU fallback used by `gpu_turbo_solve` when no scratch buffers are available.
+Scans the domain array for the first variable with >1 active element.
+Returns `(0, Int32[])` if any domain is empty or all are already fixed.
 """
 function _find_first_unbound(d_host::Vector{UInt64}, n_vars::Int, nc::Int)
     for v in 1:n_vars
-        off = (v - 1) * nc
+        off  = (v - 1) * nc
         ones = 0
         for c in 1:nc; ones += count_ones(d_host[off + c]); end
         ones == 0 && return (0, Int32[])

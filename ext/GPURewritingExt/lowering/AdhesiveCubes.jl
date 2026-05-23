@@ -45,6 +45,14 @@ struct AdhesiveCube
     #   < 0  : -(k_flat_index of target), resolved to match[k_to_l[-enc_val]]
     k_attr_pre :: Dict{Symbol, Vector{Tuple{Int32, Int32}}}
     k_fk_pre   :: Dict{Symbol, Vector{Tuple{Int32, Int32}}}
+    # Static counts for n_live bookkeeping (no GPU download needed after rewrite).
+    # del_per_type[o] = number of L\K elements of type o (always deleted when rule fires).
+    # add_per_type[o] = number of R\K elements of type o (always added when rule fires).
+    del_per_type :: Dict{Symbol, Int}
+    add_per_type :: Dict{Symbol, Int}
+    # Flat L-indices and type indices of deleted elements (precomputed for build_to_del_kernel!).
+    del_l_flats :: Vector{Int32}   # flat L indices of L\K elements
+    del_l_types :: Vector{Int32}   # schema type index of each deleted element
 end
 
 """
@@ -68,7 +76,9 @@ function precompute_adhesive_cube(rule, schema::SchemaInfo;
                             Dict(o => 1 for o in schema.obj_types),
                             Dict(o => 1 for o in schema.obj_types),
                             Dict(o => 1 for o in schema.obj_types),
-                            empty_fk, empty_attr, empty_kattr, empty_kfk)
+                            empty_fk, empty_attr, empty_kattr, empty_kfk,
+                            Dict{Symbol,Int}(), Dict{Symbol,Int}(),
+                            Int32[], Int32[])
     end
 
     # Handle mock rules with L but no left/right
@@ -87,7 +97,9 @@ function precompute_adhesive_cube(rule, schema::SchemaInfo;
         return AdhesiveCube(n_l, 0, 0, Int32[], Int32[], l_types, Int32[],
                             l_offset, Dict(o => 1 for o in schema.obj_types),
                             Dict(o => 1 for o in schema.obj_types),
-                            empty_fk, empty_attr, empty_kattr, empty_kfk)
+                            empty_fk, empty_attr, empty_kattr, empty_kfk,
+                            Dict{Symbol,Int}(), Dict{Symbol,Int}(),
+                            Int32[], Int32[])
     end
 
     # Extract underlying AlgebraicRewriting rule if we were passed a box
@@ -240,9 +252,112 @@ function precompute_adhesive_cube(rule, schema::SchemaInfo;
         end
     end
 
+    # ── Precompute deletion metadata for GPU build_to_del_kernel! ────────────
+    k_img_l = Set{Int}(Int(i) for i in k_to_l if i != 0)
+    del_per_type = Dict{Symbol, Int}()
+    del_l_flats  = Int32[]
+    del_l_types  = Int32[]
+    for o in schema.obj_types
+        cnt = 0
+        for l in 1:nparts(L, o)
+            l_flat = l_offset[o] + l - 1
+            if l_flat ∉ k_img_l
+                cnt += 1
+                push!(del_l_flats, Int32(l_flat))
+                push!(del_l_types, Int32(schema.obj_index[o]))
+            end
+        end
+        cnt > 0 && (del_per_type[o] = cnt)
+    end
+
+    add_per_type = Dict{Symbol, Int}()
+    k_img_r_flat = Set{Int}(keys(r_flat_to_k))
+    for o in schema.obj_types
+        nr  = nparts(R, o)
+        off = r_offset[o]
+        cnt = count(r -> (off + r - 1) ∉ k_img_r_flat, 1:nr)
+        cnt > 0 && (add_per_type[o] = cnt)
+    end
+
     AdhesiveCube(n_l, n_r, n_k, k_to_l, k_to_r, l_types, r_types,
                  l_offset, r_offset, k_offset, new_r_fk, new_r_attr,
-                 k_attr_pre, k_fk_pre)
+                 k_attr_pre, k_fk_pre,
+                 del_per_type, add_per_type, del_l_flats, del_l_types)
+end
+
+"""
+    GPUAdhesiveCube
+
+GPU-resident copy of the static parts of an `AdhesiveCube`.  Built once at
+`compile_schedule` time; reused across every rewrite step.
+
+On non-CUDA systems all fields hold CPU arrays (identical to the CPU path).
+"""
+struct GPUAdhesiveCube
+    k_to_l_gpu      :: Any   # CuVector{Int32}
+    new_r_fk_gpu    :: Dict{Symbol, Dict{Symbol, Any}}   # [o][h] → CuVector{Int32}
+    new_r_attr_gpu  :: Dict{Symbol, Dict{Symbol, Any}}   # [o][a] → CuVector{Int32}
+    # _update_preserved! attr: precomputed l_flat indices and encoded values per attr
+    k_attr_l_gpu    :: Dict{Symbol, Any}   # [a] → CuVector{Int32} of l_flat indices
+    k_attr_v_gpu    :: Dict{Symbol, Any}   # [a] → CuVector{Int32} of encoded values
+    # _update_preserved! FK: precomputed l_flat source indices and enc_vals per hom
+    k_fk_l_gpu      :: Dict{Symbol, Any}   # [h] → CuVector{Int32} of l_flat source indices
+    k_fk_enc_gpu    :: Dict{Symbol, Any}   # [h] → CuVector{Int32} of encoded target values
+    # For GPU build_to_del_kernel!: flat L-indices and type indices of deleted elements
+    del_l_flats_gpu :: Any   # CuVector{Int32}
+    del_l_types_gpu :: Any   # CuVector{Int32}
+    # Static per-type counts for n_live bookkeeping (no GPU download needed)
+    del_per_type    :: Dict{Symbol, Int}
+    add_per_type    :: Dict{Symbol, Int}
+end
+
+"""
+    gpu_upload_cube(cube) -> GPUAdhesiveCube
+
+Upload the static parts of `cube` to GPU memory once.  The `k_to_l` lookup
+and all precomputed FK / attr arrays become GPU-resident so that rewrite
+kernels never touch CPU-side cube data at rewrite time.
+"""
+function gpu_upload_cube(cube::AdhesiveCube)::GPUAdhesiveCube
+    _up(v) = CUDA.functional() ? CuArray(v) : copy(v)
+
+    k_to_l_gpu = _up(cube.k_to_l)
+
+    new_r_fk_gpu = Dict{Symbol, Dict{Symbol, Any}}()
+    for (o, fk_o) in cube.new_r_fk
+        new_r_fk_gpu[o] = Dict{Symbol, Any}(h => _up(v) for (h, v) in fk_o)
+    end
+
+    new_r_attr_gpu = Dict{Symbol, Dict{Symbol, Any}}()
+    for (o, attr_o) in cube.new_r_attr
+        new_r_attr_gpu[o] = Dict{Symbol, Any}(a => _up(v) for (a, v) in attr_o)
+    end
+
+    k_attr_l_gpu = Dict{Symbol, Any}()
+    k_attr_v_gpu = Dict{Symbol, Any}()
+    for (a, pairs) in cube.k_attr_pre
+        l_flats = Int32[Int32(cube.k_to_l[k_flat]) for (k_flat, _) in pairs]
+        vals    = Int32[v for (_, v) in pairs]
+        k_attr_l_gpu[a] = _up(l_flats)
+        k_attr_v_gpu[a] = _up(vals)
+    end
+
+    k_fk_l_gpu   = Dict{Symbol, Any}()
+    k_fk_enc_gpu = Dict{Symbol, Any}()
+    for (h, pairs) in cube.k_fk_pre
+        l_flats  = Int32[Int32(cube.k_to_l[k_flat]) for (k_flat, _) in pairs]
+        enc_vals = Int32[ev for (_, ev) in pairs]
+        k_fk_l_gpu[h]   = _up(l_flats)
+        k_fk_enc_gpu[h] = _up(enc_vals)
+    end
+
+    del_l_flats_gpu = _up(cube.del_l_flats)
+    del_l_types_gpu = _up(cube.del_l_types)
+
+    GPUAdhesiveCube(k_to_l_gpu, new_r_fk_gpu, new_r_attr_gpu,
+                    k_attr_l_gpu, k_attr_v_gpu, k_fk_l_gpu, k_fk_enc_gpu,
+                    del_l_flats_gpu, del_l_types_gpu,
+                    copy(cube.del_per_type), copy(cube.add_per_type))
 end
 
 """

@@ -64,6 +64,7 @@ struct CompiledGPUSched
     wire_index      :: Dict{Symbol, Int}
     csps            :: Vector{CSPProblem}
     adhesive_cubes  :: Vector{AdhesiveCube}
+    gpu_cubes       :: Vector{GPUAdhesiveCube}   # GPU-resident copies of adhesive_cubes
     init_wires      :: Vector{Int}
     trace_wires     :: Vector{Int}
     exit_wires      :: Vector{Int}
@@ -281,6 +282,7 @@ function compile_schedule(gs::GameSched, world,
         device_boxes = CUDA.functional() ? CuArray([box]) : nothing
         return CompiledGPUSched(
             [box], wire_set, wire_index, csps, adhesive_cubes,
+            [gpu_upload_cube(c) for c in adhesive_cubes],
             [1], Int[], [2], 2, [sub], rules_list, [gs._agent_name],
             device_boxes,
             CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
@@ -343,6 +345,7 @@ function compile_schedule(gs::GameSched, world,
     CompiledGPUSched(
         boxes, wire_set, wire_index,
         csps, adhesive_cubes,
+        [gpu_upload_cube(c) for c in adhesive_cubes],
         init_wires, trace_wires, exit_wires,
         length(wire_set), sub_schedules,
         rules_list, box_players,

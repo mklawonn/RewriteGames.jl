@@ -111,6 +111,72 @@ function gpu_dangling_ok(to_del, g::GPUACSet,
     !Array(viol)[1]
 end
 
+# ── Single-sync pipeline kernels ─────────────────────────────────────────────
+
+"""
+GPU kernel for building the to_del mask without a CPU round-trip.
+`del_l_flats[i]` and `del_l_types[i]` are precomputed in the AdhesiveCube;
+`g_type_offs[t]` is the 0-based offset of type t in the flat `buf_to_del`.
+Guarded by `buf_fired[1]` so it no-ops when no match was found.
+"""
+@kernel function build_to_del_kernel!(
+    buf_to_del  :: AbstractVector{Bool},
+    buf_fired   :: AbstractVector{Int32},
+    buf_match   :: AbstractVector{Int32},
+    del_l_flats :: AbstractVector{Int32},
+    del_l_types :: AbstractVector{Int32},
+    g_type_offs :: AbstractVector{Int32},
+    n_del       :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= Int(n_del) && buf_fired[1] != Int32(0)
+        l_flat = Int(del_l_flats[i])
+        g_elem = Int(buf_match[l_flat])
+        if g_elem > 0
+            t   = Int(del_l_types[i])
+            off = Int(g_type_offs[t])
+            buf_to_del[off + g_elem] = true
+        end
+    end
+end
+
+"""
+Dangling-condition check that writes its result directly into `buf_fired`
+(instead of a separate violation buffer).  When a dangling edge is found,
+sets `buf_fired[1] = 0` via atomic AND, marking the rule as non-firing.
+"""
+@kernel function dangling_check_fired_kernel!(
+    buf_fired  :: AbstractVector{Int32},
+    active_src :: AbstractVector{Bool},
+    fk         :: AbstractVector{Int32},
+    to_del_src :: AbstractVector{Bool},
+    to_del_tgt :: AbstractVector{Bool},
+    src_n      :: Int32,
+    tgt_n      :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= Int(src_n) && buf_fired[1] != Int32(0) && active_src[i] && !to_del_src[i]
+        tgt = Int(fk[i])
+        if tgt != 0 && tgt <= Int(tgt_n) && to_del_tgt[tgt]
+            CUDA.atomic_and!(pointer(buf_fired, 1), Int32(0))
+        end
+    end
+end
+
+"""
+Guarded DPO deletion kernel: only clears active flags when `buf_fired[1] != 0`.
+"""
+@kernel function dpo_deletion_kernel_g!(
+    active    :: AbstractVector{Bool},
+    to_del    :: AbstractVector{Bool},
+    buf_fired :: AbstractVector{Int32},
+)
+    i = @index(Global, Linear)
+    if i <= length(active) && buf_fired[1] != Int32(0) && to_del[i]
+        active[i] = false
+    end
+end
+
 # ── Host-side helper: build the to_del mask ───────────────────────────────────
 
 """
