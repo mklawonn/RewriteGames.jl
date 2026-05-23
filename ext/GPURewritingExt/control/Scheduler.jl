@@ -899,7 +899,7 @@ function _gpu_native_pipeline!(g::GPUACSet, csp::CSPProblem,
 
     # ── Phase 9: ONE sync + ONE 4-byte download ───────────────────────────────
     KernelAbstractions.synchronize(backend)
-    fired = scratch.buf_fired[1] != Int32(0)
+    fired = CUDA.@allowscalar(scratch.buf_fired[1]) != Int32(0)
 
     if fired
         for (o, cnt) in gpu_cube.del_per_type
