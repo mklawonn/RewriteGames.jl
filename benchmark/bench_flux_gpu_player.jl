@@ -13,8 +13,8 @@ Without CUDA hardware all three run on CPU but via different engines:
 The Flux MLP receives the raw candidate matrix (AbstractArray{Int32,2}) directly from
 the solver scratch buffer — no world download occurs on the GPU path.
 
-Run:
-    julia --project=benchmark benchmark/bench_flux_gpu_player.jl
+Run from the repo root (use the main project env, which has CUDA configured):
+    julia --project=. benchmark/bench_flux_gpu_player.jl
 """
 
 using Catlab, AlgebraicRewriting
