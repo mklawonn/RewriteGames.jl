@@ -440,8 +440,25 @@ into `ub_elems` as 1-based element indices, and writes the count to
         ok     = Int(ub_info[3])
         ub_var = Int(ub_info[1])
         n_vars = length(domains) ÷ nc
-        if ok == 0 || ub_var > n_vars
+        if ok == 0
             ub_info[2] = Int32(0)
+        elseif ub_var > n_vars
+            # All variables are singletons.  Use v1 as the branching variable so
+            # turbo_eps_kernel! can run AC-1 to verify the assignment is consistent
+            # (e.g. monic PROP_NEQ constraints may still reject it).
+            off = 0   # v1 offset
+            cnt = Int32(0)
+            for c in 1:nc
+                chunk = domains[off + c]
+                if chunk != UInt64(0)
+                    bi  = trailing_zeros(chunk)
+                    cnt = Int32(1)
+                    ub_elems[1] = Int32((c - 1) * 64 + bi + 1)
+                    break
+                end
+            end
+            ub_info[1] = Int32(1)   # ub_var ← v1
+            ub_info[2] = cnt        # n_subs = 1 (or 0 if v1 somehow empty)
         else
             off = (ub_var - 1) * nc
             cnt = Int32(0)
@@ -639,12 +656,13 @@ Thread `sub` uses rows `(sub-1)*n_vars*NM + 1 : sub*n_vars*NM`.
     workspace     :: AbstractMatrix{UInt64},   # [n_subs * n_vars * NM × 16]
     hom_fwd_flat  :: AbstractVector{UInt64},
     hom_fwd_offs  :: AbstractVector{Int32},
-    ub_var        :: Int,                      # first unbound variable (1-based)
+    ub_info_in    :: AbstractVector{Int32},    # [ub_var, n_subs, ok] written by compact_domain_kernel!
     ub_elements   :: AbstractVector{Int32},    # elements of ub_var's domain
     ::Val{NM}
 ) where NM
-    sub = @index(Global, Linear)
-    n_subs = length(ub_elements)
+    sub    = @index(Global, Linear)
+    n_subs = Int(ub_info_in[2])
+    ub_var = Int(ub_info_in[1])
     if sub <= n_subs
         nc_max    = NM
         ws_stride = n_vars * nc_max
@@ -1382,6 +1400,40 @@ function _launch_turbo_block!(backend,
     )
 end
 
+# Private helper: three-step EPS pipeline for small (nc==1) problems.
+#   1. find_unbound_var_kernel! — locate first branching variable
+#   2. compact_domain_kernel!   — collect its domain elements into ub_elems
+#   3. turbo_eps_kernel!        — one thread per domain element
+#
+# workspace must have at least nc_max*64 * n_vars * nc_max rows and 16 cols.
+# Returns after launching all kernels; caller is responsible for synchronize.
+function _launch_turbo_eps!(backend,
+                             d_gpu, b_gpu,
+                             n_bc::Int, n_vars::Int, nc::Int,
+                             sol_gpu, cnt_gpu, max_solutions::Int,
+                             hf_flat, hf_offs,
+                             nc_max::Int,
+                             ub_info,    # AbstractVector{Int32} length ≥ 3
+                             ub_elems,   # AbstractVector{Int32} capacity ≥ nc_max*64
+                             workspace)  # AbstractMatrix{UInt64} rows ≥ nc_max*64*n_vars, cols=16
+    # Initialise: ub_info = [n_vars+1 (sentinel), 0 (n_subs), 1 (ok)]
+    copyto!(ub_info, Int32[n_vars + 1, 0, 1])
+    find_unbound_var_kernel!(backend, 64)(ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
+    compact_domain_kernel!(backend, 1)(ub_elems, ub_info, d_gpu, nc; ndrange = 1)
+    # compact_domain_kernel! handles the all-fixed (singleton) edge case by setting
+    # ub_var=1, n_subs=1 so turbo_eps_kernel! can verify constraints via AC-1.
+    # We launch with a fixed ndrange = nc_max*64; each thread self-limits on n_subs
+    # read from ub_info[2] at kernel entry, avoiding a CPU-GPU synchronize+download.
+    max_ws_rows = nc_max * 64 * n_vars * nc_max
+    turbo_eps_kernel!(backend, 64)(
+        d_gpu, b_gpu, n_bc, n_vars, nc,
+        sol_gpu, cnt_gpu, max_solutions,
+        view(workspace, 1:max_ws_rows, :), hf_flat, hf_offs,
+        ub_info, ub_elems, Val(nc_max);
+        ndrange = nc_max * 64
+    )
+end
+
 """
     gpu_turbo_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; kwargs) -> solutions
 
@@ -1390,9 +1442,10 @@ subproblems.  CUDA blocks claim subproblems from an atomic counter and cooperate
 on AC-1 propagation within each block.  No per-call workspace allocation; all
 domain state lives in shared memory.
 
-When `scratch` is provided, `scratch.buf_turbo_nextsub` is used as the shared
-counter (no extra allocation).  Otherwise a transient CuVector{Int32}(1) is
-allocated.
+Dispatch: nc==1 (≤64 elements/var) → EPS pipeline (find_unbound + compact + turbo_eps_kernel!,
+one thread per domain element, global-memory workspace).
+nc≥2 → multi-block Turbo (turbo_block_kernel!, shared-memory workspace, sub-problem counter
+in scratch.buf_turbo_nextsub or a transient allocation).
 
 Falls back to `gpu_dive_solve` for zero-variable or empty CSPs.
 """
@@ -1408,31 +1461,58 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     # Empty pattern: unique empty match always exists.
     n_vars == 0 && return [Int32[]]
 
-    D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
-    n_blks = min(1 << D, 576)
-    nvnm16 = n_vars * nc_max * 16
-
     if scratch !== nothing
         b_gpu   = scratch.buf_bytecodes
         sol_gpu = scratch.buf_solutions
         cnt_gpu = scratch.buf_sol_count
-        sub_gpu = scratch.buf_turbo_nextsub
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
-        KernelAbstractions.fill!(sub_gpu, Int32(0))
     else
         b_gpu   = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
         cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
-        sub_gpu = KernelAbstractions.allocate(backend, Int32, 1)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
-        KernelAbstractions.fill!(sub_gpu, Int32(0))
     end
 
-    _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
-                          sub_gpu, sol_gpu, cnt_gpu, max_solutions,
-                          hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
+    if nc == 1
+        # Small problem (≤64 elements/var): EPS — one thread per domain element.
+        # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
+        ws_cap = nc_max * 64 * n_vars * nc_max
+        if scratch !== nothing
+            if size(scratch.buf_workspace, 1) < ws_cap
+                scratch.buf_workspace = CUDA.zeros(UInt64, ws_cap * 2, 16)
+            end
+            _launch_turbo_eps!(backend, d_gpu, b_gpu, n_bc, n_vars, nc,
+                                sol_gpu, cnt_gpu, max_solutions,
+                                hf_flat_gpu, hf_offs_gpu, nc_max,
+                                scratch.buf_ub_info, scratch.buf_ub_elems,
+                                scratch.buf_workspace)
+        else
+            ub_info   = CUDA.zeros(Int32, 3)
+            ub_elems  = CUDA.zeros(Int32, nc_max * 64)
+            workspace = CUDA.zeros(UInt64, ws_cap, 16)
+            _launch_turbo_eps!(backend, d_gpu, b_gpu, n_bc, n_vars, nc,
+                                sol_gpu, cnt_gpu, max_solutions,
+                                hf_flat_gpu, hf_offs_gpu, nc_max,
+                                ub_info, ub_elems, workspace)
+        end
+    else
+        # Large problem (≥128 elements/var): multi-block Turbo.
+        D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
+        n_blks = min(1 << D, 576)
+        nvnm16 = n_vars * nc_max * 16
+        if scratch !== nothing
+            sub_gpu = scratch.buf_turbo_nextsub
+            KernelAbstractions.fill!(sub_gpu, Int32(0))
+        else
+            sub_gpu = KernelAbstractions.allocate(backend, Int32, 1)
+            KernelAbstractions.fill!(sub_gpu, Int32(0))
+        end
+        _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
+                              sub_gpu, sol_gpu, cnt_gpu, max_solutions,
+                              hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
+    end
     KernelAbstractions.synchronize(backend)
 
     count = Int(Array(cnt_gpu)[1])
@@ -1444,14 +1524,12 @@ end
 """
     _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; scratch) -> Int
 
-Fills `scratch.buf_solutions` on-device with all solutions found by the
-multi-block Turbo solver.  Downloads only the 4-byte solution count.
+Fills `scratch.buf_solutions` on-device and downloads only the 4-byte solution count.
 Returns the number of solutions found (0 if none).
 
-Used by the `AbstractGPUPlayer` fast path in `_gpu_solve_inplace!` so that
-the player can inspect `scratch.buf_solutions` directly without a bulk transfer.
-No per-call GPU allocations: uses `scratch.buf_turbo_nextsub` as the shared
-subproblem counter.
+Dispatch: nc==1 → EPS pipeline; nc≥2 → multi-block Turbo (scratch.buf_turbo_nextsub).
+Used by the `AbstractGPUPlayer` fast path so the player can inspect
+`scratch.buf_solutions` without a bulk transfer.  No per-call GPU allocations.
 """
 function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
                                    d_gpu, hf_flat_gpu, hf_offs_gpu;
@@ -1468,21 +1546,34 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
         return 1
     end
 
-    D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
-    n_blks = min(1 << D, 576)
-    nvnm16 = n_vars * nc_max * 16
-
     b_gpu   = scratch.buf_bytecodes
     sol_gpu = scratch.buf_solutions
     cnt_gpu = scratch.buf_sol_count
-    sub_gpu = scratch.buf_turbo_nextsub
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
-    KernelAbstractions.fill!(sub_gpu, Int32(0))
 
-    _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
-                          sub_gpu, sol_gpu, cnt_gpu, max_solutions,
-                          hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
+    if nc == 1
+        # Small problem (≤64 elements/var): EPS pipeline.
+        ws_cap = nc_max * 64 * n_vars * nc_max
+        if size(scratch.buf_workspace, 1) < ws_cap
+            scratch.buf_workspace = CUDA.zeros(UInt64, ws_cap * 2, 16)
+        end
+        _launch_turbo_eps!(backend, d_gpu, b_gpu, n_bc, n_vars, nc,
+                            sol_gpu, cnt_gpu, max_solutions,
+                            hf_flat_gpu, hf_offs_gpu, nc_max,
+                            scratch.buf_ub_info, scratch.buf_ub_elems,
+                            scratch.buf_workspace)
+    else
+        # Large problem (≥128 elements/var): multi-block Turbo.
+        D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
+        n_blks = min(1 << D, 576)
+        nvnm16 = n_vars * nc_max * 16
+        sub_gpu = scratch.buf_turbo_nextsub
+        KernelAbstractions.fill!(sub_gpu, Int32(0))
+        _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
+                              sub_gpu, sol_gpu, cnt_gpu, max_solutions,
+                              hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
+    end
     KernelAbstractions.synchronize(backend)
     CUDA.@allowscalar min(Int(scratch.buf_sol_count[1]), max_solutions)
 end
