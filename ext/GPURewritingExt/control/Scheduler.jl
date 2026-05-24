@@ -34,6 +34,7 @@ mutable struct GPUScratchBuffers
     buf_ub_elems      :: CuVector{Int32}        # element indices of first unbound variable (nc_max*64 capacity)
     buf_fired         :: CuVector{Int32}        # [1] — fired flag for single-sync native pipeline
     buf_g_type_offs   :: CuVector{Int32}        # type_idx → 0-based offset in buf_to_del (length = n_obj_types)
+    buf_turbo_nextsub :: CuVector{Int32}        # [1] global atomic subproblem counter for turbo_block_kernel!
 end
 
 mutable struct GPUSchedulerState
@@ -90,6 +91,7 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
             CUDA.zeros(Int32,  nc_max * 64),  # buf_ub_elems: max domain elements per variable
             CUDA.zeros(Int32,  1),            # buf_fired: single-sync fired flag
             CUDA.zeros(Int32,  max(length(schema.obj_types), 1)),  # buf_g_type_offs
+            CUDA.zeros(Int32,  1),                                  # buf_turbo_nextsub
         )
     else
         nothing

@@ -22,6 +22,10 @@ println("=== GPU vs CPU Performance Benchmark ===")
 println("Julia $(VERSION)  |  CUDA functional: $(CUDA.functional())")
 println("Date: $(Dates.now())\n")
 
+if CUDA.functional()
+    CUDA.cuCtxSetLimit(CUDA.CU_LIMIT_MALLOC_HEAP_SIZE, 512 * 1024 * 1024)
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────

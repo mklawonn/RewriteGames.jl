@@ -462,6 +462,159 @@ into `ub_elems` as 1-based element indices, and writes the count to
     end
 end
 
+# ── Block-parallel AC-1 propagation device function (B17) ────────────────────
+#
+# Called from within @kernel functions.  All threads in the block cooperate on
+# one AC-1 propagation pass over a shared domain array.
+#
+# dom_off: 0-based word offset of the current DFS level in the caller's
+#          @localmem UInt64 array (dom).  The slice dom[dom_off+1 .. dom_off+n_vars*NM]
+#          holds the active domain state.
+#
+# Parallelism: thread `tid` (1-based, blocksize total) handles bytecodes at
+# positions tid, tid+blocksize, tid+2*blocksize, … Domains are written via
+# Atomix.@atomic &= so concurrent narrowings by different threads are safe:
+# AC-1 is monotone (domains only shrink), so stale reads produce looser
+# (not incorrect) constraints that the outer fixpoint loop will tighten.
+#
+# changed_flag[1] is set to true if any domain word shrank.  Caller is
+# responsible for resetting it to false before each pass and calling @synchronize
+# after each call.
+#
+# Returns nothing; caller tests changed_flag[1] after @synchronize.
+@inline function _propagate_block!(
+    tid       :: Int,
+    blocksize :: Int,
+    dom       :: DOM,   # @localmem UInt64 array (concrete type enables specialization)
+    dom_off   :: Int,
+    changed_flag :: CF, # @localmem Bool [1] (concrete type enables specialization)
+    bytecodes :: BCS,
+    n_bc      :: Int,
+    n_vars    :: Int,
+    nc        :: Int,
+    hf_flat   :: HFF,
+    hf_offs   :: HFO,
+    ::Val{NM}
+) where {NM, DOM, CF, BCS, HFF, HFO}
+    bc_idx = tid
+    while bc_idx <= n_bc
+        bc = bytecodes[bc_idx]
+        v1 = Int(bc.var1)
+        v1 == 0 && (bc_idx += blocksize; continue)
+        off1 = dom_off + (v1 - 1) * NM
+
+        if bc.op == PROP_FUNC && bc.var2 != 0
+            v2    = Int(bc.var2)
+            off2  = dom_off + (v2 - 1) * NM
+            h_idx = Int(bc.param1)
+            n_homs = length(hf_offs) - 1
+            if 1 <= h_idx <= n_homs
+                off_h     = Int(hf_offs[h_idx])
+                n_elems_h = (Int(hf_offs[h_idx + 1]) - off_h) ÷ nc
+
+                # Forward: build constrained domain for v1
+                new_d1 = MVector{NM, UInt64}(undef)
+                for c in 1:NM; new_d1[c] = UInt64(0); end
+                for c in 1:nc
+                    chunk = dom[off1 + c]
+                    while chunk != UInt64(0)
+                        lsb = chunk & (-chunk); chunk &= ~lsb
+                        bi  = trailing_zeros(lsb)
+                        w   = (c - 1) * 64 + bi + 1
+                        w > n_elems_h && continue
+                        off_w = off_h + (w - 1) * nc
+                        for ci in 1:nc
+                            if (hf_flat[off_w + ci] & dom[off2 + ci]) != UInt64(0)
+                                new_d1[c] |= lsb; break
+                            end
+                        end
+                    end
+                end
+                for c in 1:nc
+                    old_c = dom[off1 + c]
+                    new_c = old_c & new_d1[c]
+                    if new_c != old_c
+                        Atomix.@atomic dom[off1 + c] &= new_c
+                        changed_flag[1] = true
+                    end
+                end
+
+                # Backward: restrict v2 to reachable elements
+                reachable = MVector{NM, UInt64}(undef)
+                for c in 1:NM; reachable[c] = UInt64(0); end
+                for c in 1:nc
+                    chunk = new_d1[c]
+                    while chunk != UInt64(0)
+                        lsb = chunk & (-chunk); chunk &= ~lsb
+                        bi  = trailing_zeros(lsb)
+                        w   = (c - 1) * 64 + bi + 1
+                        w > n_elems_h && continue
+                        off_w = off_h + (w - 1) * nc
+                        for ci in 1:nc; reachable[ci] |= hf_flat[off_w + ci]; end
+                    end
+                end
+                for c in 1:nc
+                    old_c = dom[off2 + c]
+                    new_c = old_c & reachable[c]
+                    if new_c != old_c
+                        Atomix.@atomic dom[off2 + c] &= new_c
+                        changed_flag[1] = true
+                    end
+                end
+            end
+
+        elseif bc.op == PROP_NEQ && bc.var2 != 0
+            v2   = Int(bc.var2)
+            off2 = dom_off + (v2 - 1) * NM
+            ones2 = 0
+            for c in 1:nc; ones2 += count_ones(dom[off2 + c]); end
+            if ones2 == 1
+                for c in 1:nc
+                    old_c = dom[off1 + c]
+                    new_c = old_c & ~dom[off2 + c]
+                    if new_c != old_c
+                        Atomix.@atomic dom[off1 + c] &= new_c
+                        changed_flag[1] = true
+                    end
+                end
+            end
+            ones1 = 0
+            for c in 1:nc; ones1 += count_ones(dom[off1 + c]); end
+            if ones1 == 1
+                for c in 1:nc
+                    old_c = dom[off2 + c]
+                    new_c = old_c & ~dom[off1 + c]
+                    if new_c != old_c
+                        Atomix.@atomic dom[off2 + c] &= new_c
+                        changed_flag[1] = true
+                    end
+                end
+            end
+
+        elseif bc.op == PROP_EQ && bc.var2 != 0
+            v2   = Int(bc.var2)
+            off2 = dom_off + (v2 - 1) * NM
+            for c in 1:nc
+                old1 = dom[off1 + c]
+                old2 = dom[off2 + c]
+                new1 = old1 & old2
+                new2 = old2 & old1
+                if new1 != old1
+                    Atomix.@atomic dom[off1 + c] &= new1
+                    changed_flag[1] = true
+                end
+                if new2 != old2
+                    Atomix.@atomic dom[off2 + c] &= new2
+                    changed_flag[1] = true
+                end
+            end
+        end
+
+        bc_idx += blocksize
+    end
+    nothing
+end
+
 # ── EPS (Embarrassingly Parallel Search) Turbo kernel ────────────────────────
 
 """
@@ -707,19 +860,541 @@ Thread `sub` uses rows `(sub-1)*n_vars*NM + 1 : sub*n_vars*NM`.
     end  # if sub <= n_subs
 end
 
+# ── Block-parallel consistency check + unbound-variable detection ─────────────
+#
+# Called only from thread `tid`==1; writes:
+#   ok_flag[1]  = true if all domains are non-empty, false on failure
+#   binfo[1]    = first unbound variable (>1 element in domain), or 0 if all fixed
+# No @synchronize — caller is responsible for issuing one after this returns.
+@inline function _check_find_unbound!(
+    dom     :: DOM,
+    dom_off :: Int,
+    ok_flag :: OF,
+    binfo   :: BI,
+    n_vars  :: Int,
+    nc      :: Int,
+    ::Val{NM}
+) where {NM, DOM, OF, BI}
+    ok_flag[1] = true
+    binfo[1]   = Int32(0)
+    for v in 1:n_vars
+        off = dom_off + (v - 1) * NM
+        all_zero = true
+        for c in 1:nc
+            dom[off + c] != UInt64(0) && (all_zero = false; break)
+        end
+        if all_zero; ok_flag[1] = false; return; end
+    end
+    for v in 1:n_vars
+        off  = dom_off + (v - 1) * NM
+        ones = 0
+        for c in 1:nc; ones += count_ones(dom[off + c]); end
+        if ones > 1; binfo[1] = Int32(v); return; end
+    end
+    nothing
+end
+
+# ── Turbo multi-block dive-and-solve kernel (B9) ─────────────────────────────
+
+"""
+Multi-block Turbo dive-and-solve kernel (B9).
+
+Decomposes the CSP search tree into `2^D` subproblems via binary-path encoding.
+CUDA blocks claim subproblems dynamically from the atomic counter `nextsub`.
+All threads in a block cooperate on AC-1 propagation via `_propagate_block!`;
+thread 1 drives branching decisions and the DFS stack.
+
+Variable domains are stored in block-local shared memory (`dom`, 16 DFS levels).
+No per-call workspace allocation: storage is statically sized via `Val{NM}`
+(nc_max) and `Val{NVNM16}` (n_vars × nc_max × 16).
+
+Launch with blocksize=32, n_blocks = min(2^D, 576).
+"""
+@kernel function turbo_block_kernel!(
+    domains_root  :: AbstractVector{UInt64},
+    bytecodes     :: AbstractVector{TCNBytecode},
+    n_bc          :: Int,
+    n_vars        :: Int,
+    nc            :: Int,
+    D             :: Int,
+    nextsub       :: AbstractVector{Int32},
+    solutions     :: AbstractMatrix{Int32},
+    sol_count     :: AbstractVector{Int32},
+    max_solutions :: Int,
+    hf_flat       :: AbstractVector{UInt64},
+    hf_offs       :: AbstractVector{Int32},
+    ::Val{NM},
+    ::Val{NVNM16},
+) where {NM, NVNM16}
+
+    tid       = @index(Local, Linear)   # 1-based thread within block
+    blocksize = @groupsize()[1]
+    n_vars_nm = n_vars * NM             # words per DFS level
+
+    # ── Shared memory ─────────────────────────────────────────────────────────
+    dom      = @localmem UInt64 (NVNM16,)  # domain workspace: 16 DFS levels
+    stack_v  = @localmem Int32  (16,)      # branching variable at each solve-phase level
+    stnext   = @localmem Int32  (16,)      # next candidate element index at each level
+    ok_flag  = @localmem Bool   (1,)
+    # binfo: [1]=ub_var (0=all fixed), [2]=branch_elem (1-based flat), [3]=found_next
+    binfo    = @localmem Int32  (3,)
+    # mysub_block: the subproblem index claimed by this block (one value for all 32 threads)
+    mysub_b  = @localmem Int32  (1,)
+
+    # ── Thread 1 claims first subproblem for the block ────────────────────────
+    if tid == 1
+        mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+    end
+    @synchronize()
+
+    while mysub_b[1] < Int32(1 << D)
+        mysub = Int(mysub_b[1])
+
+        # ── 1. Copy root domains into dom level 1 (all threads cooperate) ──────
+        j = tid
+        while j <= n_vars_nm
+            v_zero = (j - 1) ÷ NM
+            c      = (j - 1) - v_zero * NM + 1
+            dom[j] = c <= nc ? domains_root[v_zero * nc + c] : UInt64(0)
+            j += blocksize
+        end
+        @synchronize()
+
+        # ── 2. DIVE PHASE: binary-path decomposition for D levels ──────────────
+        dive_ok = true
+
+        for d in 1:D
+            # Thread 1: inline AC-1 propagation on dom[1..n_vars_nm], then
+            # consistency check, unbound-var detection, and domain pin.
+            if tid == 1
+                new_d     = MVector{NM, UInt64}(undef)
+                reachable = MVector{NM, UInt64}(undef)
+                for _ in 1:(n_bc * 8 + 1)
+                    local_changed = false
+                    for i in 1:n_bc
+                        bc = bytecodes[i]
+                        v1 = Int(bc.var1); v1 == 0 && continue
+                        off1 = (v1 - 1) * NM
+
+                        if bc.op == PROP_FUNC && bc.var2 != 0
+                            v2    = Int(bc.var2)
+                            off2  = (v2 - 1) * NM
+                            h_idx = Int(bc.param1)
+                            n_homs = length(hf_offs) - 1
+                            if 1 <= h_idx <= n_homs
+                                off_h     = Int(hf_offs[h_idx])
+                                n_elems_h = (Int(hf_offs[h_idx + 1]) - off_h) ÷ nc
+                                for c in 1:NM; new_d[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = dom[off1 + c]
+                                    while chunk != UInt64(0)
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w = off_h + (w - 1) * nc
+                                        for ci in 1:nc
+                                            if (hf_flat[off_w + ci] & dom[off2 + ci]) != UInt64(0)
+                                                new_d[c] |= lsb; break
+                                            end
+                                        end
+                                    end
+                                end
+                                for c in 1:nc
+                                    old_c = dom[off1 + c]
+                                    dom[off1 + c] = new_d[c]
+                                    old_c != new_d[c] && (local_changed = true)
+                                end
+                                for c in 1:NM; reachable[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = new_d[c]
+                                    while chunk != UInt64(0)
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w = off_h + (w - 1) * nc
+                                        for ci in 1:nc; reachable[ci] |= hf_flat[off_w + ci]; end
+                                    end
+                                end
+                                for c in 1:nc
+                                    new_c = dom[off2 + c] & reachable[c]
+                                    new_c != dom[off2 + c] && (local_changed = true)
+                                    dom[off2 + c] = new_c
+                                end
+                            end
+
+                        elseif bc.op == PROP_NEQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = (v2 - 1) * NM
+                            ones2 = 0
+                            for c in 1:nc; ones2 += count_ones(dom[off2 + c]); end
+                            if ones2 == 1
+                                for c in 1:nc
+                                    old_c = dom[off1 + c]
+                                    new_c = old_c & ~dom[off2 + c]
+                                    dom[off1 + c] = new_c
+                                    old_c != new_c && (local_changed = true)
+                                end
+                            end
+                            ones1 = 0
+                            for c in 1:nc; ones1 += count_ones(dom[off1 + c]); end
+                            if ones1 == 1
+                                for c in 1:nc
+                                    old_c = dom[off2 + c]
+                                    new_c = old_c & ~dom[off1 + c]
+                                    dom[off2 + c] = new_c
+                                    old_c != new_c && (local_changed = true)
+                                end
+                            end
+
+                        elseif bc.op == PROP_EQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = (v2 - 1) * NM
+                            for c in 1:nc
+                                old1 = dom[off1 + c]; old2 = dom[off2 + c]
+                                new1 = old1 & old2;   new2 = old2 & old1
+                                dom[off1 + c] = new1; dom[off2 + c] = new2
+                                (old1 != new1 || old2 != new2) && (local_changed = true)
+                            end
+                        end
+                    end
+                    local_changed || break
+                end
+
+                ok_flag[1] = true
+                for v in 1:n_vars
+                    all_zero = true
+                    for c in 1:nc
+                        dom[(v - 1) * NM + c] != UInt64(0) && (all_zero = false; break)
+                    end
+                    if all_zero; ok_flag[1] = false; break; end
+                end
+
+                binfo[1] = Int32(0)
+                if ok_flag[1]
+                    for v in 1:n_vars
+                        off  = (v - 1) * NM
+                        ones = 0
+                        for c in 1:nc; ones += count_ones(dom[off + c]); end
+                        if ones > 1; binfo[1] = Int32(v); break; end
+                    end
+
+                    ub_v = Int(binfo[1])
+                    if ub_v != 0
+                        bit_d = (mysub >> (D - d)) & 1
+                        off   = (ub_v - 1) * NM
+                        if bit_d == 0
+                            first_c  = Int32(0)
+                            first_bi = Int32(0)
+                            for c in 1:nc
+                                if first_c == Int32(0)
+                                    chunk = dom[off + c]
+                                    if chunk != UInt64(0)
+                                        first_c  = Int32(c)
+                                        first_bi = Int32(trailing_zeros(chunk))
+                                    end
+                                end
+                            end
+                            for c in 1:NM; dom[off + c] = UInt64(0); end
+                            if first_c != Int32(0)
+                                dom[off + Int(first_c)] = UInt64(1) << Int(first_bi)
+                            end
+                        else
+                            for c in 1:nc
+                                chunk = dom[off + c]
+                                if chunk != UInt64(0)
+                                    dom[off + c] &= ~(chunk & (-chunk))
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end  # tid == 1
+            @synchronize()
+
+            if !ok_flag[1]; dive_ok = false; break; end
+
+            if binfo[1] == Int32(0)
+                # All variables fixed mid-dive: canonical subproblem records solution
+                remaining      = D - d + 1
+                remaining_mask = (1 << remaining) - 1
+                if (mysub & remaining_mask) == 0 && tid == 1
+                    tmp_idx = CUDA.atomic_add!(pointer(sol_count, 1), Int32(1)) + 1
+                    if tmp_idx <= max_solutions
+                        for v in 1:n_vars
+                            off  = (v - 1) * NM
+                            elem = Int32(0)
+                            for c in 1:nc
+                                ch = dom[off + c]
+                                if ch != UInt64(0)
+                                    bi   = trailing_zeros(ch)
+                                    elem = Int32((c - 1) * 64 + bi + 1)
+                                    break
+                                end
+                            end
+                            solutions[v, tmp_idx] = elem
+                        end
+                    end
+                end
+                @synchronize()
+                dive_ok = false; break
+            end
+        end  # for d in 1:D
+
+        # ── 3. SOLVE PHASE: backtracking DFS from dive leaf ────────────────────
+        # dom[0..n_vars_nm-1] holds the post-dive domain (DFS level 1).
+        if dive_ok
+            level  = 1
+            state  = 1
+            safety = 0
+
+            while level > 0 && safety < 10_000_000
+                safety += 1
+                lev_off = (level - 1) * n_vars_nm
+
+                if state == 1
+                    if tid == 1
+                        new_d     = MVector{NM, UInt64}(undef)
+                        reachable = MVector{NM, UInt64}(undef)
+                        for _ in 1:(n_bc * 8 + 1)
+                            local_changed = false
+                            for i in 1:n_bc
+                                bc = bytecodes[i]
+                                v1 = Int(bc.var1); v1 == 0 && continue
+                                off1 = lev_off + (v1 - 1) * NM
+
+                                if bc.op == PROP_FUNC && bc.var2 != 0
+                                    v2    = Int(bc.var2)
+                                    off2  = lev_off + (v2 - 1) * NM
+                                    h_idx = Int(bc.param1)
+                                    n_homs = length(hf_offs) - 1
+                                    if 1 <= h_idx <= n_homs
+                                        off_h     = Int(hf_offs[h_idx])
+                                        n_elems_h = (Int(hf_offs[h_idx + 1]) - off_h) ÷ nc
+                                        for c in 1:NM; new_d[c] = UInt64(0); end
+                                        for c in 1:nc
+                                            chunk = dom[off1 + c]
+                                            while chunk != UInt64(0)
+                                                lsb = chunk & (-chunk); chunk &= ~lsb
+                                                bi  = trailing_zeros(lsb)
+                                                w   = (c - 1) * 64 + bi + 1
+                                                w > n_elems_h && continue
+                                                off_w = off_h + (w - 1) * nc
+                                                for ci in 1:nc
+                                                    if (hf_flat[off_w + ci] & dom[off2 + ci]) != UInt64(0)
+                                                        new_d[c] |= lsb; break
+                                                    end
+                                                end
+                                            end
+                                        end
+                                        for c in 1:nc
+                                            old_c = dom[off1 + c]
+                                            dom[off1 + c] = new_d[c]
+                                            old_c != new_d[c] && (local_changed = true)
+                                        end
+                                        for c in 1:NM; reachable[c] = UInt64(0); end
+                                        for c in 1:nc
+                                            chunk = new_d[c]
+                                            while chunk != UInt64(0)
+                                                lsb = chunk & (-chunk); chunk &= ~lsb
+                                                bi  = trailing_zeros(lsb)
+                                                w   = (c - 1) * 64 + bi + 1
+                                                w > n_elems_h && continue
+                                                off_w = off_h + (w - 1) * nc
+                                                for ci in 1:nc; reachable[ci] |= hf_flat[off_w + ci]; end
+                                            end
+                                        end
+                                        for c in 1:nc
+                                            new_c = dom[off2 + c] & reachable[c]
+                                            new_c != dom[off2 + c] && (local_changed = true)
+                                            dom[off2 + c] = new_c
+                                        end
+                                    end
+
+                                elseif bc.op == PROP_NEQ && bc.var2 != 0
+                                    v2   = Int(bc.var2)
+                                    off2 = lev_off + (v2 - 1) * NM
+                                    ones2 = 0
+                                    for c in 1:nc; ones2 += count_ones(dom[off2 + c]); end
+                                    if ones2 == 1
+                                        for c in 1:nc
+                                            old_c = dom[off1 + c]
+                                            new_c = old_c & ~dom[off2 + c]
+                                            dom[off1 + c] = new_c
+                                            old_c != new_c && (local_changed = true)
+                                        end
+                                    end
+                                    ones1 = 0
+                                    for c in 1:nc; ones1 += count_ones(dom[off1 + c]); end
+                                    if ones1 == 1
+                                        for c in 1:nc
+                                            old_c = dom[off2 + c]
+                                            new_c = old_c & ~dom[off1 + c]
+                                            dom[off2 + c] = new_c
+                                            old_c != new_c && (local_changed = true)
+                                        end
+                                    end
+
+                                elseif bc.op == PROP_EQ && bc.var2 != 0
+                                    v2   = Int(bc.var2)
+                                    off2 = lev_off + (v2 - 1) * NM
+                                    for c in 1:nc
+                                        old1 = dom[off1 + c]; old2 = dom[off2 + c]
+                                        new1 = old1 & old2;   new2 = old2 & old1
+                                        dom[off1 + c] = new1; dom[off2 + c] = new2
+                                        (old1 != new1 || old2 != new2) && (local_changed = true)
+                                    end
+                                end
+                            end
+                            local_changed || break
+                        end
+
+                        ok_flag[1] = true
+                        for v in 1:n_vars
+                            all_zero = true
+                            off = lev_off + (v - 1) * NM
+                            for c in 1:nc
+                                dom[off + c] != UInt64(0) && (all_zero = false; break)
+                            end
+                            if all_zero; ok_flag[1] = false; break; end
+                        end
+
+                        binfo[1] = Int32(0)
+                        if ok_flag[1]
+                            for v in 1:n_vars
+                                off  = lev_off + (v - 1) * NM
+                                ones = 0
+                                for c in 1:nc; ones += count_ones(dom[off + c]); end
+                                if ones > 1; binfo[1] = Int32(v); break; end
+                            end
+                        end
+                    end  # tid == 1
+                    @synchronize()
+
+                    if !ok_flag[1]; level -= 1; state = 2; continue; end
+
+                    if binfo[1] == Int32(0)
+                        if tid == 1
+                            tmp_idx = CUDA.atomic_add!(pointer(sol_count, 1), Int32(1)) + 1
+                            if tmp_idx <= max_solutions
+                                for v in 1:n_vars
+                                    off  = lev_off + (v - 1) * NM
+                                    elem = Int32(0)
+                                    for c in 1:nc
+                                        ch = dom[off + c]
+                                        if ch != UInt64(0)
+                                            bi   = trailing_zeros(ch)
+                                            elem = Int32((c - 1) * 64 + bi + 1)
+                                            break
+                                        end
+                                    end
+                                    solutions[v, tmp_idx] = elem
+                                end
+                            end
+                        end
+                        @synchronize()
+                        level -= 1; state = 2; continue
+                    end
+
+                    if tid == 1
+                        stack_v[level] = binfo[1]
+                        stnext[level]  = Int32(1)
+                    end
+                    @synchronize()
+                    state = 2
+                end  # state == 1
+
+                if state == 2
+                    if tid == 1
+                        binfo[3] = Int32(0)
+                        v   = Int(stack_v[level])
+                        off = lev_off + (v - 1) * NM
+                        ne  = Int(stnext[level])
+                        while ne <= nc * 64
+                            c_ne  = (ne - 1) >> 6 + 1
+                            bi_ne = (ne - 1) & 63
+                            if (dom[off + c_ne] & (UInt64(1) << bi_ne)) != UInt64(0)
+                                if level < 16
+                                    binfo[2]      = Int32(ne)
+                                    binfo[3]      = Int32(1)
+                                    stnext[level] = Int32(ne + 1)
+                                end
+                                break
+                            end
+                            ne += 1
+                        end
+                    end
+                    @synchronize()
+
+                    if binfo[3] == Int32(1)
+                        # Copy current level to next (all threads cooperate)
+                        dst_off = level * n_vars_nm
+                        j = tid
+                        while j <= n_vars_nm
+                            dom[dst_off + j] = dom[lev_off + j]
+                            j += blocksize
+                        end
+                        @synchronize()
+
+                        if tid == 1
+                            v     = Int(stack_v[level])
+                            ne    = Int(binfo[2])
+                            c_ne  = (ne - 1) >> 6 + 1
+                            bi_ne = (ne - 1) & 63
+                            off   = dst_off + (v - 1) * NM
+                            for c in 1:NM; dom[off + c] = UInt64(0); end
+                            dom[off + c_ne] = UInt64(1) << bi_ne
+                        end
+                        @synchronize()
+                        level += 1; state = 1
+                    else
+                        if tid == 1; stnext[level] = Int32(1); end
+                        @synchronize()
+                        level -= 1; state = 2
+                    end
+                end  # state == 2
+            end  # while level > 0
+        end  # if dive_ok
+
+        # ── 4. Claim next subproblem for this block ────────────────────────────
+        if tid == 1
+            mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+        end
+        @synchronize()
+    end  # while mysub_b[1] < 2^D
+end
+
+# Private helper: dispatch Val{nc_max} and Val{nvnm16} for turbo_block_kernel!.
+# Called from gpu_turbo_solve and _gpu_turbo_fill_scratch!.
+function _launch_turbo_block!(backend,
+                               d_gpu, b_gpu,
+                               n_bc::Int, n_vars::Int, nc::Int, D::Int,
+                               nextsub, sol_gpu, cnt_gpu, max_solutions::Int,
+                               hf_flat, hf_offs,
+                               nc_max::Int, nvnm16::Int, n_blks::Int)
+    turbo_block_kernel!(backend, 32)(
+        d_gpu, b_gpu, n_bc, n_vars, nc, D,
+        nextsub, sol_gpu, cnt_gpu, max_solutions,
+        hf_flat, hf_offs, Val(nc_max), Val(nvnm16);
+        ndrange = n_blks * 32
+    )
+end
+
 """
     gpu_turbo_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; kwargs) -> solutions
 
-EPS parallel solver (B9): runs one parallel DFS thread per element of the
-first unbound variable in the initial propagated domain.  For a graph-matching
-rule with N valid matches the solver explores N subproblems simultaneously.
+Multi-block Turbo solver (B9): decomposes the CSP search tree into 2^D
+subproblems.  CUDA blocks claim subproblems from an atomic counter and cooperate
+on AC-1 propagation within each block.  No per-call workspace allocation; all
+domain state lives in shared memory.
 
-When `scratch` is provided, the branching-point detection runs entirely on
-GPU via two ordered kernels (`find_unbound_var_kernel!` and
-`compact_domain_kernel!`) with a single subsequent synchronize and a 12-byte
-scalar download — no domain array is transferred to the host.
+When `scratch` is provided, `scratch.buf_turbo_nextsub` is used as the shared
+counter (no extra allocation).  Otherwise a transient CuVector{Int32}(1) is
+allocated.
 
-Falls back to `gpu_dive_solve` when the domain is already fixed or empty.
+Falls back to `gpu_dive_solve` for zero-variable or empty CSPs.
 """
 function gpu_turbo_solve(backend, csp::CSPProblem,
                          d_gpu, hf_flat_gpu, hf_offs_gpu;
@@ -730,66 +1405,34 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     nc     = csp.n_chunks
     nc_max = _select_nc_max(nc)
 
-    # ── Detect branching point on GPU ─────────────────────────────────────────
+    # Empty pattern: unique empty match always exists.
+    n_vars == 0 && return [Int32[]]
+
+    D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
+    n_blks = min(1 << D, 576)
+    nvnm16 = n_vars * nc_max * 16
+
     if scratch !== nothing
-        # Initialize ub_info: [ub_var=n_vars+1, n_subs=0, ok=1]
-        copyto!(scratch.buf_ub_info, Int32[n_vars + 1, 0, 1])
-
-        # Kernel 1: parallel popcount scan → atomicMin for ub_var, atomicAnd for ok
-        find_unbound_var_kernel!(backend, 256)(
-            scratch.buf_ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
-
-        # Kernel 2: single-thread bitset unpack — reads ub_var from GPU, writes elements
-        # Ordered automatically by CUDA stream; no intermediate synchronize needed.
-        compact_domain_kernel!(backend, 1)(
-            scratch.buf_ub_elems, scratch.buf_ub_info, d_gpu, nc; ndrange = 1)
-
-        KernelAbstractions.synchronize(backend)
-
-        # Download 3 Int32s (12 bytes total)
-        ub_info = Array(scratch.buf_ub_info)
-        ub_var  = Int(ub_info[1])
-        n_subs  = Int(ub_info[2])
-        ok      = Int(ub_info[3])
-
-        ok == 0        && return Vector{Int32}[]
-        ub_var > n_vars && return gpu_dive_solve(backend, csp, d_gpu,
-                                                  hf_flat_gpu, hf_offs_gpu;
-                                                  max_solutions, scratch)
-        n_subs == 0    && return Vector{Int32}[]
-
-        ub_gpu = @view scratch.buf_ub_elems[1:n_subs]
-
         b_gpu   = scratch.buf_bytecodes
         sol_gpu = scratch.buf_solutions
         cnt_gpu = scratch.buf_sol_count
+        sub_gpu = scratch.buf_turbo_nextsub
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
+        KernelAbstractions.fill!(sub_gpu, Int32(0))
     else
-        # CPU fallback: download domain, scan on host, upload element list.
-        # Used only outside the scheduler hot path (e.g. turbo_homomorphisms).
-        d_host = Array(d_gpu)
-        ub_var, ub_elements = _find_first_unbound(d_host, n_vars, nc)
-        (ub_var == 0 || isempty(ub_elements)) &&
-            return gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
-                                  max_solutions, scratch)
-        n_subs = length(ub_elements)
-        ub_gpu = KernelAbstractions.allocate(backend, Int32, n_subs)
-        KernelAbstractions.copyto!(backend, ub_gpu, ub_elements)
-
         b_gpu   = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
         sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
         cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
+        sub_gpu = KernelAbstractions.allocate(backend, Int32, 1)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
+        KernelAbstractions.fill!(sub_gpu, Int32(0))
     end
 
-    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
-
-    turbo_eps_kernel!(backend)(
-        d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
-        work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
-        ndrange = n_subs)
+    _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
+                          sub_gpu, sol_gpu, cnt_gpu, max_solutions,
+                          hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
     KernelAbstractions.synchronize(backend)
 
     count = Int(Array(cnt_gpu)[1])
@@ -801,12 +1444,14 @@ end
 """
     _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; scratch) -> Int
 
-Variant of `gpu_turbo_solve` that fills `scratch.buf_solutions` on-device but
-downloads only the solution count (4 bytes) rather than all solutions.
+Fills `scratch.buf_solutions` on-device with all solutions found by the
+multi-block Turbo solver.  Downloads only the 4-byte solution count.
 Returns the number of solutions found (0 if none).
 
 Used by the `AbstractGPUPlayer` fast path in `_gpu_solve_inplace!` so that
 the player can inspect `scratch.buf_solutions` directly without a bulk transfer.
+No per-call GPU allocations: uses `scratch.buf_turbo_nextsub` as the shared
+subproblem counter.
 """
 function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
                                    d_gpu, hf_flat_gpu, hf_offs_gpu;
@@ -817,38 +1462,27 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     nc     = csp.n_chunks
     nc_max = _select_nc_max(nc)
 
-    copyto!(scratch.buf_ub_info, Int32[n_vars + 1, 0, 1])
-    find_unbound_var_kernel!(backend, 256)(
-        scratch.buf_ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
-    compact_domain_kernel!(backend, 1)(
-        scratch.buf_ub_elems, scratch.buf_ub_info, d_gpu, nc; ndrange = 1)
-    KernelAbstractions.synchronize(backend)
+    # Empty pattern: exactly 1 empty match always exists.
+    if n_vars == 0
+        KernelAbstractions.fill!(scratch.buf_sol_count, Int32(1))
+        return 1
+    end
 
-    ub_info = Array(scratch.buf_ub_info)
-    ub_var  = Int(ub_info[1])
-    n_subs  = Int(ub_info[2])
-    ok      = Int(ub_info[3])
-
-    ok == 0     && return 0
-    n_subs == 0 && return 0
+    D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
+    n_blks = min(1 << D, 576)
+    nvnm16 = n_vars * nc_max * 16
 
     b_gpu   = scratch.buf_bytecodes
     sol_gpu = scratch.buf_solutions
     cnt_gpu = scratch.buf_sol_count
+    sub_gpu = scratch.buf_turbo_nextsub
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
+    KernelAbstractions.fill!(sub_gpu, Int32(0))
 
-    if ub_var > n_vars
-        work_gpu = scratch.buf_workspace
-        dive_solve_kernel!(backend)(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu,
-            max_solutions, work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange = 1)
-    else
-        ub_gpu   = @view scratch.buf_ub_elems[1:n_subs]
-        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_subs * n_vars * nc_max, 16)
-        turbo_eps_kernel!(backend)(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu,
-            max_solutions, work_gpu, hf_flat_gpu, hf_offs_gpu, ub_var, ub_gpu, Val(nc_max);
-            ndrange = n_subs)
-    end
+    _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
+                          sub_gpu, sol_gpu, cnt_gpu, max_solutions,
+                          hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks)
     KernelAbstractions.synchronize(backend)
     CUDA.@allowscalar min(Int(scratch.buf_sol_count[1]), max_solutions)
 end
