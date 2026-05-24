@@ -1,53 +1,72 @@
 # GPU Performance Plan: Eliminating Remaining CPU Bottlenecks
 
-This document catalogues every remaining CPU bottleneck in `gpu_run_game_sched!` and
-provides a concrete implementation plan for each one.  The bottlenecks are organized
-by the phase of execution in which they appear, with difficulty and expected impact
-annotated for prioritization.
+This document catalogues CPU bottlenecks in `gpu_run_game_sched!` and provides a
+concrete implementation plan for each one.  Bottlenecks are organized by execution
+phase with difficulty and expected impact annotated for prioritization.
 
-**Current state (after recent session)**:  
-The pipeline runs a full DPO rewrite episode without reading from the Catlab ACSet R
-at rewrite time, without downloading active/FK arrays to build domains, and without
-the terminal-predicate false-download.  The kernel bounds crash (nc > MAX_CHUNKS) is
-fixed.  Benchmarks show 1–4× GPU speedup over CPU for graph rewriting workloads,
-growing with world size.
+**Current state (as of 2026-05-24)**:  
+The pipeline is fully functional with zero-allocation steady-state solve paths,
+GPU-native stream compaction, a GPU player interface that avoids all world downloads,
+and parameterized kernel dispatch for graphs up to 1024 elements per type.
+Benchmarks show up to **5968×** speedup vs CPU random player on a 3-rule multi-step
+schedule at n=500.  The matching step itself still runs on a single GPU thread.
 
 **Critical clarification on "Turbo"**:  
-The name "Turbo" in `turbo_homomorphisms` and throughout the codebase refers to the
-AAAI-26 paper "A GPU-based Constraint Programming Solver" (Talbot, 2026) and its open-
-source implementation at https://github.com/ptal/turbo/tree/aaai2026.  Our TCN
-bytecode format (`TCNBytecode`, 16 bytes, matching Turbo's struct) was correctly
-adopted from that work.  However, **the parallel multi-block GPU solver that is the
-paper's central contribution has not been implemented**.  Our `dive_solve_kernel!`
-runs with `ndrange=1` — a single GPU thread executing sequential DFS — while Turbo's
-algorithm distributes the search tree across hundreds of CUDA blocks executing in
-parallel.  The benchmark speedups observed so far come entirely from the GPU-resident
-data structure (GPUACSet), GPU rewriting kernels, and eliminating CPU round-trips;
-the matching step itself, which dominates cost, still runs on one thread.
+The name "Turbo" refers to the AAAI-26 paper "A GPU-based Constraint Programming
+Solver" (Talbot, 2026) and its open-source implementation at
+https://github.com/ptal/turbo/tree/aaai2026.  Our TCN bytecode format (`TCNBytecode`,
+16 bytes) was adopted from that work.  However, **the parallel multi-block GPU solver
+that is the paper's central contribution has not been implemented**.  Our
+`dive_solve_kernel!` runs with `ndrange=1` — a single GPU thread executing sequential
+DFS — while Turbo distributes the search tree across hundreds of CUDA blocks.  The
+benchmark speedups come from GPU-resident data structures, zero-allocation solve paths,
+GPU rewriting kernels, and the GPU player interface; the CSP matching step itself still
+runs on one thread.
 
 ---
 
-## Executive Summary of Remaining Bottlenecks
+## Implementation Status
 
-| # | Bottleneck | Phase | Impact | Difficulty |
-|---|-----------|-------|--------|------------|
-| 1 | Per-solve GPU buffer allocations | solve | High | Low |
-| 2 | `_apply_attr_masks_gpu_device!` CPU download | solve | Medium | Low |
-| 3 | `build_to_del_mask` CPU + upload | rewrite | Medium | Medium |
-| 4 | `gpu_dangling_ok` per-morphism alloc + CPU reduction | rewrite | Medium | Low |
-| 5 | `apply_pushout!` small CuArray allocations | rewrite | Medium | Low |
-| 6 | `_update_preserved!` CuArray allocations | rewrite | Low | Low |
-| 7 | Stream compaction — full CPU round-trip | compaction | High | Medium |
-| 8 | `_choose_gpu_match` + Catlab `homomorphisms` call | player | Very High | Medium |
-| 9 | Missing Turbo multi-block parallel solver (core of Turbo) | solver | **Critical** | High |
-| 10 | Multiple `KernelAbstractions.synchronize` per solve | solve | Medium | Low |
-| 11 | `MAX_CHUNKS = 4` hard limit (256 elements/type) | solver | High | Medium |
-| 12 | `IncrementalUpdate.jl` entirely CPU-side | cache | High | High |
-| 13 | Experience pre-state always `initial_world` | decoding | Medium | Medium |
-| 14 | `download_acset` CPU-side compaction | decoding | Medium | Medium |
-| 15 | `hom_fwd_offs` recomputed and re-uploaded every solve | solve | Low | Low |
-| 16 | `sort()` in `_build_domains_gpu` | solve | Negligible | Trivial |
-| 17 | `propagation_kernel!` unused in main path | solver | Medium | High |
+| # | Bottleneck | Phase | Status | Notes |
+|---|-----------|-------|--------|-------|
+| 1 | Per-solve GPU buffer allocations | solve | ✅ Done | `GPUScratchBuffers` with pre-allocated buffers for domains, solutions, workspace, etc. |
+| 2 | `_apply_attr_masks_gpu_device!` CPU download | solve | ✅ Done | Two-pass GPU kernels (`_attr_mask_fill_kernel!` + `_attr_mask_and_kernel!`); no `Array(g.attrs)` |
+| 3 | `build_to_del_mask` CPU + upload | rewrite | 🟡 Partial | Pre-allocated `buf_to_del` avoids the final `CuArray(...)` upload; the mask is still *built* on CPU |
+| 4 | `gpu_dangling_ok` per-morphism alloc + CPU reduction | rewrite | ✅ Done | Shared `buf_violation` flag; all morphism kernels launched before single sync + single `Array` download |
+| 5 | `apply_pushout!` small CuArray allocations | rewrite | ✅ Done | `buf_pushout_slots` / `buf_pushout_vals` in `GPUScratchBuffers`; doubled on overflow |
+| 6 | `_update_preserved!` CuArray allocations | rewrite | ✅ Done | Reuses the same `buf_pushout_slots` / `buf_pushout_vals` scratch buffers |
+| 7 | Stream compaction — full CPU round-trip | compaction | ✅ Done | `_compact_gpu_native!`: on-device prefix-sum + scatter; only scalar `n_alloc` values downloaded |
+| 8 | `_choose_gpu_match` + Catlab `homomorphisms` call | player | 🟡 Partial | Fix B (`AbstractGPUPlayer` / `GPUFunctionPlayer`) done — zero download for GPU players. Fix A (eliminate `_assignment_to_hom` for `FunctionAgent`) not done |
+| 9 | Missing Turbo multi-block parallel solver | solver | ❌ Not done | `dive_solve_kernel!` still `ndrange=1`; 2300 CUDA cores idle during search |
+| 10 | Multiple `KernelAbstractions.synchronize` per solve | solve | 🟡 Partial | Deletion path collapsed to 1 sync; Scheduler.jl still has 5 sync calls in hot path |
+| 11 | `MAX_CHUNKS = 4` hard limit (256 elements/type) | solver | ✅ Done | `_select_nc_max` dispatches `Val{N}` kernels; supports up to nc=16 (1024 elements/type) |
+| 12 | `IncrementalUpdate.jl` entirely CPU-side | cache | ❌ Not done | Infrastructure exists but not wired into main scheduler; re-solves from scratch each turn |
+| 13 | Experience pre-state always `initial_world` | decoding | 🟡 Partial | Direct path still uses `initial_world`; `Decode.jl` has trajectory-based reconstruction but not wired to direct path |
+| 14 | `download_acset` CPU-side compaction | decoding | ❌ Not done | Still iterates tombstones on CPU; depends on B7 being called before download |
+| 15 | `hom_fwd_offs` recomputed and re-uploaded every solve | solve | ✅ Done | `cached_hf_offs` in `GPUScratchBuffers`; upload skipped when unchanged |
+| 16 | `sort()` in `_build_domains_gpu` | solve | ✅ Done | `sorted_type_bases` pre-sorted in `CSPProblem` at construction time |
+| 17 | `propagation_kernel!` unused in main path | solver | ❌ Not done | Still missing `PROP_FUNC`; still unused; prerequisite for B9 |
+
+**Legend:** ✅ Done · 🟡 Partial · ❌ Not done
+
+---
+
+## Remaining Work Summary
+
+The infrastructure (zero-allocation paths, GPU compaction, parameterized kernels,
+GPU player interface) is complete.  Three items remain meaningful:
+
+**B9 — Turbo multi-block parallel solver** (5–8 days, highest impact)  
+This is the missing core of the "Turbo" architecture.  B17 (block-parallel propagation
+kernel) is a prerequisite.  Expected 10–100× speedup on the matching step alone.
+
+**B12 — GPU-resident incremental match cache** (3–5 days)  
+Would amortize O(n²) search to O(|Δ|²) for long episodes.  Highest long-term
+throughput gain for RL training.
+
+**B3 partial, B8A, B10, B14** — smaller cleanup items.
+
+---
 
 ---
 
