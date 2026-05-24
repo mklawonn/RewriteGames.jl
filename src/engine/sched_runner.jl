@@ -156,6 +156,14 @@ function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max
             _exec_native_rule!(step, box, input_world, wires, agent_match)
         elseif box isa MergeWires
             wires[step.outputs[1]] = box([get(wires, w, nothing) for w in step.inputs]...)
+        elseif box isa Schedule
+            # AlgebraicRewriting.Schedule acting as merge_wires: take first active input
+            result = nothing
+            for wname in step.inputs
+                w = get(wires, wname, nothing)
+                if w !== nothing; result = w; break; end
+            end
+            length(step.outputs) >= 1 && (wires[step.outputs[1]] = result)
         elseif box isa Coin
             out = box(input_world)
             for i in 1:length(step.outputs); wires[step.outputs[i]] = i <= length(out) ? out[i] : nothing; end
