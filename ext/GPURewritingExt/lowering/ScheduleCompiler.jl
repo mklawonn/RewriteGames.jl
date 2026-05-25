@@ -221,8 +221,16 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      (0f0,0f0,0f0,0f0), UInt16(0)))
             push!(box_players, :_none)
 
+        elseif hasproperty(box, :p) && box isa RewriteGames.Coin
+            # Stochastic split: MasterScheduler reads params[1] as the probability
+            # of routing to output wire 1 (kill/true path); output 2 is the miss path.
+            push!(boxes, CompiledBox(BOX_COIN, UInt16(0), UInt16(0),
+                                     _p_idx(:_none), in_w, out_ws,
+                                     (Float32(box.p), 0f0, 0f0, 0f0), UInt16(0)))
+            push!(box_players, :_none)
+
         else
-            # Utility box (MergeWires, Coin, etc.): emit one BOX_WEAKEN per input
+            # Utility box (MergeWires, etc.): emit one BOX_WEAKEN per input wire
             # to correctly implement "take first active input" semantics.
             for in_name in step.inputs
                 iw = UInt16(_w!(in_name))
