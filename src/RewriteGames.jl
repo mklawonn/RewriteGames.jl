@@ -130,6 +130,7 @@ export
     merge_wires, coin,
     view_sched,
     run_game_sched!,
+    _collect_rule_r_acssets,
 
     # Incremental match cache
     MatchCache,

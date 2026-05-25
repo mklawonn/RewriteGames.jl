@@ -159,6 +159,12 @@ function mk_game_sched(trace_args, init_args, N, boxes, body; cat=nothing, kwarg
         elseif v isa AlgebraicRewriting.Schedules.Queries.Query; v
         elseif v isa AlgebraicRewriting.Schedules.RuleApps.RuleApp; v
         elseif v isa AlgebraicRewriting.Schedules.Wiring.Schedule; v
+        elseif v isa Coin
+            # Coin is a stochastic 1-in / 2-out gate. Represent as a Conditional
+            # for wiring-diagram arity purposes; actual routing is handled at
+            # runtime by the sched_runner Coin dispatch path.
+            AlgebraicRewriting.Schedules.Conditionals.Conditional(
+                _ -> [v.p, 1.0 - v.p], 2, _I; name=:coin)
         elseif hasproperty(v, :rule); RuleApp(:_tmp, v, _I; cat=cat)
         else; AlgebraicRewriting.Schedules.Queries.Query(:_dummy, _I)
         end
@@ -205,6 +211,36 @@ struct BoxStep; box::Symbol; inputs::Vector{Symbol}; outputs::Vector{Symbol}; en
 
 import AlgebraicRewriting: view_sched
 view_sched(gs::GameSched; kw...) = view_sched(gs._inner; kw...)
+
+"""
+    _collect_rule_r_acssets(gs) -> Vector{ACSet}
+
+Recursively collect the R-side (codom of right morphism) of every DPO rule in
+`gs` so callers can pre-populate attribute encoders with values that rules
+introduce rather than remove.
+"""
+function _collect_rule_r_acssets(gs::GameSched)
+    r_acssets = []
+    for v in values(gs._all_boxes)
+        if v isa PlayerRuleApp
+            _push_r!(r_acssets, v.rule)
+        elseif v isa AlgebraicRewriting.Schedules.RuleApps.RuleApp
+            _push_r!(r_acssets, v.rule)
+        elseif v isa GameSched
+            append!(r_acssets, _collect_rule_r_acssets(v))
+        end
+    end
+    r_acssets
+end
+
+function _push_r!(acc, rule)
+    try
+        r_morph = hasproperty(rule, :R) ? rule.R :
+                  hasproperty(rule, :r) ? rule.r : nothing
+        r_morph !== nothing && push!(acc, codom(r_morph))
+    catch
+    end
+end
 
 function player_migrate(F, gs::GameSched, player_map; name_map=Dict())
     new_boxes = map(gs._all_boxes) do v

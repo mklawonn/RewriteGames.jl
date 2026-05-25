@@ -694,7 +694,9 @@ function _solution_passes_conditions(compact_sol::Vector{Int32},
         end
 
         init_nt  = NamedTuple(Symbol(k) => v for (k, v) in init_comps)
-        ext_homs = homomorphisms(ac_L, world_host; initial = init_nt)
+        # no_bind=true: allow free-floating attr vars (pre-allocated but unreferenced
+        # in some NAC patterns); they are quantified freely over attr-var codomains.
+        ext_homs = homomorphisms(ac_L, world_host; initial = init_nt, no_bind = true)
 
         if _is_nac_condition(cond) && !isempty(ext_homs)
             return false   # NAC fires → reject

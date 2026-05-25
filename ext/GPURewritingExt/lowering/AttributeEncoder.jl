@@ -50,7 +50,8 @@ function _register_attr!(enc::AttributeEncoder, attr::Symbol, vals::Vector)
     isempty(concrete) && return
 
     if first(concrete) isa Real
-        uniq = sort(unique(concrete))
+        existing = get(enc.ordinal, attr, eltype(concrete)[])
+        uniq = sort(unique(vcat(existing, concrete)))
         enc.ordinal[attr] = uniq
     else
         d = get!(enc.nominal, attr, Dict{Any,Int32}())

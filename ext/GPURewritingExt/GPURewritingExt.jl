@@ -140,6 +140,12 @@ function RewriteGames.gpu_run_game_sched!(
     # ── Phase 1: Host-side compilation ────────────────────────────────────────
     schema   = extract_schema_info(initial_world)
     enc      = build_encoder(initial_world, schema; discretizers = discretizers)
+    # Extend encoder with all R-side ACSets from every rule in the schedule so
+    # that attribute values introduced by rules (e.g. Bool flags on new Platforms)
+    # are registered before CSP lowering and before GPU upload.
+    for r_acs in _collect_rule_r_acssets(gs)
+        extend_encoder!(enc, r_acs, schema)
+    end
     max_n    = isempty(schema.obj_types) ? 1 :
                maximum(nparts(initial_world, o) for o in schema.obj_types; init=1)
     # MAX_CHUNKS = 4 limits the solver kernel to 256 elements per type.
