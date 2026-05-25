@@ -1,268 +1,1029 @@
 """
-GPU master scheduler.
+GPU master scheduler — GPU-native rewriting.
 
-Executes a `CompiledGPUSched` box-by-box, dispatching the Turbo pattern
-matcher and DPO rewriting kernels for each active box.  Control flow mirrors
-the CPU `run_game_sched!` loop in `src/engine/sched_runner.jl` but all
-world-mutation happens on the GPU.
+Pattern matching uses the Turbo CSP solver (GPU path when CUDA.functional()).
+Rewriting is applied in-place on the GPUACSet via deletion and addition
+kernels, with no world round-trip through the CPU.
 
-For each turn:
-  1. For each CompiledBox in order, check whether the input wire has a world.
-  2. PLAYER_RULE:  enumerate matches (Turbo solver) → agent selects → DPO rewrite.
-  3. NATIVE_RULE:  enumerate matches → pick first → DPO rewrite (no agent).
-  4. WEAKEN:       pass the world through unchanged.
-  5. COIN:         stochastic routing via Xoshiro128 PRNG.
-  6. Check exit wires; if fired, stop.
-  7. Propagate trace wire for next iteration.
+For PLAYER_RULE boxes the world is downloaded once per box execution so
+the agent can see it; no re-upload is needed after rewriting.
 """
 
 """
-    GPUSchedulerState
-
-All mutable state required during a GPU schedule run.
+Pre-allocated GPU scratch buffers for a single scheduler state.
+Re-used across solve-and-rewrite cycles to eliminate per-step GPU allocations.
+Fields that depend on world size (buf_hf_flat, buf_to_del) are grown on demand.
 """
+mutable struct GPUScratchBuffers
+    buf_domains       :: CuVector{UInt64}       # n_vars_max * nc
+    buf_hf_flat       :: CuVector{UInt64}       # total hom-fwd words (grown as world grows)
+    buf_hf_offs       :: CuVector{Int32}        # n_homs + 1
+    buf_bytecodes     :: CuVector{TCNBytecode}  # max bytecodes
+    buf_solutions     :: CuMatrix{Int32}        # n_vars_max × max_solutions
+    buf_sol_count     :: CuVector{Int32}        # [1]
+    buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * MAX_CHUNKS × 16
+    buf_type_mask     :: CuVector{UInt64}       # nc
+    buf_to_del        :: CuVector{Bool}         # sum(n_alloc) (grown as world grows)
+    buf_violation     :: CuVector{Int32}        # [1] dangling-check flag (0=ok, 1=violated)
+    buf_attr_mask     :: CuVector{UInt64}       # nc
+    buf_pushout_slots :: CuVector{Int32}        # staging for slot indices (B5/B6, grown on demand)
+    buf_pushout_vals  :: CuVector{Int32}        # staging for fk/attr values (B5/B6, grown on demand)
+    cached_hf_offs    :: Vector{Int32}          # B15: cached CPU copy of hom_fwd_offs; skip GPU upload when unchanged
+    buf_match         :: CuVector{Int32}        # GPU-resident chosen match (n_vars_max)
+    buf_ub_info       :: CuVector{Int32}        # [ub_var, n_subs, ok] for GPU branching-point detection
+    buf_ub_elems      :: CuVector{Int32}        # element indices of first unbound variable (nc_max*64 capacity)
+    buf_fired         :: CuVector{Int32}        # [1] — fired flag for single-sync native pipeline
+    buf_g_type_offs   :: CuVector{Int32}        # type_idx → 0-based offset in buf_to_del (length = n_obj_types)
+    buf_turbo_nextsub :: CuVector{Int32}        # [1] global atomic subproblem counter for turbo_block_kernel!
+end
+
 mutable struct GPUSchedulerState
-    sched       :: CompiledGPUSched
-    g           :: GPUACSet
-    schema      :: SchemaInfo
-    enc         :: AttributeEncoder
-    world_type  :: Any              # Julia type of the original ACSet (for download)
-    agents      :: Dict
-    trajectory  :: Union{GPUTrajectoryLog, Nothing}
+    sched         :: CompiledGPUSched
+    g             :: GPUACSet
+    schema        :: SchemaInfo
+    enc           :: AttributeEncoder
+    world_type    :: Any
+    agents        :: Dict
+    trajectory    :: Union{GPUTrajectoryLog, Nothing}
     compact_every :: Int
-    rng         :: Xoshiro          # host-side PRNG for stochastic boxes
-    turn        :: Ref{Int}
-    step_log    :: Vector{NamedTuple}  # per-rewrite event records for Experience reconstruction
+    rng           :: Xoshiro
+    turn          :: Ref{Int}
+    step_log      :: Vector{NamedTuple}
+    scratch       :: Union{GPUScratchBuffers, Nothing}   # nothing on CPU-only path
 end
 
 function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
                             log_trajectory=false, compact_every=100)
     traj = log_trajectory ? GPUTrajectoryLog(schema) : nothing
+
+    scratch = if CUDA.functional()
+        max_nc = isempty(sched.csps) ? 1 :
+                 maximum(Int(csp.n_chunks) for csp in sched.csps; init=1)
+        nc_max = _select_nc_max(max_nc)
+        nc     = max_nc   # for hf_flat sizing
+        max_n_vars = isempty(sched.csps) ? 1 :
+                     maximum(Int(csp.n_vars) for csp in sched.csps; init=1)
+        max_n_bc   = isempty(sched.csps) ? 1 :
+                     maximum(length(csp.bytecodes) for csp in sched.csps; init=1)
+        n_homs     = length(schema.homs)
+        total_alloc = sum(values(g.n_alloc); init=0)
+        # initial hf_flat capacity: sum of per-hom source sizes × nc, × 4 headroom
+        hf_flat_init = max(sum(max(get(g.n_alloc, schema.hom_dom[h], 0), 1) * nc
+                               for h in schema.homs; init=1) * 4, 1)
+
+        GPUScratchBuffers(
+            CUDA.zeros(UInt64, max(max_n_vars * nc, 1)),
+            CUDA.zeros(UInt64, hf_flat_init),
+            CUDA.zeros(Int32,  n_homs + 1),
+            CuArray{TCNBytecode}(undef, max(max_n_bc, 1)),
+            CUDA.zeros(Int32,  max(max_n_vars, 1), 10_000),
+            CUDA.zeros(Int32,  1),
+            CUDA.zeros(UInt64, max(max_n_vars * nc_max, 1), 16),
+            CUDA.zeros(UInt64, max(nc, 1)),
+            CUDA.zeros(Bool,   max(total_alloc * 4, 1)),
+            CUDA.zeros(Int32,  1),            # buf_violation
+            CUDA.zeros(UInt64, max(nc, 1)),
+            CUDA.zeros(Int32,  256),          # buf_pushout_slots initial capacity
+            CUDA.zeros(Int32,  256),          # buf_pushout_vals initial capacity
+            Int32[],                          # cached_hf_offs: empty = always upload on first call
+            CUDA.zeros(Int32,  max(max_n_vars, 1)),  # buf_match: GPU-resident chosen match
+            CUDA.zeros(Int32,  3),            # buf_ub_info: [ub_var, n_subs, ok]
+            CUDA.zeros(Int32,  nc_max * 64),  # buf_ub_elems: max domain elements per variable
+            CUDA.zeros(Int32,  1),            # buf_fired: single-sync fired flag
+            CUDA.zeros(Int32,  max(length(schema.obj_types), 1)),  # buf_g_type_offs
+            CUDA.zeros(Int32,  1),                                  # buf_turbo_nextsub
+        )
+    else
+        nothing
+    end
+
     GPUSchedulerState(sched, g, schema, enc, world_type, agents,
-                      traj, compact_every, Xoshiro(42), Ref(1), NamedTuple[])
+                      traj, compact_every, Xoshiro(42), Ref(1), NamedTuple[], scratch)
+end
+
+# ── GPU kernels for domain and hom-forward building ───────────────────────────
+
+# Build per-type active-element bitmask via atomic OR.
+# One thread per source element; writes one bit per active element.
+@kernel function _build_type_mask_kernel!(
+    mask   :: AbstractVector{UInt64},
+    active :: AbstractVector{Bool},
+    nc     :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= length(active) && active[i]
+        ci, bi = elem_to_chunk(i)
+        if ci <= Int(nc)
+            Atomix.@atomic mask[ci] |= UInt64(1) << bi
+        end
+    end
+end
+
+# Build hom-forward flat array from FK + active arrays.
+# One thread per source element; each writes to a unique position — no atomics needed.
+@kernel function _build_hom_fwd_kernel!(
+    hom_fwd :: AbstractVector{UInt64},
+    homs_h  :: AbstractVector{Int32},
+    active  :: AbstractVector{Bool},
+    off_h   :: Int32,   # 0-based word offset for this morphism in hom_fwd
+    nc      :: Int32,
+)
+    w = @index(Global, Linear)
+    if w <= length(active) && active[w]
+        tgt = Int(homs_h[w])
+        if tgt > 0
+            ci, bi = elem_to_chunk(tgt)
+            if ci <= Int(nc)
+                hom_fwd[Int(off_h) + (w - 1) * Int(nc) + ci] = UInt64(1) << bi
+            end
+        end
+    end
 end
 
 """
-    run_gpu_schedule!(state; T_max, terminal_fn, winner_wires) -> Bool
-
-Main execution loop.  Returns `true` if the episode terminated normally
-(exit wire fired or terminal condition met), `false` if T_max was hit.
+Build flat hom_fwd and offset arrays entirely on GPU, writing into `scratch`
+buffers.  Grows `scratch.buf_hf_flat` if the current world exceeds capacity.
+Returns `(hf_flat_gpu, hf_offs_gpu)` views into the scratch buffers.
 """
+function _build_hom_fwd_gpu!(backend, g::GPUACSet, schema::SchemaInfo, nc::Int,
+                              scratch::GPUScratchBuffers)
+    hom_fwd_offs = Int32[Int32(0)]
+    total_words  = 0
+    for h in schema.homs
+        n = max(g.n_alloc[schema.hom_dom[h]], 1)
+        total_words += n * nc
+        push!(hom_fwd_offs, Int32(total_words))
+    end
+    total_words = max(total_words, 1)
+
+    if length(scratch.buf_hf_flat) < total_words
+        scratch.buf_hf_flat = CUDA.zeros(UInt64, total_words * 2)
+    end
+    hf_flat = @view scratch.buf_hf_flat[1:total_words]
+    KernelAbstractions.fill!(hf_flat, UInt64(0))
+
+    for (h_idx, h) in enumerate(schema.homs)
+        n = g.n_alloc[schema.hom_dom[h]]
+        n == 0 && continue
+        off = hom_fwd_offs[h_idx]
+        _build_hom_fwd_kernel!(backend, 256)(
+            hf_flat, g.homs[h], g.active[schema.hom_dom[h]],
+            off, Int32(nc); ndrange = n)
+    end
+
+    if scratch.cached_hf_offs != hom_fwd_offs
+        KernelAbstractions.copyto!(backend, scratch.buf_hf_offs, hom_fwd_offs)
+        scratch.cached_hf_offs = copy(hom_fwd_offs)
+    end
+
+    hf_flat, scratch.buf_hf_offs
+end
+
+"""
+Fallback (no scratch): allocates fresh GPU buffers for hom_fwd.
+Used by `turbo_homomorphisms` and the CPU test path.
+"""
+function _build_hom_fwd_gpu(backend, g::GPUACSet, schema::SchemaInfo, nc::Int)
+    hom_fwd_offs = Int32[Int32(0)]
+    total_words  = 0
+    for h in schema.homs
+        n = max(g.n_alloc[schema.hom_dom[h]], 1)
+        total_words += n * nc
+        push!(hom_fwd_offs, Int32(total_words))
+    end
+    total_words = max(total_words, 1)
+
+    hf_flat = KernelAbstractions.allocate(backend, UInt64, total_words)
+    KernelAbstractions.fill!(hf_flat, UInt64(0))
+
+    for (h_idx, h) in enumerate(schema.homs)
+        n = g.n_alloc[schema.hom_dom[h]]
+        n == 0 && continue
+        off = hom_fwd_offs[h_idx]
+        _build_hom_fwd_kernel!(backend, 256)(
+            hf_flat, g.homs[h], g.active[schema.hom_dom[h]],
+            off, Int32(nc); ndrange = n)
+    end
+
+    hf_offs = KernelAbstractions.allocate(backend, Int32, length(hom_fwd_offs))
+    KernelAbstractions.copyto!(backend, hf_offs, hom_fwd_offs)
+
+    hf_flat, hf_offs
+end
+
+"""
+Build CSP domain array into `scratch.buf_domains` entirely on GPU.
+Reuses `scratch.buf_type_mask` for the per-type bitmask (no per-call allocations).
+No explicit synchronize after `_build_type_mask_kernel!` — the subsequent
+GPU-to-GPU copyto! is ordered by CUDA's implicit stream dependencies.
+"""
+function _build_domains_gpu!(backend, csp::CSPProblem, g::GPUACSet, schema::SchemaInfo,
+                              scratch::GPUScratchBuffers)
+    nc = csp.n_chunks
+    nv = Int(csp.n_vars)
+    d  = @view scratch.buf_domains[1:max(nv * nc, 1)]
+    KernelAbstractions.fill!(d, UInt64(0))
+    isempty(csp.var_offset) && return d
+
+    type_mask = scratch.buf_type_mask
+    type_bases = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(type_bases)
+        next_base = idx < length(type_bases) ? type_bases[idx+1][1] : nv + 1
+        n         = g.n_alloc[o]
+        n == 0 && continue
+
+        KernelAbstractions.fill!(type_mask, UInt64(0))
+        _build_type_mask_kernel!(backend, 256)(
+            type_mask, g.active[o], Int32(nc); ndrange = n)
+
+        for v in base:(next_base - 1)
+            off = (v - 1) * nc
+            copyto!(d, off + 1, type_mask, 1, nc)
+        end
+    end
+    d
+end
+
+"""
+Build CSP domain array entirely on GPU.
+Uses the chunked flat layout: `domains[(v-1)*nc + c]` = chunk c of variable v.
+Solutions will be GPU-local slot indices.
+"""
+function _build_domains_gpu(backend, csp::CSPProblem, g::GPUACSet, schema::SchemaInfo)
+    nc = csp.n_chunks
+    nv = Int(csp.n_vars)
+    d  = KernelAbstractions.allocate(backend, UInt64, max(nv * nc, 1))
+    KernelAbstractions.fill!(d, UInt64(0))
+    isempty(csp.var_offset) && return d
+
+    type_bases = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(type_bases)
+        next_base = idx < length(type_bases) ? type_bases[idx+1][1] : nv + 1
+        n_vars_o  = next_base - base
+        n         = g.n_alloc[o]
+        n == 0 && continue
+
+        # Build per-type bitmask on GPU (nc words), then copy to each variable slot.
+        # No explicit synchronize needed here: the subsequent GPU-to-GPU copyto! is
+        # ordered by CUDA's implicit stream dependencies.
+        type_mask = KernelAbstractions.allocate(backend, UInt64, nc)
+        KernelAbstractions.fill!(type_mask, UInt64(0))
+        _build_type_mask_kernel!(backend, 256)(
+            type_mask, g.active[o], Int32(nc); ndrange = n)
+
+        for v in base:(next_base - 1)
+            off = (v - 1) * nc
+            copyto!(d, off + 1, type_mask, 1, nc)
+        end
+    end
+    d
+end
+
+# ── GPU attribute-mask kernels (B2) ──────────────────────────────────────────
+
+# Pass 1: fill staging mask with bits for elements whose attribute == req.
+@kernel function _attr_mask_fill_kernel!(
+    mask   :: AbstractVector{UInt64},
+    attrs  :: AbstractVector{Int32},
+    active :: AbstractVector{Bool},
+    req    :: Int32,
+    nc     :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= length(active) && active[i] && attrs[i] == req
+        ci, bi = elem_to_chunk(i)
+        if ci <= Int(nc)
+            Atomix.@atomic mask[ci] |= UInt64(1) << bi
+        end
+    end
+end
+
+# Pass 2: AND the staging mask into the variable's domain slice.
+@kernel function _attr_mask_and_kernel!(
+    domains :: AbstractVector{UInt64},
+    mask    :: AbstractVector{UInt64},
+    var_off :: Int32,
+    nc      :: Int32,
+)
+    c = @index(Global, Linear)
+    if c <= Int(nc)
+        domains[Int(var_off) + c] &= mask[c]
+    end
+end
+
+"""
+Apply PROP_ATTR_EQ masks to a GPU-resident domain array.
+When `scratch` is provided (GPU path), builds the mask entirely on-device
+via two-pass kernel (no `Array(g.attrs[a])` download).  Falls back to the
+CPU-download path when scratch is nothing.
+"""
+function _apply_attr_masks_gpu_device!(d_gpu, csp::CSPProblem,
+                                        g::GPUACSet, schema::SchemaInfo,
+                                        enc::AttributeEncoder,
+                                        backend = nothing,
+                                        scratch::Union{GPUScratchBuffers, Nothing} = nothing)
+    nc = csp.n_chunks
+    for bc in csp.bytecodes
+        bc.op != PROP_ATTR_EQ && continue
+        v     = Int(bc.var1)
+        a_idx = Int(bc.param1)
+        req   = Int32(bc.param2)
+        a     = schema.attrs[a_idx]
+        owner = schema.attr_dom[a]
+        n_elems = g.n_alloc[owner]
+
+        off = Int32((v - 1) * nc)
+
+        if scratch !== nothing && backend !== nothing && n_elems > 0
+            # GPU-native two-pass mask build (no CPU round-trip)
+            KernelAbstractions.fill!(scratch.buf_attr_mask, UInt64(0))
+            _attr_mask_fill_kernel!(backend, 256)(
+                scratch.buf_attr_mask, g.attrs[a], g.active[owner],
+                req, Int32(nc); ndrange = n_elems)
+            _attr_mask_and_kernel!(backend, 256)(
+                d_gpu, scratch.buf_attr_mask, off, Int32(nc); ndrange = nc)
+        else
+            # CPU fallback: download attrs, build mask on host, re-upload
+            h_attrs  = Array(g.attrs[a])
+            n_capped = min(n_elems, nc * 64)
+            mask     = zeros(UInt64, nc)
+            for i in 1:n_capped
+                h_attrs[i] == req || continue
+                ci, bi = elem_to_chunk(i)
+                ci <= nc && (mask[ci] |= UInt64(1) << bi)
+            end
+            dom_slice = Array(d_gpu[off+1:off+nc])
+            for c in 1:nc; dom_slice[c] &= mask[c]; end
+            copyto!(d_gpu, off+1, CuArray(dom_slice), 1, nc)
+        end
+    end
+end
+
+# ── CPU-path helpers (still used for non-CUDA backend and turbo_homomorphisms) ─
+
+"""
+Build CSP domains from the active-flag arrays of a GPUACSet (CPU path).
+Uses the chunked flat layout: `domains[(v-1)*nc + c]` = chunk c of variable v.
+"""
+function _init_gpu_domains(csp::CSPProblem, g::GPUACSet, schema::SchemaInfo)
+    nc  = csp.n_chunks
+    nv  = Int(csp.n_vars)
+    domains = zeros(UInt64, nv * nc)
+    isempty(csp.var_offset) && return domains
+    type_bases = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(type_bases)
+        next_base = idx < length(type_bases) ? type_bases[idx+1][1] : nv + 1
+        host_active = Array(g.active[o])
+        n_elems = min(length(host_active), nc * 64)
+        mask = zeros(UInt64, nc)
+        for i in 1:n_elems
+            host_active[i] || continue
+            ci, bi = elem_to_chunk(i)
+            ci <= nc && (mask[ci] |= UInt64(1) << bi)
+        end
+        for v in base:(next_base - 1)
+            off = (v - 1) * nc
+            for c in 1:nc; domains[off + c] = mask[c]; end
+        end
+    end
+    domains
+end
+
+"""Apply PROP_ATTR_EQ domain masks (CPU path, used for non-CUDA backend)."""
+function _apply_attr_masks_gpu!(domains::Vector{UInt64}, csp::CSPProblem,
+                                 g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder)
+    nc = csp.n_chunks
+    for bc in csp.bytecodes
+        bc.op != PROP_ATTR_EQ && continue
+        v     = Int(bc.var1)
+        a_idx = Int(bc.param1)
+        req   = Int32(bc.param2)
+        a     = schema.attrs[a_idx]
+        owner = schema.attr_dom[a]
+        h_attrs = Array(g.attrs[a])
+        n_elems = min(g.n_alloc[owner], nc * 64)
+        mask    = zeros(UInt64, nc)
+        for i in 1:n_elems
+            h_attrs[i] == req || continue
+            ci, bi = elem_to_chunk(i)
+            ci <= nc && (mask[ci] |= UInt64(1) << bi)
+        end
+        off = (v - 1) * nc
+        for c in 1:nc; domains[off + c] &= mask[c]; end
+    end
+end
+
+"""
+Build hom-forward bitmask tables from the GPU-resident FK arrays (CPU path).
+Used as fallback when CUDA is not available.
+"""
+function _recompute_hom_forward_gpu(g::GPUACSet, schema::SchemaInfo, nc::Int)
+    hom_forward = Vector{UInt64}[]
+    for h in schema.homs
+        owner    = schema.hom_dom[h]
+        n        = g.n_alloc[owner]
+        host_fk  = Array(g.homs[h])
+        host_act = Array(g.active[owner])
+        fwd      = zeros(UInt64, max(n, 1) * nc)
+        for w in 1:n
+            host_act[w] || continue
+            tgt = Int(host_fk[w])
+            tgt > 0 || continue
+            ci, bi = elem_to_chunk(tgt)
+            ci <= nc && (fwd[(w-1)*nc + ci] |= UInt64(1) << bi)
+        end
+        push!(hom_forward, fwd)
+    end
+    hom_forward
+end
+
+# ── Index mapping between GPU-slot space and compact world ────────────────────
+
+"""
+Build bidirectional index maps between GPU-slot indices (with tombstones)
+and compact-world indices (1-based among live elements).
+Returns `(gpu_to_compact, compact_to_gpu)` per object type.
+"""
+function _gpu_to_compact_mapping(g::GPUACSet, schema::SchemaInfo)
+    gpu_to_compact = Dict{Symbol, Vector{Int}}()
+    compact_to_gpu = Dict{Symbol, Vector{Int}}()
+    for o in schema.obj_types
+        h_active    = Array(g.active[o])
+        n           = length(h_active)
+        g_to_c      = zeros(Int, n)
+        c_to_g      = Int[]
+        cursor      = 0
+        for (i, alive) in enumerate(h_active)
+            alive || continue
+            cursor += 1
+            g_to_c[i] = cursor
+            push!(c_to_g, i)
+        end
+        gpu_to_compact[o] = g_to_c
+        compact_to_gpu[o] = c_to_g
+    end
+    gpu_to_compact, compact_to_gpu
+end
+
+"""
+Translate a CSP solution from GPU-slot indices to compact-world indices,
+so it can be passed to `_assignment_to_hom` with a compact world ACSet.
+"""
+function _sol_gpu_to_compact(sol::Vector{Int32}, csp::CSPProblem,
+                              schema::SchemaInfo,
+                              gpu_to_compact::Dict{Symbol, Vector{Int}})
+    compact = copy(sol)
+    type_bases = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(type_bases)
+        next_base = idx < length(type_bases) ? type_bases[idx+1][1] : Int(csp.n_vars) + 1
+        g_to_c    = gpu_to_compact[o]
+        for v in base:(next_base - 1)
+            v > Int(csp.n_vars) && break
+            gpu_idx = Int(sol[v])
+            gpu_idx == 0 && continue
+            compact[v] = Int32(gpu_idx <= length(g_to_c) ? g_to_c[gpu_idx] : 0)
+        end
+    end
+    compact
+end
+
+# ── In-place GPU rewrite ───────────────────────────────────────────────────────
+
+"""
+Apply a DPO rewrite in-place on the GPUACSet.
+`sol` contains GPU-local slot indices (as returned by the Turbo solver
+when domains are built with `_init_gpu_domains`).
+`scratch` is the pre-allocated buffer set from the parent `GPUSchedulerState`.
+"""
+function _gpu_apply_inplace!(g::GPUACSet, sol::Vector{Int32},
+                              cube::AdhesiveCube, rule,
+                              schema::SchemaInfo, enc::AttributeEncoder,
+                              scratch::Union{GPUScratchBuffers, Nothing} = nothing;
+                              gpu_cube::Union{GPUAdhesiveCube, Nothing} = nothing,
+                              d_match::Union{AbstractVector{Int32}, Nothing} = nothing)
+    backend = CUDA.functional() ? CUDA.CUDABackend() : CPU()
+
+    # 1. Build deletion mask (CPU-computed, upload to GPU using pre-allocated buf_to_del)
+    to_del = build_to_del_mask(sol, cube, schema, g; buf_to_del = scratch !== nothing ? scratch.buf_to_del : nothing)
+
+    # 2. Dangling check entirely on GPU (single kernel + single sync)
+    buf_viol = scratch !== nothing ? scratch.buf_violation : nothing
+    gpu_dangling_ok(to_del, g, schema, backend; buf_violation = buf_viol) || return false
+
+    # 3. Delete in-place via GPU kernel
+    g_off = Dict{Symbol, Int}()
+    cursor = 0
+    for o in schema.obj_types
+        g_off[o] = cursor
+        cursor += g.n_alloc[o]
+    end
+
+    for o in schema.obj_types
+        n = g.n_alloc[o]
+        n == 0 && continue
+        off      = g_off[o]
+        to_del_o = @view to_del[off+1:off+n]
+        n_del    = Int(sum(to_del_o))
+        n_del == 0 && continue
+        dpo_deletion_kernel!(backend, 256)(g.active[o], to_del_o; ndrange=n)
+        g.n_live[o][] -= n_del
+    end
+
+    # Snapshot pre-alloc before pushout modifies g.n_alloc (needed for FK target resolution)
+    pre_alloc = (gpu_cube !== nothing && d_match !== nothing && CUDA.functional()) ?
+                Dict{Symbol, Int32}(o => Int32(g.n_alloc[o]) for o in schema.obj_types) :
+                nothing
+
+    # 4. Add R\K elements via GPU scatter kernels
+    r_to_local = apply_pushout!(g, sol, cube, rule, schema, enc;
+                                scratch   = scratch,
+                                gpu_cube  = gpu_cube,
+                                d_match   = d_match)
+
+    # 5. Patch preserved K elements that differ in R via GPU scatter kernels
+    _update_preserved!(g, sol, cube, rule, schema, enc, r_to_local;
+                       scratch    = scratch,
+                       gpu_cube   = gpu_cube,
+                       d_match    = d_match,
+                       pre_alloc  = pre_alloc)
+
+    KernelAbstractions.synchronize(backend)
+    true
+end
+
+# ── Agent dispatch for PLAYER_RULE ────────────────────────────────────────────
+
+"""
+Build an `ACSetTransformation` directly from a CSP solution vector without
+calling Catlab's `homomorphisms` search (B8A).  The solver already guarantees
+that `compact_sol` satisfies all FK and attribute constraints, so the
+construction is O(n_vars) rather than O(backtracking-search).
+
+AttrVar bindings are left at their default value; downstream code that needs
+concrete attribute values reads from `g.attrs[a]` via the encoder.
+"""
+function _sol_to_hom(compact_sol::Vector{Int32},
+                     L, world_host,
+                     csp::CSPProblem,
+                     schema::SchemaInfo)
+    comps = Dict{Symbol, Vector{Int}}()
+    S = acset_schema(L)
+    for o in ob(S)
+        base = get(csp.var_offset, o, 0)
+        base == 0 && continue
+        n = nparts(L, o)
+        comps[o] = [Int(compact_sol[base + i - 1]) for i in 1:n]
+    end
+    try
+        ACSetTransformation(comps, L, world_host)
+    catch
+        nothing
+    end
+end
+
+function _choose_gpu_match(solutions::Vector{Vector{Int32}},
+                            agent, rule, csp::CSPProblem,
+                            schema::SchemaInfo,
+                            g::GPUACSet, enc::AttributeEncoder,
+                            world_type, turn::Int)
+    agent === nothing && return solutions[1]
+
+    # GPU player path: pass candidates matrix directly, no world download
+    if agent isa AbstractGPUPlayer
+        n_sols = length(solutions)
+        cands  = CUDA.functional() ? CuArray(reduce(hcat, solutions)) :
+                                     reduce(hcat, solutions)
+        idx    = select_action_gpu(agent, g, enc, schema, cands, n_sols, turn)
+        return solutions[clamp(Int(idx), 1, n_sols)]
+    end
+
+    inner_rule = hasproperty(rule, :rule) ? rule.rule : rule
+    if hasproperty(inner_rule, :rule) && hasmethod(left, Tuple{typeof(inner_rule.rule)})
+        inner_rule = inner_rule.rule
+    end
+    hasmethod(left, Tuple{typeof(inner_rule)}) || return solutions[1]
+    L = codom(left(inner_rule))
+
+    # Download compact world once for agent's view (B8C: already done once here)
+    gpu_to_compact, _ = _gpu_to_compact_mapping(g, schema)
+    world_host = download_acset(g, enc, world_type)
+
+    action_pairs = Pair{Action, Vector{Int32}}[]
+    for sol in solutions
+        compact_sol = _sol_gpu_to_compact(sol, csp, schema, gpu_to_compact)
+        # B8A: build ACSetTransformation directly — no Catlab backtracking search
+        hom = _sol_to_hom(compact_sol, L, world_host, csp, schema)
+        hom === nothing && continue
+        push!(action_pairs, Action(rule, hom) => sol)
+    end
+    isempty(action_pairs) && return solutions[1]
+
+    actions = [p.first for p in action_pairs]
+    chosen  = select_action(agent, GameState(world_host, turn), actions)
+    chosen  === nothing && return solutions[1]
+
+    for (act, sol) in action_pairs
+        act === chosen && return sol
+    end
+    solutions[1]
+end
+
+# ── Per-box solve-and-apply ───────────────────────────────────────────────────
+
+function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
+                              cube::AdhesiveCube,
+                              gpu_cube::Union{GPUAdhesiveCube, Nothing},
+                              schema::SchemaInfo, enc::AttributeEncoder,
+                              box, b_idx::Int, sched, state, turn::Int)::Bool
+    scratch = state.scratch
+
+    # Detect agent early: GPU players get a fast path that skips bulk download
+    player_sym = box.box_type == BOX_PLAYER_RULE ? sched.box_players[b_idx] : nothing
+    agent      = player_sym !== nothing ? get(state.agents, player_sym, nothing) : nothing
+
+    chosen_sol = if agent isa AbstractGPUPlayer && CUDA.functional() && scratch !== nothing
+        # ── GPU player fast path: fill scratch.buf_solutions on device,
+        #    download only the 4-byte count + one chosen column ───────────────
+        backend          = CUDA.CUDABackend()
+        nc               = csp.n_chunks
+        hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
+        d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
+        _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+        KernelAbstractions.synchronize(backend)
+
+        n_sols = _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
+                                          scratch = scratch)
+        n_sols == 0 && return false
+
+        n_vars     = Int(csp.n_vars)
+        candidates = @view scratch.buf_solutions[1:n_vars, 1:n_sols]
+        idx        = select_action_gpu(agent, g, enc, schema, candidates, n_sols, turn)
+        chosen_col = clamp(Int(idx), 1, n_sols)
+        Array(@view scratch.buf_solutions[1:n_vars, chosen_col])
+    else
+        # ── Standard path: solve on GPU/CPU, download all solutions, choose ──
+        solutions = if CUDA.functional() && scratch !== nothing
+            backend          = CUDA.CUDABackend()
+            nc               = csp.n_chunks
+            hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
+            d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
+            _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+            KernelAbstractions.synchronize(backend)
+            gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
+        else
+            if CUDA.functional()
+                backend          = CUDA.CUDABackend()
+                nc               = csp.n_chunks
+                hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)
+                d_gpu            = _build_domains_gpu(backend, csp, g, schema)
+                _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc)
+                KernelAbstractions.synchronize(backend)
+                gpu_dive_solve(backend, csp, d_gpu, hf_flat, hf_offs)
+            else
+                hf        = _recompute_hom_forward_gpu(g, schema, csp.n_chunks)
+                fresh_csp = CSPProblem(csp.n_vars, csp.var_offset, csp.domain_sizes,
+                                       csp.bytecodes, csp.nac_groups, csp.pac_groups,
+                                       csp.agent_var_map, hf, csp.n_chunks,
+                                       csp.sorted_type_bases)
+                domains   = _init_gpu_domains(fresh_csp, g, schema)
+                _apply_attr_masks_gpu!(domains, fresh_csp, g, schema, enc)
+                cpu_dive_solve(fresh_csp, domains)
+            end
+        end
+        isempty(solutions) && return false
+
+        if box.box_type == BOX_PLAYER_RULE
+            _choose_gpu_match(solutions, agent, rule, csp, schema,
+                              g, enc, state.world_type, turn)
+        else
+            solutions[1]
+        end
+    end
+    chosen_sol === nothing && return false
+
+    if rule !== nothing
+        d_match = nothing
+        if CUDA.functional() && scratch !== nothing && gpu_cube !== nothing
+            n_v = length(chosen_sol)
+            if length(scratch.buf_match) < n_v
+                scratch.buf_match = CUDA.zeros(Int32, n_v * 2)
+            end
+            d_match = @view scratch.buf_match[1:n_v]
+            copyto!(d_match, chosen_sol)
+        end
+        _gpu_apply_inplace!(g, chosen_sol, cube, rule, schema, enc, scratch;
+                            gpu_cube = gpu_cube, d_match = d_match)
+    end
+    true
+end
+
+# ── Single-sync native-rule pipeline ─────────────────────────────────────────
+
+"""
+    _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule, schema, enc, state) -> Bool
+
+Execute a NATIVE_RULE box with a single host-device synchronization:
+
+1. Speculatively grow arrays for new elements (no n_alloc/n_live update yet).
+2. Build hom_fwd + CSP domains (async).
+3. `dive_solve_kernel!` — single-thread DFS, writes first solution (async).
+4. `write_match_from_sols_kernel!` — writes buf_match + buf_fired (async).
+5. `build_to_del_kernel!` — GPU-resident to_del mask (async, guarded).
+6. `dangling_check_fired_kernel!` — ANDs violation into buf_fired (async).
+7. `dpo_deletion_kernel_g!` — clears active flags (async, guarded).
+8. Addition kernels — activate (guarded) + FK/attr writes (unguarded; safe slots).
+9. `_update_preserved!` — attr/FK updates (async; slot=0 guard is automatic).
+10. ONE `synchronize` + ONE `Array(buf_fired)` download (4 bytes).
+11. Post-sync: update n_alloc and n_live from static cube counts (CPU only).
+"""
+function _gpu_native_pipeline!(g::GPUACSet, csp::CSPProblem,
+                                cube::AdhesiveCube,
+                                gpu_cube::GPUAdhesiveCube,
+                                rule, schema::SchemaInfo, enc::AttributeEncoder,
+                                state::GPUSchedulerState)::Bool
+    scratch  = state.scratch
+    backend  = CUDA.CUDABackend()
+    nc       = csp.n_chunks
+    nc_max   = _select_nc_max(nc)
+    n_vars   = Int(csp.n_vars)
+    n_bc     = length(csp.bytecodes)
+
+    # ── Phase 0: Speculative slot allocation (arrays grown, n_alloc NOT yet updated) ──
+    pre_alloc = Dict{Symbol, Int32}(o => Int32(g.n_alloc[o]) for o in schema.obj_types)
+    d_globals_per_type = Dict{Symbol, Any}()
+    for o in schema.obj_types
+        n_add = get(gpu_cube.add_per_type, o, 0)
+        n_add == 0 && continue
+        n_cur  = g.n_alloc[o]
+        n_next = n_cur + n_add
+        cap    = length(g.active[o])
+        if n_next > cap
+            new_cap  = max(2 * cap, n_next)
+            new_active = CUDA.zeros(Bool, new_cap)
+            n_cur > 0 && copyto!(new_active, 1, g.active[o], 1, n_cur)
+            g.active[o] = new_active
+            for h in schema.homs
+                schema.hom_dom[h] == o || continue
+                new_fk = CUDA.zeros(Int32, new_cap)
+                n_cur > 0 && copyto!(new_fk, 1, g.homs[h], 1, n_cur)
+                g.homs[h] = new_fk
+            end
+            for a in schema.attrs
+                schema.attr_dom[a] == o || continue
+                new_av = CUDA.zeros(Int32, new_cap)
+                n_cur > 0 && copyto!(new_av, 1, g.attrs[a], 1, n_cur)
+                g.attrs[a] = new_av
+            end
+        end
+        globals = Int32[Int32(n_cur + j) for j in 1:n_add]
+        d_gl = CuArray(globals)
+        d_globals_per_type[o] = d_gl
+    end
+
+    # ── Phase 1: Build hf + domains (async) ──────────────────────────────────
+    hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
+    d_gpu = _build_domains_gpu!(backend, csp, g, schema, scratch)
+    _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+
+    # ── Phase 2: Single-thread DFS (async) ───────────────────────────────────
+    b_gpu    = scratch.buf_bytecodes
+    sol_gpu  = scratch.buf_solutions
+    cnt_gpu  = scratch.buf_sol_count
+    work_gpu = scratch.buf_workspace
+    if length(scratch.buf_match) < n_vars
+        scratch.buf_match = CUDA.zeros(Int32, n_vars * 2)
+    end
+    n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+    KernelAbstractions.fill!(cnt_gpu, Int32(0))
+    dive_solve_kernel!(backend)(
+        d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, 1,
+        work_gpu, hf_flat, hf_offs, Val(nc_max); ndrange=1)
+
+    # ── Phase 3: Write match + fired flag (async) ─────────────────────────────
+    write_match_from_sols_kernel!(backend, 1)(
+        scratch.buf_match, scratch.buf_fired, sol_gpu, cnt_gpu, n_vars; ndrange=1)
+
+    # ── Phase 4: Build to_del mask (async, guarded by buf_fired) ─────────────
+    n_del_l = length(gpu_cube.del_l_flats_gpu)
+    total_alloc = sum(g.n_alloc[o] for o in schema.obj_types; init=0)
+    if length(scratch.buf_to_del) < total_alloc
+        scratch.buf_to_del = CUDA.zeros(Bool, total_alloc * 2)
+    end
+    buf_del = @view scratch.buf_to_del[1:total_alloc]
+    KernelAbstractions.fill!(buf_del, false)
+
+    g_off = Dict{Symbol, Int}()
+    cursor_off = 0
+    for o in schema.obj_types
+        g_off[o] = cursor_off
+        cursor_off += g.n_alloc[o]
+    end
+
+    if n_del_l > 0
+        # Build g_type_offs: 1-based type index → 0-based flat offset in buf_to_del
+        g_type_offs_h = zeros(Int32, length(schema.obj_types))
+        for (t, o) in enumerate(schema.obj_types)
+            g_type_offs_h[t] = Int32(g_off[o])
+        end
+        if length(scratch.buf_g_type_offs) < length(g_type_offs_h)
+            scratch.buf_g_type_offs = CuArray(g_type_offs_h)
+        else
+            copyto!(scratch.buf_g_type_offs, g_type_offs_h)
+        end
+
+        build_to_del_kernel!(backend, 256)(
+            buf_del, scratch.buf_fired, scratch.buf_match,
+            gpu_cube.del_l_flats_gpu, gpu_cube.del_l_types_gpu,
+            scratch.buf_g_type_offs, Int32(n_del_l); ndrange=n_del_l)
+
+        # ── Phase 5: Dangling check → AND into buf_fired (async) ─────────────
+        for h in schema.homs
+            src_type = schema.hom_dom[h]
+            tgt_type = schema.hom_cod[h]
+            n_src = g.n_alloc[src_type]
+            n_tgt = g.n_alloc[tgt_type]
+            (n_src == 0 || n_tgt == 0) && continue
+            o_src = g_off[src_type]
+            o_tgt = g_off[tgt_type]
+            dangling_check_fired_kernel!(backend, 256)(
+                scratch.buf_fired,
+                @view(g.active[src_type][1:n_src]),
+                @view(g.homs[h][1:n_src]),
+                @view(buf_del[o_src+1:o_src+n_src]),
+                @view(buf_del[o_tgt+1:o_tgt+n_tgt]),
+                Int32(n_src), Int32(n_tgt); ndrange=n_src)
+        end
+
+        # ── Phase 6: Deletion (async, guarded) ───────────────────────────────
+        for o in schema.obj_types
+            n = g.n_alloc[o]
+            n == 0 && continue
+            off = g_off[o]
+            dpo_deletion_kernel_g!(backend, 256)(
+                g.active[o],
+                @view(buf_del[off+1:off+n]),
+                scratch.buf_fired; ndrange=n)
+        end
+    end
+
+    # ── Phase 7: Addition (async; activate guarded, FK/attr writes unguarded) ─
+    d_match = @view scratch.buf_match[1:n_vars]
+    for o in schema.obj_types
+        n_add = get(gpu_cube.add_per_type, o, 0)
+        n_add == 0 && continue
+        d_globals = d_globals_per_type[o]
+
+        activate_slots_kernel_g!(backend, 256)(
+            g.active[o], d_globals, scratch.buf_fired; ndrange=n_add)
+
+        fk_o_gpu   = get(gpu_cube.new_r_fk_gpu,  o, Dict{Symbol,Any}())
+        attr_o_gpu = get(gpu_cube.new_r_attr_gpu, o, Dict{Symbol,Any}())
+
+        for h in schema.homs
+            schema.hom_dom[h] == o || continue
+            tgt_type = schema.hom_cod[h]
+            haskey(fk_o_gpu, h) || continue
+            fk_pre_gpu = fk_o_gpu[h]
+            n_pre = length(fk_pre_gpu)
+            n_pre == 0 && continue
+            if length(scratch.buf_pushout_vals) < n_pre
+                scratch.buf_pushout_vals = CUDA.zeros(Int32, n_pre * 2)
+            end
+            d_vals = @view scratch.buf_pushout_vals[1:n_pre]
+            compute_fk_vals_kernel!(backend, 256)(
+                d_vals, fk_pre_gpu, d_match,
+                gpu_cube.k_to_l_gpu, pre_alloc[tgt_type]; ndrange=n_pre)
+            write_fk_kernel!(backend, 256)(g.homs[h], d_globals, d_vals; ndrange=n_add)
+        end
+
+        for a in schema.attrs
+            schema.attr_dom[a] == o || continue
+            haskey(attr_o_gpu, a) || continue
+            attr_gpu = attr_o_gpu[a]
+            n_pre = length(attr_gpu)
+            n_pre == 0 && continue
+            write_attr_kernel!(backend, 256)(g.attrs[a], d_globals, attr_gpu; ndrange=n_add)
+        end
+    end
+
+    # ── Phase 8: Preserved element updates (async; safe kernels auto-guard via slot=0) ──
+    # buf_match is zeroed when no solution → gathered slots = 0 → safe write kernels skip.
+    dummy_match = zeros(Int32, cube.n_l_elems)
+    r_to_local  = Dict{Symbol, Vector{Int32}}(o => Int32[] for o in schema.obj_types)
+    _update_preserved!(g, dummy_match, cube, rule, schema, enc, r_to_local;
+                       scratch   = scratch,
+                       gpu_cube  = gpu_cube,
+                       d_match   = d_match,
+                       pre_alloc = pre_alloc)
+
+    # ── Phase 9: ONE sync + ONE 4-byte download ───────────────────────────────
+    KernelAbstractions.synchronize(backend)
+    fired = CUDA.@allowscalar(scratch.buf_fired[1]) != Int32(0)
+
+    if fired
+        for (o, cnt) in gpu_cube.del_per_type
+            g.n_live[o][] -= cnt
+        end
+        for (o, cnt) in gpu_cube.add_per_type
+            g.n_alloc[o] += cnt
+            g.n_live[o][] += cnt
+        end
+    end
+
+    fired
+end
+
+# ── Main scheduler ────────────────────────────────────────────────────────────
+
+const _DEFAULT_TERMINAL = (W) -> (false, nothing)
+
 function run_gpu_schedule!(state::GPUSchedulerState;
                            T_max::Int = 1000,
-                           terminal_fn::Function = (W) -> (false, nothing),
-                           winner_wires::Dict{Symbol, Union{Symbol,Nothing}} = Dict{Symbol,Union{Symbol,Nothing}}())::Bool
+                           terminal_fn::Function = _DEFAULT_TERMINAL,
+                           winner_wires::Dict{Symbol, Union{Symbol,Nothing}} = Dict{Symbol,Union{Symbol,Nothing}}())::Vector{GpuRewriteEvent}
     sched  = state.sched
     g      = state.g
     schema = state.schema
     enc    = state.enc
 
-    # Wire state: each wire either holds a world (true) or is empty (false)
-    wire_active = falses(sched.n_wires)
-    for iw in sched.init_wires
-        wire_active[iw] = true
+    wire_active = zeros(Bool, sched.n_wires)
+    for w in sched.init_wires
+        wire_active[w] = true
     end
 
-    fired_exit = nothing
+    events        = GpuRewriteEvent[]
+    rewrite_count = 0   # for compact_every triggering
+    backend       = CUDA.functional() ? CUDA.CUDABackend() : CPU()
 
-    for iter in 1:(T_max + 1)
-        iter_changed = false
+    for turn in 1:T_max
+        # Terminal check: download world only when a custom predicate is provided
+        if terminal_fn !== _DEFAULT_TERMINAL
+            world_snap = download_acset(g, enc, state.world_type)
+            done, _    = terminal_fn(world_snap)
+            done && break
+        end
 
-        for (box_idx, box) in enumerate(sched.boxes)
-            wire_active[Int(box.in_wire)] || continue
+        any_changed = false
+
+        for (b_idx, box) in enumerate(sched.boxes)
+            in_w = Int(box.in_wire)
+            (in_w == 0 || !wire_active[in_w]) && continue
 
             if box.box_type == BOX_WEAKEN
+                wire_active[in_w] = false
                 for ow in box.out_wires
-                    ow == 0 && break
+                    Int(ow) == 0 && break
                     wire_active[Int(ow)] = true
                 end
-                wire_active[Int(box.in_wire)] = false
+                any_changed = true
 
             elseif box.box_type == BOX_COIN
-                p = Float64(box.params[1])
+                wire_active[in_w] = false
+                p      = Float64(box.params[1])
                 branch = rand(state.rng) < p ? 1 : 2
-                ow = box.out_wires[branch]
-                ow != 0 && (wire_active[Int(ow)] = true)
-                wire_active[Int(box.in_wire)] = false
+                ow     = Int(box.out_wires[branch])
+                ow != 0 && (wire_active[ow] = true)
+                any_changed = true
 
-            elseif box.box_type ∈ (BOX_PLAYER_RULE, BOX_NATIVE_RULE)
-                csp  = sched.csps[Int(box.csp_idx)]
-                cube = sched.adhesive_cubes[Int(box.adh_idx)]
+            elseif box.box_type == BOX_NATIVE_RULE || box.box_type == BOX_PLAYER_RULE
+                wire_active[in_w] = false
+                any_changed = true
+                ridx     = Int(box.csp_idx)
+                csp      = sched.csps[ridx]
+                rule     = sched.rules[ridx]
+                adh_idx  = Int(box.adh_idx)
+                cube     = sched.adhesive_cubes[adh_idx]
+                gpu_cube = adh_idx <= length(sched.gpu_cubes) ?
+                           sched.gpu_cubes[adh_idx] : nothing
 
-                # Enumerate matches via CPU Turbo solver (GPU dispatch in future)
-                matches = _turbo_cpu_solve(csp, g, schema, enc)
-
-                if isempty(matches)
-                    # No matches: fire pass/fail wire (out_wires[2])
-                    ow = box.out_wires[2]
-                    ow != 0 && (wire_active[Int(ow)] = true)
-                    wire_active[Int(box.in_wire)] = false
-                    continue
-                end
-
-                # Agent or auto selection
-                chosen_match = if box.box_type == BOX_PLAYER_RULE && box.player != :_none
-                    agent = get(state.agents, box.player, nothing)
-                    if agent !== nothing
-                        # Download current world snapshot for agent
-                        snap = download_acset(g, enc, state.world_type)
-                        gs   = GameState(snap, state.turn[])
-                        # Build Action list (no ACSetTransformation available yet)
-                        actions = [Action(nothing, m) for m in matches]
-                        chosen  = select_action(agent, gs, actions)
-                        chosen === nothing ? nothing : chosen.match
-                    else
-                        first(matches)
-                    end
+                # NATIVE_RULE on CUDA uses the single-sync pipeline; PLAYER_RULE
+                # keeps the multi-sync path so the agent can inspect solutions.
+                fired = if box.box_type == BOX_NATIVE_RULE &&
+                           CUDA.functional() &&
+                           state.scratch !== nothing &&
+                           gpu_cube !== nothing
+                    _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule,
+                                          schema, enc, state)
                 else
-                    first(matches)
+                    _gpu_solve_inplace!(g, csp, rule, cube, gpu_cube, schema, enc,
+                                        box, b_idx, sched, state, turn)
                 end
-
-                if chosen_match !== nothing
-                    pre_snap = g   # reference before mutation (for logging)
-
-                    # DPO deletion
-                    to_del, dangling_ok = build_to_del_mask(chosen_match, cube, schema, g)
-                    if dangling_ok
-                        deleted_g = _collect_deleted(chosen_match, cube, schema, g)
-                        host_to_del = Array(to_del)
-                        for o in schema.obj_types
-                            host_act = Array(g.active[o])
-                            for (i, flag) in enumerate(host_act)
-                                # Use flat offset
-                            end
-                        end
-                        _apply_deletion!(g, to_del, schema)
-
-                        # DPO addition
-                        added_g = apply_pushout!(g, chosen_match, cube,
-                                                 _get_rule(sched, box),
-                                                 schema, enc, nothing)
-
-                        # Trajectory logging
-                        if state.trajectory !== nothing
-                            log_deletions!(state.trajectory, schema, deleted_g,
-                                           state.turn[], box_idx)
-                            log_additions!(state.trajectory, schema, added_g,
-                                           state.turn[], box_idx)
-                        end
-
-                        # Terminal check
-                        snap = download_acset(g, enc, state.world_type)
-                        done, winner = terminal_fn(snap)
-                        state.turn[] += 1
-
-                        # Record step for Experience reconstruction
-                        push!(state.step_log, (
-                            pre_state      = pre_snap,
-                            post_state     = g,
-                            match          = chosen_match,
-                            csp            = csp,
-                            player         = box.player,
-                            box_descriptor = nothing,
-                            turn           = state.turn[] - 1,
-                            done           = done || state.turn[] > T_max,
-                            winner         = winner,
-                        ))
-
-                        # Stream compaction
-                        if state.turn[] % state.compact_every == 0
-                            compact_gpu_acset!(g, schema, nothing)
-                        end
-
-                        iter_changed = true
-                        ow = box.out_wires[1]
-                        ow != 0 && (wire_active[Int(ow)] = true)
-                        wire_active[Int(box.in_wire)] = false
-
-                        done && (fired_exit = get(winner_wires, sched.wire_names[Int(box.out_wires[1])], nothing); return true)
-                        state.turn[] > T_max && return false
+                ow = Int(box.out_wires[fired ? 1 : 2])
+                ow != 0 && (wire_active[ow] = true)
+                if fired
+                    push!(events, GpuRewriteEvent(Int32(turn), Int32(b_idx), true))
+                    rewrite_count += 1
+                    if state.compact_every > 0 && rewrite_count % state.compact_every == 0
+                        compact_gpu_acset!(g, schema, backend)
                     end
-                else
-                    ow = box.out_wires[2]
-                    ow != 0 && (wire_active[Int(ow)] = true)
-                    wire_active[Int(box.in_wire)] = false
                 end
-
-            end # box dispatch
-        end # boxes
-
-        # Check exit wires
-        for ew in sched.exit_wires
-            if wire_active[ew]
-                fired_exit = get(winner_wires, sched.wire_names[ew], nothing)
-                return true
             end
         end
 
-        # Check trace wires — feed back for next iteration
-        trace_active = any(wire_active[tw] for tw in sched.trace_wires)
-        trace_active || break
-
-        # Reset trace wires to active for next iteration
-        for tw in sched.trace_wires
-            wire_active[tw] = true
-        end
-
-        !iter_changed && break   # quiescent — stop
+        any(wire_active[w] for w in sched.exit_wires) && break
+        trace_active = any(wire_active[w] for w in sched.trace_wires)
+        !trace_active && !any_changed && break
     end
 
-    state.turn[] > T_max
-end
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-"""
-    _turbo_cpu_solve(csp, g, schema, enc) -> Vector{Vector{Int32}}
-
-Run the CPU Turbo solver (propagation + dive-solve) against the current
-GPU world state.  Used as the host-side path; will be replaced by a GPU
-kernel dispatch when hardware is available.
-"""
-function _turbo_cpu_solve(csp::CSPProblem, g::GPUACSet,
-                          schema::SchemaInfo,
-                          enc::AttributeEncoder)::Vector{Vector{Int32}}
-    g_offset = _global_offset(g, schema)
-    domains  = _init_domains(csp, g, schema, g_offset)
-    _apply_attr_masks!(domains, csp, g, schema, enc, g_offset)
-    cpu_propagate!(domains, csp.bytecodes) || return Vector{Int32}[]
-    cpu_dive_solve(csp, domains)
-end
-
-function _apply_deletion!(g::GPUACSet, to_del::CuVector{Bool}, schema::SchemaInfo)
-    # Build per-type masks from the flat to_del vector
-    offset = 0
-    for o in schema.obj_types
-        n = g.n_alloc[o]
-        host_del = Array(to_del)[offset+1 : offset+n]
-        host_act = Array(g.active[o])
-        for i in 1:n
-            host_del[i] && (host_act[i] = false)
-        end
-        g.active[o] = CuArray(host_act)
-        g.n_live[o][] -= sum(host_del)
-        offset += n
-    end
-end
-
-function _collect_deleted(match::Vector{Int32}, cube::AdhesiveCube,
-                          schema::SchemaInfo, g::GPUACSet)
-    g_offset = _global_offset(g, schema)
-    k_img    = Set{Int}(Int(x) for x in cube.k_to_l)
-    deleted  = Dict(o => Int32[] for o in schema.obj_types)
-    for (flat_l, type_idx) in enumerate(cube.l_types)
-        flat_l ∈ k_img && continue
-        g_elem = Int(match[flat_l])
-        g_elem == 0 && continue
-        o = schema.obj_types[Int(type_idx)]
-        push!(deleted[o], Int32(g_elem - g_offset[o]))
-    end
-    deleted
-end
-
-function _get_rule(sched::CompiledGPUSched, box::CompiledBox)
-    # Rules are not stored in CompiledGPUSched (only CSPs/cubes are).
-    # Return nothing; apply_pushout! has a fallback that reads rule data from
-    # the AdhesiveCube directly.
-    nothing
+    events
 end

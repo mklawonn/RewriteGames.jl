@@ -88,13 +88,24 @@ and `CUDA` to be loaded.  See the `GPURewritingExt` extension for details.
 function gpu_run_game_sched! end
 
 """
-    gpu_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
+    turbo_homomorphisms(L, G; backend, monic, initial) -> Vector{ACSetTransformation}
 
 GPU Turbo homomorphism enumerator.  Returns the same set as Catlab's
 `homomorphisms(L, G)` computed via the CSP propagation + dive-solve engine.
 Requires `KernelAbstractions` and `CUDA`.
 """
-function gpu_homomorphisms end
+function turbo_homomorphisms end
+
+"""
+    select_action_gpu(player::AbstractGPUPlayer, g, enc, schema,
+                      candidates, n_sols, turn) -> Int
+
+Choose one candidate solution (1-based column index) from the GPU-resident
+`candidates` matrix of shape `[n_vars × n_sols]`.  Implemented by concrete
+`AbstractGPUPlayer` subtypes.  The default for `GPUFunctionPlayer` calls
+`player.f(g, candidates, n_sols, turn)`.
+"""
+function select_action_gpu end
 
 # ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -107,6 +118,8 @@ export
     AbstractAgent, Action,
     FunctionAgent,
     select_action,
+    AbstractGPUPlayer, GPUFunctionPlayer,
+    select_action_gpu,
 
     # Engine
     Experience,
@@ -114,6 +127,7 @@ export
     # Wiring-diagram schedule
     PlayerRuleApp, GameSched,
     mk_game_sched, player_migrate,
+    merge_wires, coin,
     view_sched,
     run_game_sched!,
 
@@ -140,6 +154,6 @@ export
 
     # GPU extension (available when KernelAbstractions + CUDA are loaded)
     gpu_run_game_sched!,
-    gpu_homomorphisms
+    turbo_homomorphisms
 
 end # module RewriteGames

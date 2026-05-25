@@ -30,8 +30,8 @@ function reconstruct_experiences(step_log::Vector{<:NamedTuple},
                                  agents::Dict)::Vector{Experience}
     exps = Experience[]
     for entry in step_log
-        pre_world  = download_acset(entry.pre_state,  enc, world_type)
-        post_world = download_acset(entry.post_state, enc, world_type)
+        pre_world  = entry.pre_state isa GPUACSet ? download_acset(entry.pre_state,  enc, world_type) : entry.pre_state
+        post_world = entry.post_state isa GPUACSet ? download_acset(entry.post_state, enc, world_type) : entry.post_state
 
         state_pre  = GameState(pre_world,  entry.turn)
         state_post = GameState(post_world, entry.turn + 1)

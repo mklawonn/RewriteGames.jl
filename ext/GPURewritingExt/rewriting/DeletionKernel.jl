@@ -5,43 +5,11 @@ For a match `m : L → G`, the elements of `L` that are not in the image of
 `K → L` must be deleted from `G`.  In DPO mode this is simply a flag flip;
 in SPO mode foreign-key chains are additionally cascaded.
 
-The `dangling_check_kernel!` must be called (and its output inspected) before
-`dpo_deletion_kernel!` to ensure the match satisfies the dangling condition.
+`build_to_del_mask`      — builds the flat deletion bitmask on the host.
+`gpu_dangling_ok`        — checks the dangling condition entirely on GPU.
+`dpo_deletion_kernel!`   — clears active flags in-place (GPU).
+`spo_cascade_kernel!`    — cascades deletions through FK chains (GPU).
 """
-
-# ── Dangling condition check ──────────────────────────────────────────────────
-
-@kernel function dangling_check_kernel!(
-    active      :: AbstractVector{Bool},      # current element active flags (all types)
-    hom_data    :: AbstractMatrix{Int32},     # [max_n × n_homs] foreign key table
-    hom_offsets :: AbstractVector{Int32},     # start offset per morphism in flat layout
-    hom_sizes   :: AbstractVector{Int32},     # element count per morphism domain type
-    match       :: AbstractVector{Int32},     # flat match: L-variable → G-element
-    to_del_mask :: AbstractVector{Bool},      # true if this L-element is being deleted
-    n_del       :: Int,
-    valid       :: AbstractVector{Bool}       # output: match satisfies dangling cond?
-)
-    inst = @index(Global, Linear)
-    if inst == 1   # single-instance check
-        ok = true
-        for h_idx in 1:length(hom_offsets)
-            off  = Int(hom_offsets[h_idx])
-            n_h  = Int(hom_sizes[h_idx])
-            src  = 1
-            while ok && src <= n_h
-                if active[off + src]
-                    tgt = hom_data[src, h_idx]
-                    if tgt != 0 && active[tgt] && to_del_mask[tgt]
-                        ok = false
-                    end
-                end
-                src += 1
-            end
-            ok || break
-        end
-        valid[1] = ok
-    end
-end
 
 # ── DPO deletion ──────────────────────────────────────────────────────────────
 
@@ -51,7 +19,9 @@ end
 )
     i = @index(Global, Linear)
     if i <= length(active)
-        to_del[i] && (active[i] = false)
+        if to_del[i]
+            active[i] = false
+        end
     end
 end
 
@@ -72,27 +42,162 @@ end
     end
 end
 
-# ── Host-side helper: compute the to_del mask on CPU, upload to GPU ───────────
+# ── Parallel dangling-condition check ─────────────────────────────────────────
+
+# Single-kernel dangling check: one thread per source element, shared violation flag.
+# All morphisms are checked in successive launches sharing the same `violation` buffer.
+@kernel function dangling_check_all_homs_kernel!(
+    violation  :: AbstractVector{Int32},
+    active_src :: AbstractVector{Bool},
+    fk         :: AbstractVector{Int32},
+    to_del_src :: AbstractVector{Bool},
+    to_del_tgt :: AbstractVector{Bool},
+    src_n      :: Int32,
+    tgt_n      :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= Int(src_n) && active_src[i] && !to_del_src[i]
+        tgt = Int(fk[i])
+        if tgt != 0 && tgt <= Int(tgt_n) && to_del_tgt[tgt]
+            CUDA.atomic_or!(pointer(violation, 1), Int32(1))
+        end
+    end
+end
 
 """
-    build_to_del_mask(match, cube, schema, g) -> (CuVector{Bool}, Bool)
+    gpu_dangling_ok(to_del, g, schema, backend; buf_violation) -> Bool
 
-Build a flat Boolean mask over all G-elements indicating which are deleted by
-the rewrite.  Also performs the dangling condition check on the host (fast
-path for single-match execution).
+Check the DPO dangling condition entirely on GPU.  Launches one kernel per
+schema morphism with a shared `violation` flag; a single synchronize and a
+single scalar download replace the previous N-per-morphism version.
 
-Returns `(mask, dangling_ok)` where `dangling_ok` is false if the match
-violates the dangling condition under DPO.
+`buf_violation` is a pre-allocated length-1 `CuVector{Int32}` from the
+`GPUScratchBuffers`; pass `nothing` to fall back to a local allocation.
+"""
+function gpu_dangling_ok(to_del, g::GPUACSet,
+                          schema::SchemaInfo, backend;
+                          buf_violation = nothing)::Bool
+    g_off = Dict{Symbol, Int}()
+    cursor = 0
+    for o in schema.obj_types
+        g_off[o] = cursor
+        cursor += g.n_alloc[o]
+    end
+
+    viol = buf_violation !== nothing ? buf_violation :
+                                      KernelAbstractions.allocate(backend, Int32, 1)
+    KernelAbstractions.fill!(viol, Int32(0))
+
+    for h in schema.homs
+        src_type = schema.hom_dom[h]
+        tgt_type = schema.hom_cod[h]
+        n_src = g.n_alloc[src_type]
+        n_tgt = g.n_alloc[tgt_type]
+        (n_src == 0 || n_tgt == 0) && continue
+
+        o_src = g_off[src_type]
+        o_tgt = g_off[tgt_type]
+
+        dangling_check_all_homs_kernel!(backend, 256)(
+            viol,
+            @view(g.active[src_type][1:n_src]),
+            @view(g.homs[h][1:n_src]),
+            @view(to_del[o_src+1 : o_src+n_src]),
+            @view(to_del[o_tgt+1 : o_tgt+n_tgt]),
+            Int32(n_src), Int32(n_tgt);
+            ndrange = n_src)
+    end
+    KernelAbstractions.synchronize(backend)
+    Array(viol)[1] == Int32(0)
+end
+
+# ── Single-sync pipeline kernels ─────────────────────────────────────────────
+
+"""
+GPU kernel for building the to_del mask without a CPU round-trip.
+`del_l_flats[i]` and `del_l_types[i]` are precomputed in the AdhesiveCube;
+`g_type_offs[t]` is the 0-based offset of type t in the flat `buf_to_del`.
+Guarded by `buf_fired[1]` so it no-ops when no match was found.
+"""
+@kernel function build_to_del_kernel!(
+    buf_to_del  :: AbstractVector{Bool},
+    buf_fired   :: AbstractVector{Int32},
+    buf_match   :: AbstractVector{Int32},
+    del_l_flats :: AbstractVector{Int32},
+    del_l_types :: AbstractVector{Int32},
+    g_type_offs :: AbstractVector{Int32},
+    n_del       :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= Int(n_del) && buf_fired[1] != Int32(0)
+        l_flat = Int(del_l_flats[i])
+        g_elem = Int(buf_match[l_flat])
+        if g_elem > 0
+            t   = Int(del_l_types[i])
+            off = Int(g_type_offs[t])
+            buf_to_del[off + g_elem] = true
+        end
+    end
+end
+
+"""
+Dangling-condition check that writes its result directly into `buf_fired`
+(instead of a separate violation buffer).  When a dangling edge is found,
+sets `buf_fired[1] = 0` via atomic AND, marking the rule as non-firing.
+"""
+@kernel function dangling_check_fired_kernel!(
+    buf_fired  :: AbstractVector{Int32},
+    active_src :: AbstractVector{Bool},
+    fk         :: AbstractVector{Int32},
+    to_del_src :: AbstractVector{Bool},
+    to_del_tgt :: AbstractVector{Bool},
+    src_n      :: Int32,
+    tgt_n      :: Int32,
+)
+    i = @index(Global, Linear)
+    if i <= Int(src_n) && buf_fired[1] != Int32(0) && active_src[i] && !to_del_src[i]
+        tgt = Int(fk[i])
+        if tgt != 0 && tgt <= Int(tgt_n) && to_del_tgt[tgt]
+            CUDA.atomic_and!(pointer(buf_fired, 1), Int32(0))
+        end
+    end
+end
+
+"""
+Guarded DPO deletion kernel: only clears active flags when `buf_fired[1] != 0`.
+"""
+@kernel function dpo_deletion_kernel_g!(
+    active    :: AbstractVector{Bool},
+    to_del    :: AbstractVector{Bool},
+    buf_fired :: AbstractVector{Int32},
+)
+    i = @index(Global, Linear)
+    if i <= length(active) && buf_fired[1] != Int32(0) && to_del[i]
+        active[i] = false
+    end
+end
+
+# ── Host-side helper: build the to_del mask ───────────────────────────────────
+
+"""
+    build_to_del_mask(match, cube, schema, g; buf_to_del) -> AbstractVector{Bool}
+
+Build a flat Boolean mask over all G-elements indicating which are deleted
+by the rewrite.  The mask is computed on the host from the match and cube
+(no GPU download needed).
+
+When `buf_to_del` is provided (pre-allocated from `GPUScratchBuffers`),
+the mask is written there (via a host-to-device copyto!) rather than
+allocating a fresh `CuArray`.  Falls back to `CuArray(to_del_host)` otherwise.
 """
 function build_to_del_mask(match::Vector{Int32},
                            cube::AdhesiveCube,
                            schema::SchemaInfo,
-                           g::GPUACSet)::Tuple{CuVector{Bool}, Bool}
-    # Compute total G-element count (flat layout matching GPUACSet order)
+                           g::GPUACSet;
+                           buf_to_del = nothing)
     total = sum(g.n_alloc[o] for o in schema.obj_types; init=0)
     to_del_host = zeros(Bool, total)
 
-    # Flat offset into G-element space per object type
     g_offset = Dict{Symbol, Int}()
     cursor = 0
     for o in schema.obj_types
@@ -100,38 +205,24 @@ function build_to_del_mask(match::Vector{Int32},
         cursor += g.n_alloc[o]
     end
 
-    # Mark deleted elements: L-elements not in image(K → L)
     k_img_l = Set{Int}(Int(x) for x in cube.k_to_l)
     for (flat_l, l_type_idx) in enumerate(cube.l_types)
-        flat_l ∈ k_img_l && continue   # preserved by K
+        flat_l ∈ k_img_l && continue
         g_elem = Int(match[flat_l])
         g_elem == 0 && continue
         o = schema.obj_types[l_type_idx]
         to_del_host[g_offset[o] + g_elem] = true
     end
 
-    # Dangling check: for every active source pointing to a to-be-deleted target,
-    # the match violates DPO.
-    dangling_ok = true
-    for h in schema.homs
-        owner = schema.hom_dom[h]
-        fk    = Array(g.homs[h])
-        act   = Array(g.active[owner])
-        off_o = g_offset[owner]
-        off_c = g_offset[schema.hom_cod[h]]
-        for (src_local, (alive, tgt)) in enumerate(zip(act, fk))
-            alive || continue
-            tgt == 0 && continue
-            src_flat = off_o + src_local
-            to_del_host[src_flat] && continue  # source is also deleted — ok
-            tgt_flat = off_c + Int(tgt)
-            if to_del_host[tgt_flat]
-                dangling_ok = false
-                break
-            end
+    if buf_to_del !== nothing
+        if length(buf_to_del) < total
+            # Grow the pre-allocated buffer (rare after initial sizing)
+            # Can't update the caller's field here; fall back to fresh allocation
+            return CUDA.functional() ? CuArray(to_del_host) : to_del_host
         end
-        dangling_ok || break
+        buf = @view buf_to_del[1:total]
+        copyto!(buf, to_del_host)
+        return buf
     end
-
-    CuArray(to_del_host), dangling_ok
+    CUDA.functional() ? CuArray(to_del_host) : to_del_host
 end

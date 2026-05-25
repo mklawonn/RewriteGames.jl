@@ -154,9 +154,20 @@ function _run_body!(steps, wires, boxes, agents, terminal, turn::Ref{Int}, T_max
             _exec_subsched!(step, box, input_world, wires, boxes, agents, terminal, turn, T_max, exps, cache_dict, agent_match)
         elseif hasproperty(box, :rule)
             _exec_native_rule!(step, box, input_world, wires, agent_match)
+        elseif box isa MergeWires
+            wires[step.outputs[1]] = box([get(wires, w, nothing) for w in step.inputs]...)
+        elseif box isa Schedule
+            # AlgebraicRewriting.Schedule acting as merge_wires: take first active input
+            result = nothing
+            for wname in step.inputs
+                w = get(wires, wname, nothing)
+                if w !== nothing; result = w; break; end
+            end
+            length(step.outputs) >= 1 && (wires[step.outputs[1]] = result)
+        elseif box isa Coin
+            out = box(input_world)
+            for i in 1:length(step.outputs); wires[step.outputs[i]] = i <= length(out) ? out[i] : nothing; end
         else
-            wires[step.outputs[1]] = input_world
-            for i in 2:length(step.outputs); wires[step.outputs[i]] = nothing; end
         end
     end
 end
@@ -278,11 +289,34 @@ function _exec_native_rule!(step, box, world, wires, agent_match=nothing)
           Catlab.CategoricalAlgebra.homomorphisms(Catlab.CategoricalAlgebra.codom(Catlab.CategoricalAlgebra.left(box.rule)), world; cat=_cat, initial=initial_map, monic=box.rule.monic)
     matches = collect(gen)
     if !isempty(matches)
-        new_world = Catlab.CategoricalAlgebra.rewrite_match(box.rule, first(matches))
+        new_world = AlgebraicRewriting.rewrite_match(box.rule, first(matches))
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = new_world)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = nothing)
     else
         length(step.outputs) >= 1 && (wires[step.outputs[1]] = nothing)
         length(step.outputs) >= 2 && (wires[step.outputs[2]] = world)
+    end
+end
+
+# ─── Utility Boxes ────────────────────────────────────────────────────────────
+
+struct MergeWires; I_state::Any; end
+merge_wires(I_state) = MergeWires(I_state)
+
+function (box::MergeWires)(worlds...)
+    for w in worlds
+        w !== nothing && return w
+    end
+    return nothing
+end
+
+struct Coin; p::Float64; end
+coin(p) = Coin(p)
+
+function (box::Coin)(world)
+    if rand() < box.p
+        return world, nothing
+    else
+        return nothing, world
     end
 end

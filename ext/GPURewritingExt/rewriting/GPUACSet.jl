@@ -9,17 +9,19 @@ Layout per object type `o`:
   homs[h]    :: CuVector{Int32}  — foreign key for morphism h (1-based, 0=unset)
   attrs[a]   :: CuVector{Int32}  — encoded integer attribute value (0=wildcard)
 
-`n_alloc[o]` is the allocated array capacity; `n_live[o]` is the current
-count of non-tombstoned elements.  Both are host-side integers; only the
-arrays themselves live on the GPU.
+`n_alloc[o]` is the high-water mark: slots 1..n_alloc[o] have been assigned
+(live or tombstoned).  The CuArray capacity is `length(g.active[o])` which
+may exceed `n_alloc[o]` due to 2× over-allocation; spare slots have
+`active = false` and are ready for the next addition without reallocation.
+`n_live[o]` is the count of currently active (non-tombstoned) elements.
 """
 struct GPUACSet
     schema  :: SchemaInfo
-    active  :: Dict{Symbol, CuVector{Bool}}    # per object type
-    homs    :: Dict{Symbol, CuVector{Int32}}   # per morphism
-    attrs   :: Dict{Symbol, CuVector{Int32}}   # per attribute
-    n_alloc :: Dict{Symbol, Int}               # capacity per obj type
-    n_live  :: Dict{Symbol, Ref{Int}}          # live count per obj type
+    active  :: Dict{Symbol, Any}   # CuVector{Bool} on GPU, Vector{Bool} on CPU
+    homs    :: Dict{Symbol, Any}   # CuVector{Int32} on GPU, Vector{Int32} on CPU
+    attrs   :: Dict{Symbol, Any}   # CuVector{Int32} on GPU, Vector{Int32} on CPU
+    n_alloc :: Dict{Symbol, Int}   # high-water mark per obj type
+    n_live  :: Dict{Symbol, Ref{Int}}
 end
 
 """
@@ -27,28 +29,35 @@ end
 
 Encode `world` and upload every column to the GPU.
 """
-function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder)::GPUACSet
-    active = Dict{Symbol, CuVector{Bool}}()
-    homs   = Dict{Symbol, CuVector{Int32}}()
-    attrs  = Dict{Symbol, CuVector{Int32}}()
+function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder; headspace=1000)::GPUACSet
+    active  = Dict{Symbol, Any}()
+    homs    = Dict{Symbol, Any}()
+    attrs   = Dict{Symbol, Any}()
     n_alloc = Dict{Symbol, Int}()
     n_live  = Dict{Symbol, Ref{Int}}()
+
+    use_cuda = CUDA.functional()
+    _zeros(T, n) = use_cuda ? CUDA.zeros(T, n) : zeros(T, n)
 
     for o in schema.obj_types
         n = nparts(world, o)
         n_alloc[o] = n
         n_live[o]  = Ref(n)
-        active[o]  = CUDA.ones(Bool, n)    # all elements start live
+        act = _zeros(Bool, n + headspace)
+        if n > 0; act[1:n] .= true; end
+        active[o] = act
     end
 
     for h in schema.homs
         owner = schema.hom_dom[h]
         n     = nparts(world, owner)
         if n == 0
-            homs[h] = CuArray(Int32[])
+            homs[h] = _zeros(Int32, headspace)
         else
             host_fk = Int32[subpart(world, i, h) for i in 1:n]
-            homs[h] = CuArray(host_fk)
+            fk = _zeros(Int32, n + headspace)
+            copyto!(fk, 1, host_fk, 1, n)
+            homs[h] = fk
         end
     end
 
@@ -56,10 +65,12 @@ function upload_acset(world, schema::SchemaInfo, enc::AttributeEncoder)::GPUACSe
         owner = schema.attr_dom[a]
         n     = nparts(world, owner)
         if n == 0
-            attrs[a] = CuArray(Int32[])
+            attrs[a] = _zeros(Int32, headspace)
         else
             host_av = Int32[encode_value(enc, a, subpart(world, i, a)) for i in 1:n]
-            attrs[a] = CuArray(host_av)
+            av = _zeros(Int32, n + headspace)
+            copyto!(av, 1, host_av, 1, n)
+            attrs[a] = av
         end
     end
 
@@ -126,4 +137,55 @@ function download_acset(g::GPUACSet, enc::AttributeEncoder, world_type)
     end
 
     result
+end
+
+"""
+    download_acset_compact(g, enc, world_type, backend) -> ACSet
+
+Compact `g` in-place (GPU-native prefix-sum, no tombstones remain), then
+download without the tombstone-skipping loop.  Use only when it is acceptable
+to mutate `g` (e.g., at episode end before discarding `g`).
+"""
+function download_acset_compact(g::GPUACSet, enc::AttributeEncoder, world_type, backend)
+    compact_gpu_acset!(g, g.schema, backend)
+    schema = g.schema
+    result = world_type()
+
+    for o in schema.obj_types
+        add_parts!(result, o, g.n_alloc[o])
+    end
+
+    for h in schema.homs
+        dom = schema.hom_dom[h]
+        n   = g.n_alloc[dom]
+        n == 0 && continue
+        host_fk = Array(g.homs[h])
+        for i in 1:n
+            host_fk[i] > 0 && set_subpart!(result, i, h, Int(host_fk[i]))
+        end
+    end
+
+    for a in schema.attrs
+        dom = schema.attr_dom[a]
+        n   = g.n_alloc[dom]
+        n == 0 && continue
+        host_av = Array(g.attrs[a])
+        for i in 1:n
+            v = decode_value(enc, a, host_av[i])
+            v !== nothing && set_subpart!(result, i, a, v)
+        end
+    end
+
+    result
+end
+
+function Base.deepcopy(g::GPUACSet)
+    GPUACSet(
+        g.schema,
+        Dict(k => copy(v) for (k,v) in pairs(g.active)),
+        Dict(k => copy(v) for (k,v) in pairs(g.homs)),
+        Dict(k => copy(v) for (k,v) in pairs(g.attrs)),
+        copy(g.n_alloc),
+        Dict(k => Ref(v[]) for (k,v) in pairs(g.n_live))
+    )
 end

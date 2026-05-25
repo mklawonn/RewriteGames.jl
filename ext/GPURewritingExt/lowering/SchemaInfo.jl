@@ -5,13 +5,15 @@ Flat, GPU-serialisable snapshot of a Catlab ACSet schema. Built once from a
 world ACSet on the host, then threaded through every lowering and kernel call.
 """
 struct SchemaInfo
-    obj_types :: Vector{Symbol}         # ob(S)
-    homs      :: Vector{Symbol}         # hom(S)
-    attrs     :: Vector{Symbol}         # attr(S)
-    hom_dom   :: Dict{Symbol, Symbol}   # morphism → domain obj type
-    hom_cod   :: Dict{Symbol, Symbol}   # morphism → codomain obj type
-    attr_dom  :: Dict{Symbol, Symbol}   # attribute → owner obj type
-    obj_index :: Dict{Symbol, Int}      # obj type → dense integer index
+    obj_types  :: Vector{Symbol}         # ob(S)
+    homs       :: Vector{Symbol}         # hom(S)
+    attrs      :: Vector{Symbol}         # attr(S)
+    hom_dom    :: Dict{Symbol, Symbol}   # morphism → domain obj type
+    hom_cod    :: Dict{Symbol, Symbol}   # morphism → codomain obj type
+    attr_dom   :: Dict{Symbol, Symbol}   # attribute → owner obj type
+    obj_index  :: Dict{Symbol, Int}      # obj type → dense integer index
+    hom_index  :: Dict{Symbol, Int}      # morphism → index
+    attr_index :: Dict{Symbol, Int}      # attribute → index
 end
 
 """
@@ -37,7 +39,10 @@ function extract_schema_info(world)
         attr_dom[a] = dom(S, a)
     end
 
-    obj_index = Dict{Symbol,Int}(o => i for (i,o) in enumerate(obj_types))
+    obj_index  = Dict{Symbol,Int}(o => i for (i,o) in enumerate(obj_types))
+    hom_index  = Dict{Symbol,Int}(h => i for (i,h) in enumerate(homs_list))
+    attr_index = Dict{Symbol,Int}(a => i for (i,a) in enumerate(attrs_list))
 
-    SchemaInfo(obj_types, homs_list, attrs_list, hom_dom, hom_cod, attr_dom, obj_index)
+    SchemaInfo(obj_types, homs_list, attrs_list, hom_dom, hom_cod, attr_dom,
+               obj_index, hom_index, attr_index)
 end
