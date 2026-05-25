@@ -628,6 +628,115 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
     solutions[1]
 end
 
+# ── NAC/PAC post-filter (CPU-side) ───────────────────────────────────────────
+#
+# After the GPU/CPU solver finds candidate L-matches, we filter out any that
+# trigger a Negative Application Condition (NAC) or fail to satisfy a Positive
+# Application Condition (PAC).
+#
+# The GPU propagation kernel does not yet process NAC_REIF/PAC_REIF bytecodes
+# (they require extra variables for elements introduced only in the extended
+# pattern).  This CPU post-filter is the correct enforcement path until a
+# full GPU reification implementation is added.
+
+"""
+    _is_nac_condition(cond) -> Bool
+
+Returns `true` if `cond` is a Negative Application Condition.
+
+`AppCond(f, false)` wraps its quantifier expression in `BoolNot`, which has an
+`:expr` field but no `:kind` field.  `AppCond(f, true)` produces a `Quantifier`
+directly, which has a `:kind` field.
+"""
+_is_nac_condition(cond) = !hasproperty(cond.d, :kind)
+
+"""
+    _solution_passes_conditions(compact_sol, conditions, L, world_host, csp, schema) -> Bool
+
+Returns `false` if any NAC fires or any PAC is unsatisfied for `compact_sol`.
+
+For each condition, the extended pattern `ac_L = codom(f)` is extracted from
+`cond.g[1, :vlabel]` (vertex 1 of the AppCond CGraph).  The morphism
+`f : L → ac_L` is at `cond.g[1, :elabel]` (edge 1).  L-element assignments
+from `compact_sol` are pinned as the `initial` map for a hom-search from
+`ac_L` into `world_host`; new NAC-only elements are searched freely.
+"""
+function _solution_passes_conditions(compact_sol::Vector{Int32},
+                                     conditions,
+                                     L,
+                                     world_host,
+                                     csp::CSPProblem,
+                                     schema::SchemaInfo)
+    for cond in conditions
+        hasproperty(cond, :g)          || continue
+        nparts(cond.g, :V) >= 1       || continue
+        nparts(cond.g, :E) >= 1       || continue
+        ac_L   = subpart(cond.g, 1, :vlabel)
+        ac_L isa ACSet                 || continue
+        f_edge = subpart(cond.g, 1, :elabel)
+        f_edge isa ACSetTransformation || continue
+
+        # Build the initial assignment: pin each L-element to its world value.
+        S_L       = acset_schema(L)
+        init_comps = Dict{Symbol, Dict{Int,Int}}()
+        for o in ob(S_L)
+            base = get(csp.var_offset, o, 0)
+            base == 0 && continue
+            n = nparts(L, o)
+            n == 0 && continue
+            d = Dict{Int,Int}()
+            for i in 1:n
+                j = f_edge[o](i)    # image of L-part i in ac_L
+                w = Int(compact_sol[base + i - 1])
+                w > 0 && (d[j] = w)
+            end
+            isempty(d) || (init_comps[o] = d)
+        end
+
+        init_nt  = NamedTuple(Symbol(k) => v for (k, v) in init_comps)
+        ext_homs = homomorphisms(ac_L, world_host; initial = init_nt)
+
+        if _is_nac_condition(cond) && !isempty(ext_homs)
+            return false   # NAC fires → reject
+        elseif !_is_nac_condition(cond) && isempty(ext_homs)
+            return false   # PAC not satisfied → reject
+        end
+    end
+    return true
+end
+
+"""
+    _filter_nac_solutions(solutions, rule, csp, g, enc, schema, world_type)
+        -> Vector{Vector{Int32}}
+
+Downloads the world once and post-filters GPU solutions against all NAC/PAC
+application conditions attached to the rewrite rule.  Returns only solutions
+that satisfy all conditions.  Returns the input unchanged if the rule has no
+conditions or if `L` cannot be recovered.
+"""
+function _filter_nac_solutions(solutions::Vector{Vector{Int32}},
+                                rule,
+                                csp::CSPProblem,
+                                g::GPUACSet,
+                                enc::AttributeEncoder,
+                                schema::SchemaInfo,
+                                world_type)
+    inner_rule = hasproperty(rule, :rule) ? rule.rule : rule
+    hasproperty(inner_rule, :conditions)        || return solutions
+    isempty(inner_rule.conditions)              && return solutions
+    hasmethod(left, Tuple{typeof(inner_rule)})  || return solutions
+
+    L          = codom(left(inner_rule))
+    world_host = download_acset(g, enc, world_type)
+    gpu_to_compact, _ = _gpu_to_compact_mapping(g, schema)
+
+    filter(solutions) do sol
+        compact = _sol_gpu_to_compact(sol, csp, schema, gpu_to_compact)
+        _solution_passes_conditions(compact, inner_rule.conditions, L,
+                                    world_host, csp, schema)
+    end
+end
+
 # ── Per-box solve-and-apply ───────────────────────────────────────────────────
 
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
@@ -690,6 +799,11 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                 cpu_dive_solve(fresh_csp, domains)
             end
         end
+        isempty(solutions) && return false
+
+        # ── NAC/PAC post-filter ──────────────────────────────────────────────
+        solutions = _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
+                                          state.world_type)
         isempty(solutions) && return false
 
         if box.box_type == BOX_PLAYER_RULE

@@ -232,19 +232,28 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
 end
 
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)
-    # Application conditions carry their own pattern graph; we emit PROP_FUNC-
-    # style constraints tagged with the group id via the NAC_REIF/PAC_REIF op.
-    # The GPU kernel interprets reification bytecodes as "if all these match
-    # simultaneously the auxiliary var3 is forced to 1".
-    ac_L = try; codom(left(cond)); catch; return; end
-    S    = acset_schema(ac_L)
+    # Extract the extended pattern from an AlgebraicRewriting Constraint.
+    # AppCond/NAC/PAC creates a CGraph with vlabel = [codom(f), dom(f), nothing]
+    # at vertex indices 1, 2, 3.  Vertex 1 holds codom(f) — the extended NAC/PAC
+    # pattern.  The old code used codom(left(cond)) which fails because left() is
+    # defined for Rule, not for Constraint.
+    ac_L = try
+        raw = subpart(cond.g, 1, :vlabel)
+        raw isa ACSet ? raw : return
+    catch
+        return
+    end
+    S = acset_schema(ac_L)
     for h in schema.homs
         dom_ob = schema.hom_dom[h]
         nparts(ac_L, dom_ob) == 0 && continue
         for i in parts(ac_L, dom_ob)
             j = subpart(ac_L, i, h)
             j == 0 && continue
-            # Reuse the base L variable offsets when the AC shares them
+            # Reuse the base L variable offsets for elements that appear in both
+            # L and ac_L.  Elements in ac_L that belong to types not present in L
+            # (e.g. DestroyedPlatform added by a NAC) get var_offset 0 and are
+            # skipped here; they are enforced by the CPU-side NAC post-filter.
             v_i = get(var_offset, dom_ob, 0) + (i - 1)
             v_j = get(var_offset, schema.hom_cod[h], 0) + (j - 1)
             v_i == 0 || v_j == 0 && continue

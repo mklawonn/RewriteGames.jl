@@ -134,6 +134,77 @@ end
 
 # ── 3. GPU-only integration test ──────────────────────────────────────────────
 
+# ── 4. NAC lowering and post-filter tests ─────────────────────────────────────
+#
+# These tests verify the fix for the silent NAC-dropping bug:
+#   _lower_ac! used codom(left(cond)) which fails on Constraint objects,
+#   causing all NAC bytecodes to be silently omitted (nac_groups stayed 0).
+# After the fix:
+#   - nac_groups is correctly incremented for each NAC condition.
+#   - The CPU-side post-filter (_solution_passes_conditions) rejects solutions
+#     that trigger a NAC, matching the AlgebraicRewriting CPU ground truth.
+
+@testset "NAC lowering and CPU post-filter" begin
+    # Schema: vertices + boolean "blocked" tokens pointing at vertices
+    @present SchBlocked(FreeSchema) begin V::Ob; Blk::Ob; bv::Hom(Blk, V) end
+    @acset_type BlockedGraph(SchBlocked)
+
+    # Rule: do something to a vertex v (K=L=single vertex, R adds a Blk token)
+    # NAC: vertex v must NOT already have a Blk token
+    L = BlockedGraph(); add_part!(L, :V)
+    K = BlockedGraph(); add_part!(K, :V)
+    R = BlockedGraph(); add_part!(R, :V); add_part!(R, :Blk; bv=1)
+
+    k_to_l = ACSetTransformation(Dict(:V=>[1], :Blk=>Int[]), K, L)
+    k_to_r = ACSetTransformation(Dict(:V=>[1], :Blk=>Int[]), K, R)
+
+    L_nac = copy(L); add_part!(L_nac, :Blk; bv=1)
+    nac_f = ACSetTransformation(Dict(:V=>[1], :Blk=>Int[]), L, L_nac)
+
+    rule  = Rule(k_to_l, k_to_r; ac=[NAC(nac_f)])
+
+    # World: vertex 1 is blocked; vertex 2 is free
+    world = BlockedGraph()
+    add_parts!(world, :V, 2)
+    add_part!(world, :Blk; bv=1)
+
+    # ── CPU AlgebraicRewriting ground truth ───────────────────────────────────
+    @testset "CPU ground truth — only unblocked vertex matches" begin
+        ms = get_matches(rule, world)
+        @test length(ms) == 1
+        @test ms[1][:V](1) == 2
+    end
+
+    # ── GPU extension tests (no GPU hardware required) ─────────────────────────
+    ext = Base.get_extension(RewriteGames, :GPURewritingExt)
+    if ext === nothing
+        @warn "GPURewritingExt not loaded — skipping GPU NAC unit tests"
+        @test_skip true
+    else
+        schema = ext.extract_schema_info(world)
+        enc    = ext.build_encoder(world, schema)
+        csp    = ext.lower_rule_to_csp(rule, world, schema, enc)
+
+        @testset "_lower_ac! fix: nac_groups now correctly non-zero" begin
+            @test csp.nac_groups == 1
+        end
+
+        @testset "_solution_passes_conditions: blocked vertex rejected" begin
+            # compact_sol[var_offset[:V] + 0] = world part id of the matched V
+            base_v = csp.var_offset[:V]
+            sol_v1 = zeros(Int32, csp.n_vars); sol_v1[base_v] = Int32(1)
+            sol_v2 = zeros(Int32, csp.n_vars); sol_v2[base_v] = Int32(2)
+
+            @test !ext._solution_passes_conditions(
+                sol_v1, rule.conditions, L, world, csp, schema)  # vertex 1 blocked
+            @test  ext._solution_passes_conditions(
+                sol_v2, rule.conditions, L, world, csp, schema)  # vertex 2 free
+        end
+    end
+end
+
+# ── 5. GPU-only integration test ──────────────────────────────────────────────
+
 @testset "GPU vs CPU full schedule equivalence" begin
     if !CUDA.functional()
         @warn "CUDA not functional — skipping full GPU schedule integration test"
