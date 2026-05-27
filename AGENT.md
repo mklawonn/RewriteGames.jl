@@ -144,3 +144,21 @@ Rule(l, r;
 (one per R AttrVar) receiving inherited value tuples and returning the new value.
 This avoids the spurious object deletion/recreation that would otherwise be needed
 to change an attribute.
+
+---
+
+## Known Issue: `done` flag in `gpu_run_game_sched!`
+
+`run_game_sched!` (CPU) sets `experience.done = true` on the final experience
+whenever the terminal predicate fires or `turn > T_max`.
+
+`gpu_run_game_sched!` can exit for a third reason: a schedule exit wire fires
+(no active trace wire to continue). In that case the terminal predicate is not
+consulted and the last experience is pushed with `done = false`.
+
+**Impact:** Code that inspects `last(exps).done` to detect episode termination
+will behave differently depending on which engine ran the episode.
+
+**Possible fix:** In the GPU runner's exit-wire path, call the terminal predicate
+(or unconditionally set `done = true`) on the final experience before returning,
+mirroring the CPU runner's behaviour in `_exec_player!`.
