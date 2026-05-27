@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 490 182" width="490" height="182">
+  <title>mark_x span: L &lt;- K -&gt; R</title>
+  <defs>
+    <!-- Black filled-triangle arrowhead (tip at line end) -->
+    <marker id="arrow" markerWidth="8" markerHeight="6"
+            refX="7" refY="3" orient="auto">
+      <polygon points="0,0 7,3 0,6" fill="black"/>
+    </marker>
+  </defs>
+
+  <!-- ===== L box ===== -->
+  <!-- rect: x=15, y=50, w=88, h=86, center=(59,93) -->
+  <rect x="15" y="50" width="88" height="86" rx="5"
+        fill="#f5f5f5" stroke="#a6a6a6" stroke-width="0.7"/>
+  <!-- L Sq circle (interface/preserved color) -->
+  <circle cx="59" cy="93" r="21" fill="#7373ff" stroke="#0000cc" stroke-width="1.5"/>
+  <text x="59" y="97" text-anchor="middle" font-family="serif" font-size="11" fill="#ffffff">Sq</text>
+  <!-- L label -->
+  <text x="59" y="153" text-anchor="middle" font-family="serif" font-style="italic" font-size="14" fill="#000000">L</text>
+
+  <!-- ===== K box ===== -->
+  <!-- rect: x=198, y=50, w=88, h=86, center=(242,93) -->
+  <rect x="198" y="50" width="88" height="86" rx="5"
+        fill="#f5f5f5" stroke="#a6a6a6" stroke-width="0.7"/>
+  <!-- K Sq circle -->
+  <circle cx="242" cy="93" r="21" fill="#7373ff" stroke="#0000cc" stroke-width="1.5"/>
+  <text x="242" y="97" text-anchor="middle" font-family="serif" font-size="11" fill="#ffffff">Sq</text>
+  <!-- K label -->
+  <text x="242" y="153" text-anchor="middle" font-family="serif" font-style="italic" font-size="14" fill="#000000">K</text>
+
+  <!-- ===== R box ===== -->
+  <!-- rect: x=380, y=30, w=88, h=126, center=(424,93) -->
+  <!-- Contains: R-Sq at (424,65), R-X at (424,119) -->
+  <rect x="380" y="30" width="88" height="126" rx="5"
+        fill="#f5f5f5" stroke="#a6a6a6" stroke-width="0.7"/>
+  <!-- R Sq circle (interface) -->
+  <circle cx="424" cy="65" r="19" fill="#7373ff" stroke="#0000cc" stroke-width="1.5"/>
+  <text x="424" y="69" text-anchor="middle" font-family="serif" font-size="11" fill="#ffffff">Sq</text>
+  <!-- R X circle (new/created) -->
+  <circle cx="424" cy="119" r="19" fill="#ffbf80" stroke="#cc6600" stroke-width="1.5"/>
+  <text x="424" y="123" text-anchor="middle" font-family="serif" font-size="11" fill="#000000">X</text>
+  <!-- xsq arrow: from top of X circle to bottom of Sq circle -->
+  <!-- X top edge: y=119-19=100; Sq bottom edge: y=65+19=84; arrow from (424,100) to (424,84) -->
+  <line x1="424" y1="100" x2="424" y2="91" stroke="black" stroke-width="1"
+        marker-end="url(#arrow)"/>
+  <text x="437" y="95" text-anchor="start" font-family="serif" font-size="10" fill="#000000">xsq</text>
+  <!-- R label -->
+  <text x="424" y="168" text-anchor="middle" font-family="serif" font-style="italic" font-size="14" fill="#000000">R</text>
+
+  <!-- ===== Span arrow: l (K -> L, pointing left) ===== -->
+  <!-- from K box left edge (198,93) to L box right edge (103,93) -->
+  <line x1="196" y1="93" x2="107" y2="93" stroke="black" stroke-width="1.2"
+        marker-end="url(#arrow)"/>
+  <text x="151" y="83" text-anchor="middle" font-family="serif" font-style="italic" font-size="13" fill="#000000">l</text>
+
+  <!-- ===== Span arrow: r (K -> R, pointing right) ===== -->
+  <!-- from K box right edge (286,93) to R box left edge (380,93) -->
+  <line x1="288" y1="93" x2="378" y2="93" stroke="black" stroke-width="1.2"
+        marker-end="url(#arrow)"/>
+  <text x="333" y="83" text-anchor="middle" font-family="serif" font-style="italic" font-size="13" fill="#000000">r</text>
+</svg>

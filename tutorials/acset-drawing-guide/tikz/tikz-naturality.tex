@@ -1,0 +1,11 @@
+\documentclass[tikz,border=4pt]{standalone}
+\usepackage{tikz-cd}
+
+% Naturality square for a morphism h : I -> J
+% Represents the commutative condition: J(f) . h_c = h_d . I(f)
+\begin{document}
+\begin{tikzcd}
+  I(c) \arrow[r, "I(f)"] \arrow[d, "h_c"'] & I(d) \arrow[d, "h_d"] \\
+  J(c) \arrow[r, "J(f)"']                   & J(d)
+\end{tikzcd}
+\end{document}

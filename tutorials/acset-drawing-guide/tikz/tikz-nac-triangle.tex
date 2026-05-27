@@ -1,0 +1,21 @@
+\documentclass[tikz,border=4pt]{standalone}
+\usepackage{tikz-cd}
+\usepackage{amssymb}
+
+% NAC (Negative Application Condition) triangle
+%
+%   L --n--> N
+%    \        |
+%     m\   /\nexists q  (dashed)
+%        v
+%        G
+%
+% Match m : L -> G is rejected iff there exists q : N -> G with q.n = m.
+% The dashed arrow indicates the morphism that must NOT exist.
+\begin{document}
+\begin{tikzcd}
+  L \arrow[r, "n"] \arrow[dr, "m"']
+    & N \arrow[d, dashed, "\nexists\, q"'] \\
+    & G
+\end{tikzcd}
+\end{document}

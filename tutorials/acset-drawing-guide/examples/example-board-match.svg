@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 222" width="260" height="222">
+  <title>3x3 TicTacToe board with matched center square</title>
+  <defs>
+    <!-- Dashed diagonal edges use stroke-dasharray -->
+  </defs>
+
+  <!-- Title -->
+  <text x="130" y="18" text-anchor="middle" font-family="serif" font-size="12" fill="#555555">Board with matched center square</text>
+
+  <!-- ===== Bounding box for G ===== -->
+  <!-- Grid centers: x in {80,130,180}, y in {75,120,165}, radius=15 -->
+  <!-- Box: padding=17px; left=80-15-17=48, right=180+15+17=212, top=75-15-17=43, bottom=165+15+17=197 -->
+  <rect x="48" y="43" width="164" height="154" rx="6"
+        fill="#f5f5f5" stroke="#a6a6a6" stroke-width="0.7"/>
+  <!-- G label above box -->
+  <text x="130" y="37" text-anchor="middle" font-family="serif" font-style="italic" font-size="14" fill="#000000">G</text>
+
+  <!-- ===== Topology edges ===== -->
+  <!-- RowE (horizontal, solid gray): gap=50-2*15=20px per segment -->
+  <!-- Row 1 (y=75) -->
+  <line x1="95" y1="75" x2="115" y2="75" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="145" y1="75" x2="165" y2="75" stroke="#a6a6a6" stroke-width="1"/>
+  <!-- Row 2 (y=120) -->
+  <line x1="95" y1="120" x2="115" y2="120" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="145" y1="120" x2="165" y2="120" stroke="#a6a6a6" stroke-width="1"/>
+  <!-- Row 3 (y=165) -->
+  <line x1="95" y1="165" x2="115" y2="165" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="145" y1="165" x2="165" y2="165" stroke="#a6a6a6" stroke-width="1"/>
+
+  <!-- ColE (vertical, solid gray) -->
+  <!-- Col 1 (x=80) -->
+  <line x1="80" y1="90" x2="80" y2="105" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="80" y1="135" x2="80" y2="150" stroke="#a6a6a6" stroke-width="1"/>
+  <!-- Col 2 (x=130) -->
+  <line x1="130" y1="90" x2="130" y2="105" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="130" y1="135" x2="130" y2="150" stroke="#a6a6a6" stroke-width="1"/>
+  <!-- Col 3 (x=180) -->
+  <line x1="180" y1="90" x2="180" y2="105" stroke="#a6a6a6" stroke-width="1"/>
+  <line x1="180" y1="135" x2="180" y2="150" stroke="#a6a6a6" stroke-width="1"/>
+
+  <!-- DiagE (dashed gray): main diagonal and anti-diagonal -->
+  <!-- Main diagonal (top-left to bottom-right) -->
+  <!-- (80,75)->(130,120): unit=(0.707,0.707), start=(80+10.6,75+10.6)=(91,86), end=(130-10.6,120-10.6)=(119,109) -->
+  <line x1="91" y1="86" x2="119" y2="109" stroke="#a6a6a6" stroke-width="1"
+        stroke-dasharray="3 3"/>
+  <!-- (130,120)->(180,165): start=(141,131), end=(169,154) -->
+  <line x1="141" y1="131" x2="169" y2="154" stroke="#a6a6a6" stroke-width="1"
+        stroke-dasharray="3 3"/>
+  <!-- Anti-diagonal (top-right to bottom-left) -->
+  <!-- (180,75)->(130,120): unit=(-0.707,0.707), start=(180-10.6,75+10.6)=(169,86), end=(130+10.6,120-10.6)=(141,109) -->
+  <line x1="169" y1="86" x2="141" y2="109" stroke="#a6a6a6" stroke-width="1"
+        stroke-dasharray="3 3"/>
+  <!-- (130,120)->(80,165): start=(119,131), end=(91,154) -->
+  <line x1="119" y1="131" x2="91" y2="154" stroke="#a6a6a6" stroke-width="1"
+        stroke-dasharray="3 3"/>
+
+  <!-- ===== Sq nodes ===== -->
+  <!-- Row 1 -->
+  <circle cx="80"  cy="75"  r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <circle cx="130" cy="75"  r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <circle cx="180" cy="75"  r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <!-- Row 2: center highlighted as match target -->
+  <circle cx="80"  cy="120" r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <circle cx="130" cy="120" r="15" fill="#7373ff" stroke="#0000cc" stroke-width="1.5"/>
+  <circle cx="180" cy="120" r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <!-- Row 3 -->
+  <circle cx="80"  cy="165" r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <circle cx="130" cy="165" r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <circle cx="180" cy="165" r="15" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+
+  <!-- Small annotation for matched center -->
+  <text x="130" y="207" text-anchor="middle" font-family="serif" font-style="italic" font-size="10" fill="#555555">(center = match target)</text>
+</svg>

@@ -1,0 +1,25 @@
+\documentclass[tikz,border=4pt]{standalone}
+\usepackage{tikz-cd}
+
+% Pushout universal property
+%
+%   K --l--> L
+%   |         |
+%   k         m
+%   v         v
+%   D --g--> G -.u.-> Q
+%                      ^
+%                  h /   \ j   (competing maps from L and D to Q)
+%
+% G is the pushout of K <-k- D and K -l-> L.
+% For any Q with maps h : L -> Q and j : D -> Q satisfying h.l = j.k,
+% there is a unique u : G -> Q.
+\begin{document}
+\begin{tikzcd}
+  K \arrow[r, "l"] \arrow[d, "k"']
+    & L \arrow[d, "m"] \arrow[ddr, bend left=20, "h"] \\
+  D \arrow[r, "g"'] \arrow[drr, bend right=20, "j"']
+    & G \arrow[dr, dashed, "u" description] \\
+    &   & Q
+\end{tikzcd}
+\end{document}

@@ -1,5 +1,19 @@
 # RewriteGames.jl — Agent Notes
 
+## Environment and Testing
+
+### Single Environment Strategy
+We use a **single environment** for both development and testing. Test-only dependencies (like `Test.jl` and `Revise.jl`) are managed in the root `Project.toml` under the `[extras]` and `[targets]` sections.
+
+**Mandate:** Do NOT create a `test/Project.toml` or `test/Manifest.toml`. This ensures that CUDA artifacts and version-sensitive dependencies remain synchronized across the entire project.
+
+### Running Tests
+Use the standard Julia command:
+```bash
+julia --project -e 'using Pkg; Pkg.test()'
+```
+This is now the verified way to run tests. It correctly inherits the root project's CUDA configuration.
+
 ## Ambient Category and `rewrite_match`
 
 ### Background

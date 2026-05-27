@@ -1,0 +1,21 @@
+\documentclass[tikz,border=4pt]{standalone}
+\usepackage{tikz-cd}
+
+% Full DPO (Double Pushout) commutative diagram
+%
+%   L <-l- K -r-> R
+%   |       |      |
+%   m       k      m'
+%   v       v      v
+%   G <-g- D -g'-> G'
+%
+% Left square (L,K,G,D) and right square (K,R,D,G') are both pushouts.
+\begin{document}
+\begin{tikzcd}
+  L \arrow[d, "m"']
+    & K \arrow[l, "l"'] \arrow[r, "r"] \arrow[d, "k"]
+    & R \arrow[d, "m'"] \\
+  G & D \arrow[l, "g"] \arrow[r, "g'"']
+    & G'
+\end{tikzcd}
+\end{document}

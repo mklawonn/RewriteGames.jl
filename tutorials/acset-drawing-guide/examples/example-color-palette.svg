@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 145" width="380" height="145">
+  <title>ACSet node color palette: three roles</title>
+
+  <!-- Regular / passive node -->
+  <circle cx="65" cy="58" r="32" fill="#ccccff" stroke="#000099" stroke-width="1.5"/>
+  <text x="65" y="63" text-anchor="middle" font-family="serif" font-size="12" fill="#000000">Sq</text>
+  <text x="65" y="108" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">Regular</text>
+  <text x="65" y="123" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">(passive)</text>
+
+  <!-- Interface / preserved node -->
+  <circle cx="190" cy="58" r="32" fill="#7373ff" stroke="#0000cc" stroke-width="1.5"/>
+  <text x="190" y="63" text-anchor="middle" font-family="serif" font-size="12" fill="#ffffff">Sq</text>
+  <text x="190" y="108" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">Interface</text>
+  <text x="190" y="123" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">(preserved)</text>
+
+  <!-- New / created node -->
+  <circle cx="315" cy="58" r="32" fill="#ffbf80" stroke="#cc6600" stroke-width="1.5"/>
+  <text x="315" y="63" text-anchor="middle" font-family="serif" font-size="12" fill="#000000">X</text>
+  <text x="315" y="108" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">New</text>
+  <text x="315" y="123" text-anchor="middle" font-family="serif" font-size="11" fill="#444444">(created)</text>
+</svg>
