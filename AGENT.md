@@ -162,3 +162,35 @@ will behave differently depending on which engine ran the episode.
 **Possible fix:** In the GPU runner's exit-wire path, call the terminal predicate
 (or unconditionally set `done = true`) on the final experience before returning,
 mirroring the CPU runner's behaviour in `_exec_player!`.
+
+## GPU Match Ordering Diverges from CPU
+
+The GPU CSP solver and Catlab's `backtracking_search` enumerate matches in
+**different orders**.  Deterministic agents such as "always pick first action"
+will therefore take different trajectories on `run_game_sched!` vs
+`gpu_run_game_sched!`, producing different episode lengths and action sequences
+even from the same initial world.
+
+**Consequences for tests:**
+- Do not assert `length(exps_cpu) == length(exps_gpu)` in equivalence tests.
+- Do not compare action sequences or world states step-by-step.
+- Safe invariants: both produce non-empty experiences; all experiences have
+  valid `player`/`state` fields; both terminate within `T_max`.
+
+## `GPUFunctionPlayer` for Deterministic GPU Testing
+
+`GPUFunctionPlayer(f)` wraps a plain Julia function as a GPU-compatible agent
+without requiring a neural network.  Useful for writing deterministic tests:
+
+```julia
+# always pick the first match
+gpu_agents = Dict{Symbol, AbstractAgent}(
+    :blue => GPUFunctionPlayer((g, cands, n_sols, t) -> 1),
+    :red  => GPUFunctionPlayer((g, cands, n_sols, t) -> 1),
+)
+exps = gpu_run_game_sched!(gs, world, gpu_agents; T_max=10)
+```
+
+`f` receives: the GPU-resident `GPUACSet` `g`, a `CuArray{Int32,2}` of shape
+`[n_vars × n_sols]`, the solution count `n_sols`, and the turn number.
+It must return an `Int` index into the solution columns (1-based).
