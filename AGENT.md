@@ -57,3 +57,90 @@ calls. Always propagate the category explicitly through `get_matches` → `rewri
 `get_matches`, and `can_match` calls. No bare category inference occurs there.
 The cache must be constructed with the same `cat` that the game uses for match search
 (`MatchCache(rule, FALCON_CAT, world)`).
+
+---
+
+## Preferred Style for Rule Construction (follow the LV example)
+
+The canonical reference is `lotka_volterra_example.jl` in this repository.
+
+### Convenience aliases
+
+Define at the top of every rule file:
+
+```julia
+const AV  = AttrVar
+const AV1 = AttrVar(1)
+```
+
+### `@acset` over `add_parts!`
+
+Construct K, L, R pattern ACSets declaratively:
+
+```julia
+# Good
+K = @acset MyACSet begin
+    Sym = 2; Boo = 1; Sheep = 1; V = 1
+    sheep_loc = [1]; sheep_eng = [AV1]; sheep_dir = [AV(2)]
+end
+
+# Avoid
+K = MyACSet()
+add_parts!(K, :Sym, 2); add_part!(K, :Boo)
+add_part!(K, :Sheep; sheep_loc=1, sheep_eng=AttrVar(1), sheep_dir=AttrVar(2))
+add_part!(K, :V)
+```
+
+### `homomorphism` over `ACSetTransformation` + identity maps
+
+Compute span morphisms and NAC inclusions with `homomorphism`:
+
+```julia
+# Good — AttrVars present, category inferred
+l = homomorphism(K, L; monic=true)
+r = homomorphism(K, R; monic=true)
+
+# Good — no AttrVars in K/L, pass cat= explicitly
+l = homomorphism(K, L; cat=MY_CAT, monic=true)
+
+# Good — NAC as monic inclusion
+L_nac = copy(L)
+add_part!(L_nac, :SomeToken; some_fk=1)
+nac = NAC(homomorphism(L, L_nac; monic=true))
+
+# Avoid
+comps = _id_comps(K)
+l = ACSetTransformation(K, L; cat=MY_CAT, comps...)
+nac = NAC(ACSetTransformation(L, L_nac; cat=MY_CAT, _id_comps(L)...))
+```
+
+### Representable presheaves (yoneda cache)
+
+For minimal single-object patterns, use the yoneda cache:
+
+```julia
+gSheep, gWolf, gV, … = ob_generators(FinCat(SchLV))
+yLV = yoneda_cache(LV; clear=true)
+S = ob_map(yLV, gSheep)   # generic sheep — minimal ACSet with one Sheep + all attrs
+W = ob_map(yLV, gWolf)
+G = ob_map(yLV, gV)
+```
+
+Representables are the natural interfaces for agent morphisms and for patterns where
+you want the most general match against a single entity.
+
+### `expr` for attribute-modifying rules
+
+When a rule changes an attribute value without adding or removing objects, use `expr`:
+
+```julia
+# Good: turn a sheep left without deleting and re-creating it
+Rule(l, r;
+     expr = (Dir = [((d,),) -> left(d)],),
+     cat  = MY_CAT)
+```
+
+`expr` is a `NamedTuple` keyed by AttrType name. Each entry is a vector of functions
+(one per R AttrVar) receiving inherited value tuples and returning the new value.
+This avoids the spurious object deletion/recreation that would otherwise be needed
+to change an attribute.
