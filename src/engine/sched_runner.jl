@@ -182,11 +182,16 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
     initial_map = Dict{Symbol, Any}()
     if agent_match !== nothing
         S = acset_schema(world)
+        # Resolve the morphism interface→L whether in_hom was stored as an
+        # ACSetTransformation or as a raw ACSet (the latter is converted to an
+        # ACSetTransformation by RuleApp during PlayerRuleApp construction).
+        in_hom_trans = box.in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation ?
+            box.in_hom : box._inner.in_agent
         # only bind combinatorial parts, let Catlab find variables from them
         for o in Catlab.CategoricalAlgebra.ob(S)
             d = Dict{Int, Int}()
-            for i in parts(dom(box.in_hom), o)
-                d[box.in_hom[o](i)] = agent_match[o](i)
+            for i in parts(dom(in_hom_trans), o)
+                d[in_hom_trans[o](i)] = agent_match[o](i)
             end
             if !isempty(d); initial_map[o] = d; end
         end
