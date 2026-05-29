@@ -165,9 +165,10 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
 
         if box isa PlayerRuleApp
             ridx = _reg!(box)
+            can_pass_f = box.can_pass ? 1f0 : 0f0
             push!(boxes, CompiledBox(BOX_PLAYER_RULE, UInt16(ridx), UInt16(ridx),
                                      _p_idx(box.player), in_w, out_ws,
-                                     (0f0,0f0,0f0,0f0), UInt16(0)))
+                                     (can_pass_f, 0f0, 0f0, 0f0), UInt16(0)))
             push!(box_players, box.player)
 
         elseif box isa GameSched && box._agent_name !== nothing

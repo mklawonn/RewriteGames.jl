@@ -216,10 +216,13 @@ function _exec_player!(step, box::PlayerRuleApp, world, wires, agents, terminal,
     end
 
     actions = [Action(box, m) for m in raw]
+    if box.can_pass && !isempty(raw)
+        push!(actions, Action(box, nothing))
+    end
     state_pre  = GameState(world, turn[])
     chosen     = isempty(actions) ? nothing : select_action(agents[box.player], state_pre, actions)
 
-    if chosen !== nothing
+    if chosen !== nothing && chosen.match !== nothing
         maps      = AlgebraicRewriting.rewrite_match_maps(box.rule, chosen.match; cat=_cat)
         new_world = Catlab.CategoricalAlgebra.codom(maps[:rh])
         if agent_match === nothing

@@ -585,15 +585,28 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
                             agent, rule, csp::CSPProblem,
                             schema::SchemaInfo,
                             g::GPUACSet, enc::AttributeEncoder,
-                            world_type, turn::Int)
+                            world_type, turn::Int;
+                            can_pass::Bool = false)
     agent === nothing && return solutions[1]
 
     # GPU player path: pass candidates matrix directly, no world download
     if agent isa AbstractGPUPlayer
-        n_sols = length(solutions)
-        cands  = CUDA.functional() ? CuArray(reduce(hcat, solutions)) :
-                                     reduce(hcat, solutions)
-        idx    = select_action_gpu(agent, g, enc, schema, cands, n_sols, turn)
+        n_sols    = length(solutions)
+        cands_raw = CUDA.functional() ? CuArray(reduce(hcat, solutions)) :
+                                        reduce(hcat, solutions)
+        if can_pass
+            # Append a zero column representing the pass option.  FalconGPUPlayer
+            # scores all n_presented columns; a zero-feature column lets the MLP
+            # learn a pass score relative to real moves.
+            pass_col  = CUDA.functional() ? CUDA.zeros(Int32, size(cands_raw, 1), 1) :
+                                            zeros(Int32, size(cands_raw, 1), 1)
+            cands_ext = hcat(cands_raw, pass_col)
+        else
+            cands_ext = cands_raw
+        end
+        n_presented = can_pass ? n_sols + 1 : n_sols
+        idx = select_action_gpu(agent, g, enc, schema, cands_ext, n_presented, turn)
+        can_pass && Int(idx) > n_sols && return nothing   # player passed
         return solutions[clamp(Int(idx), 1, n_sols)]
     end
 
@@ -616,11 +629,15 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
         hom === nothing && continue
         push!(action_pairs, Action(rule, hom) => sol)
     end
+    if can_pass && !isempty(action_pairs)
+        push!(action_pairs, Action(rule, nothing) => Int32[])
+    end
     isempty(action_pairs) && return solutions[1]
 
     actions = [p.first for p in action_pairs]
     chosen  = select_action(agent, GameState(world_host, turn), actions)
     chosen  === nothing && return solutions[1]
+    chosen.match === nothing && return nothing   # player passed
 
     for (act, sol) in action_pairs
         act === chosen && return sol
@@ -752,6 +769,8 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
     player_sym = box.box_type == BOX_PLAYER_RULE ? sched.box_players[b_idx] : nothing
     agent      = player_sym !== nothing ? get(state.agents, player_sym, nothing) : nothing
 
+    can_pass = box.box_type == BOX_PLAYER_RULE && box.params[1] > 0f0
+
     chosen_sol = if agent isa AbstractGPUPlayer && CUDA.functional() && scratch !== nothing
         # ── GPU player fast path: fill scratch.buf_solutions on device,
         #    download only the 4-byte count + one chosen column ───────────────
@@ -766,9 +785,17 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                                           scratch = scratch)
         n_sols == 0 && return false
 
-        n_vars     = Int(csp.n_vars)
-        candidates = @view scratch.buf_solutions[1:n_vars, 1:n_sols]
-        idx        = select_action_gpu(agent, g, enc, schema, candidates, n_sols, turn)
+        n_vars      = Int(csp.n_vars)
+        n_presented = can_pass ? n_sols + 1 : n_sols
+        if can_pass
+            # Zero column n_sols+1 (may be dirty from a previous turn) so
+            # FalconGPUPlayer sees a clean zero-feature vector for the pass option.
+            scratch.buf_solutions[1:n_vars, n_sols + 1] .= Int32(0)
+            KernelAbstractions.synchronize(backend)
+        end
+        candidates = @view scratch.buf_solutions[1:n_vars, 1:n_presented]
+        idx        = select_action_gpu(agent, g, enc, schema, candidates, n_presented, turn)
+        can_pass && Int(idx) > n_sols && return false   # player passed
         chosen_col = clamp(Int(idx), 1, n_sols)
         Array(@view scratch.buf_solutions[1:n_vars, chosen_col])
     else
@@ -810,7 +837,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
 
         if box.box_type == BOX_PLAYER_RULE
             _choose_gpu_match(solutions, agent, rule, csp, schema,
-                              g, enc, state.world_type, turn)
+                              g, enc, state.world_type, turn; can_pass=can_pass)
         else
             solutions[1]
         end

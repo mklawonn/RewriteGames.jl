@@ -15,11 +15,12 @@ struct PlayerRuleApp
     use_cache     :: Bool
     match_limit   :: Union{Int, Nothing}
     view_fn       :: Union{Function, Nothing}
+    can_pass      :: Bool
 end
 
 function PlayerRuleApp(name::Symbol, rule, in_hom, out_hom, player::Symbol;
                         cat=nothing, fast_match_fn=nothing, use_cache=false,
-                        match_limit=nothing, view_fn=nothing)
+                        match_limit=nothing, view_fn=nothing, can_pass=false)
     inner = if in_hom isa Catlab.CategoricalAlgebra.ACSetTransformation
         cat === nothing ? RuleApp(name, rule, in_hom) :
                           RuleApp(name, rule, in_hom; cat=cat)
@@ -28,7 +29,7 @@ function PlayerRuleApp(name::Symbol, rule, in_hom, out_hom, player::Symbol;
                           RuleApp(name, rule, in_hom; cat=cat)
     end
     PlayerRuleApp(name, rule, in_hom, out_hom, player, cat, inner, fast_match_fn, use_cache,
-                  match_limit, view_fn)
+                  match_limit, view_fn, can_pass)
 end
 
 function PlayerRuleApp(name::Symbol, rule, init, player::Symbol; kwargs...)
@@ -244,7 +245,7 @@ end
 
 function player_migrate(F, gs::GameSched, player_map; name_map=Dict())
     new_boxes = map(gs._all_boxes) do v
-        if v isa PlayerRuleApp; PlayerRuleApp(get(name_map, v.name, v.name), F(v.rule), F(v.in_hom), F(v.out_hom), get(player_map, v.player, v.player); cat=v.cat, use_cache=v.use_cache)
+        if v isa PlayerRuleApp; PlayerRuleApp(get(name_map, v.name, v.name), F(v.rule), F(v.in_hom), F(v.out_hom), get(player_map, v.player, v.player); cat=v.cat, use_cache=v.use_cache, can_pass=v.can_pass)
         elseif v isa GameSched; player_migrate(F, v, player_map; name_map)
         else F(v) end
     end
