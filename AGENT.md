@@ -191,6 +191,43 @@ even from the same initial world.
 - Safe invariants: both produce non-empty experiences; all experiences have
   valid `player`/`state` fields; both terminate within `T_max`.
 
+## GPU Kernel Compilation (JIT Tax) — Val{NM} and Val{NVNM16}
+
+### Background
+
+`turbo_block_kernel!` and `turbo_eps_kernel!` use `Val{NM}` (= nc_max) and
+`Val{NVNM16}` as compile-time type parameters to enable `@localmem` static
+allocation and `MVector{NM,...}` register arrays. Julia/CUDA compiles a separate
+LLVM specialization for each distinct `(NM, NVNM16)` pair encountered at runtime.
+
+**Original code** used `nvnm16 = n_vars * nc_max * 16`, creating one specialization
+per (nc_max, n_vars) pair — up to 8 distinct `Val{NVNM16}` values per nc_max. With
+nc_max=48, each specialization requires ~15-30 min of LLVM compilation → 2-4 hours
+before the first training episode runs.
+
+**Fix (commit 002b481):** Changed to `nvnm16 = nc_max * 128` (= 8 × nc_max × 16,
+the maximum possible n_vars × nc_max × 16 when `use_eps` enforces n_vars ≤ 8).
+All n_vars values sharing the same nc_max now compile to one `Val{NVNM16}`
+specialization → compilation time reduced to ~15-30 min total.
+
+The kernel's `@localmem UInt64 (NVNM16,)` over-allocates slightly for n_vars < 8,
+but all actual indexing uses `n_vars_nm = n_vars * NM`, so no out-of-bounds access.
+
+### Precompile Note
+
+A bare `using RewriteGames` does NOT trigger GPU kernel compilation because the
+CUDA extension only loads when both `RewriteGames` and `CUDA` are in scope. To
+warm the kernel cache before launching multiple training processes, run a
+precompile command that imports CUDA and exercises the solver once:
+```julia
+using RewriteGames, CUDA
+# trigger one small solve to compile kernels
+```
+Alternatively, accept the per-process JIT penalty on first episode (~15-30 min
+with the nvnm16 fix, vs. 2-4 hours before).
+
+---
+
 ## `GPUFunctionPlayer` for Deterministic GPU Testing
 
 `GPUFunctionPlayer(f)` wraps a plain Julia function as a GPU-compatible agent
