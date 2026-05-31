@@ -1494,7 +1494,10 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
 
     # Use EPS (global-memory) when nc==1 or when block-kernel smem would exceed
     # the 48 KB CUDA per-block limit (n_vars × nc_max × 128 bytes).
-    use_eps = nc == 1 || n_vars * nc_max * 128 > 49152
+    # turbo_block @localmem dom uses nc_max*128 UInt64 words = nc_max*1024 bytes;
+    # plus ~256 bytes for stack_v/stnext/flags. Total > 49152 (48 KB A40 limit)
+    # when nc_max ≥ 48. Route those to EPS which uses global-memory workspace.
+    use_eps = nc == 1 || nc_max * 1024 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
@@ -1576,7 +1579,10 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
 
-    use_eps = nc == 1 || n_vars * nc_max * 128 > 49152
+    # turbo_block @localmem dom uses nc_max*128 UInt64 words = nc_max*1024 bytes;
+    # plus ~256 bytes for stack_v/stnext/flags. Total > 49152 (48 KB A40 limit)
+    # when nc_max ≥ 48. Route those to EPS which uses global-memory workspace.
+    use_eps = nc == 1 || nc_max * 1024 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
