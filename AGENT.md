@@ -272,6 +272,61 @@ It must return an `Int` index into the solution columns (1-based).
 
 ---
 
+## GPU Agent Loops (`BOX_AGENT_LOOP`) Now Execute on the GPU Runner
+
+**Background.** `compile_schedule` lowered `agent(pra; n=:X)` boxes to a
+`BOX_AGENT_LOOP` opcode with a registered agent interface and a body
+sub-schedule, but the host-orchestrated runner (`run_gpu_schedule!`) had **no
+handler** for that opcode — only `WEAKEN`, `COIN`, `NATIVE_RULE`, and
+`PLAYER_RULE`.  An agent box therefore fell through every branch: its input wire
+stayed set, no output wire activated, and the move phase silently never ran
+(platforms never moved).  Agent loops only worked on the CPU runner
+(`_exec_subsched!`).
+
+**Fixes (branch `fix/gpu-agent-loop-residency`):**
+
+1. **Runtime execution.** The per-box dispatch was factored into
+   `_dispatch_gpu_box!(box, b_idx, sched, …)` (shared by the main per-turn loop
+   and the agent-loop body runner).  A new `BOX_AGENT_LOOP` branch calls
+   `_exec_agent_loop!`, which runs the body sub-schedule once per **live agent
+   instance** — `k = g.n_live[agent_obj][]` (e.g. `:Platform`).  The world `g`
+   mutates in place, so it threads through iterations automatically.  This
+   mirrors the CPU `for am in homomorphisms(agent_interface, world)` semantics.
+
+2. **No fixed cap.** `k` is read from `g.n_live` each time the box runs, so a
+   larger world iterates over *more* instances instead of dropping the overflow.
+   A compile-time unroll to a fixed `N` would have re-introduced exactly the
+   silent-skip cap that lifting `MAX_CHUNKS` removed.  Reading `k` is a single
+   host-side scalar — no GPU→CPU *data* round-trip.
+
+3. **Compiler double-wrap bug.** In `_process_steps!`, an inline agent-loop box
+   compiled its body with `compile_schedule(box, …)` while `box._agent_name`
+   was still set, which re-entered the top-level agent-loop wrapping and
+   produced a *nested* `BOX_AGENT_LOOP`.  The runtime would then have iterated
+   the body `k²` times.  Fixed by stripping `_agent_name` (building `inner`)
+   before compiling the body, matching the top-level wrapping path.
+
+4. **Experience attribution.** Agent-loop body firings push `GpuRewriteEvent`s
+   tagged with the *parent* agent-loop box index (`event_box_idx`), and Phase 5
+   of `gpu_run_game_sched!` resolves the acting player for `BOX_AGENT_LOOP`
+   boxes via `_agent_loop_body_player` (the body's player, e.g. `:blue`) rather
+   than the parent box's `box_players` entry (which holds the agent *object*,
+   e.g. `:Platform`).  `GpuRewriteEvent` stays `isbits` (no `Symbol` field) so
+   the on-device master kernel's `CuArray{GpuRewriteEvent}` is unaffected.
+
+Covered by `test/test_gpu_agent_loop.jl` (firing count == instance count for
+worlds up to 310 instances).
+
+## GPU Residency: CPU AC Fast-Fail Removed
+
+`gpu_turbo_solve` used to `Array(d_gpu)` + `Array(hf_flat_gpu)` and run
+`cpu_propagate!` before launching the GPU kernel, to skip infeasible CSPs.  That
+was a GPU→CPU **data** round-trip on the hot path (once per solve), violating the
+"everything stays on the GPU" invariant flagged in the TODOs.  Removed: the
+turbo/EPS kernels run AC-1 propagation themselves and return zero solutions for
+infeasible CSPs, so correctness is unchanged.  If infeasible-slot throughput
+ever needs a pre-filter, add a GPU-resident feasibility kernel (no host copy).
+
 ## DONE: EPS Threshold Fix (formerly TODO #1)
 
 Fixed in `ext/GPURewritingExt/solver/DiveSolveKernel.jl` on branch `feature/gpu-shared-mem-graph`:

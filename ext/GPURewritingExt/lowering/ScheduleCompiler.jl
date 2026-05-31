@@ -172,8 +172,17 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
             push!(box_players, box.player)
 
         elseif box isa GameSched && box._agent_name !== nothing
-            # Agent loop: compile recursively as a sub-schedule
-            sub = compile_schedule(box, world, schema, enc; n_chunks=n_chunks)
+            # Agent loop: the body sub-schedule is the same GameSched with the
+            # agent name stripped, so it compiles to the plain body (e.g. the
+            # move PlayerRuleApp) rather than another nested BOX_AGENT_LOOP.
+            # Compiling `box` directly would re-enter the top-level agent-loop
+            # wrapping in compile_schedule and double-wrap the body, making the
+            # runtime iterate the body k² times instead of k.
+            inner = GameSched(box._inner, box._player_map, box._all_boxes, box._steps,
+                              box._init_names, box._trace_names, box._ret_names,
+                              box._trace_args, box._init_args, box._body, box._N,
+                              nothing, box.cat)
+            sub = compile_schedule(inner, world, schema, enc; n_chunks=n_chunks)
             push!(sub_schedules, sub)
             sub_idx = UInt16(length(sub_schedules))
 

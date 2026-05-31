@@ -1100,6 +1100,147 @@ end
 
 const _DEFAULT_TERMINAL = (W) -> (false, nothing)
 
+"""
+    _dispatch_gpu_box!(box, b_idx, sched, g, schema, enc, state, turn,
+                       wire_active, events, rewrite_count, backend) -> Bool
+
+Execute a single compiled box against the live GPU world `g`, updating
+`wire_active`.  Shared by the main per-turn loop and the `BOX_AGENT_LOOP`
+sub-schedule runner so both honour identical box semantics.
+
+`sched` is the schedule that *owns* `box` (the parent schedule for top-level
+boxes, or a sub-schedule for an agent-loop body); every csp/rule/cube/player
+index on `box` is resolved against it.  Returns `true` if the box changed any
+wire state (the old inline `any_changed`).
+"""
+function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched,
+                            g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder,
+                            state::GPUSchedulerState, turn::Int,
+                            wire_active::Vector{Bool},
+                            events::Vector,   # Vector{GpuRewriteEvent}; type defined later
+                            rewrite_count::Base.RefValue{Int}, backend;
+                            event_box_idx::Int = b_idx)::Bool
+    # `event_box_idx` is the index recorded in GpuRewriteEvents.  It equals
+    # `b_idx` for top-level boxes; for boxes inside an agent-loop body it is the
+    # parent agent-loop box's top-level index, so the event maps back into
+    # `sched.boxes` (and to the body player) during experience reconstruction.
+    in_w = Int(box.in_wire)
+    (in_w == 0 || !wire_active[in_w]) && return false
+
+    if box.box_type == BOX_WEAKEN
+        wire_active[in_w] = false
+        for ow in box.out_wires
+            Int(ow) == 0 && break
+            wire_active[Int(ow)] = true
+        end
+        return true
+
+    elseif box.box_type == BOX_COIN
+        wire_active[in_w] = false
+        p      = Float64(box.params[1])
+        branch = rand(state.rng) < p ? 1 : 2
+        ow     = Int(box.out_wires[branch])
+        ow != 0 && (wire_active[ow] = true)
+        return true
+
+    elseif box.box_type == BOX_AGENT_LOOP
+        # Run the body sub-schedule once per live agent instance (dynamic, no
+        # cap), mirroring the CPU runner's `for am in homomorphisms(iface,world)`.
+        wire_active[in_w] = false
+        _exec_agent_loop!(box, b_idx, sched, g, schema, enc, state, turn,
+                          events, rewrite_count, backend; event_box_idx=event_box_idx)
+        ow = Int(box.out_wires[1])
+        ow != 0 && (wire_active[ow] = true)
+        return true
+
+    elseif box.box_type == BOX_NATIVE_RULE || box.box_type == BOX_PLAYER_RULE
+        wire_active[in_w] = false
+        ridx     = Int(box.csp_idx)
+        csp      = sched.csps[ridx]
+        rule     = sched.rules[ridx]
+        adh_idx  = Int(box.adh_idx)
+        cube     = sched.adhesive_cubes[adh_idx]
+        gpu_cube = adh_idx <= length(sched.gpu_cubes) ?
+                   sched.gpu_cubes[adh_idx] : nothing
+
+        # NATIVE_RULE on CUDA uses the single-sync pipeline; PLAYER_RULE keeps
+        # the multi-sync path so the agent can inspect solutions.
+        fired = if box.box_type == BOX_NATIVE_RULE &&
+                   CUDA.functional() &&
+                   state.scratch !== nothing &&
+                   gpu_cube !== nothing
+            _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule,
+                                  schema, enc, state)
+        else
+            _gpu_solve_inplace!(g, csp, rule, cube, gpu_cube, schema, enc,
+                                box, b_idx, sched, state, turn)
+        end
+        ow = Int(box.out_wires[fired ? 1 : 2])
+        ow != 0 && (wire_active[ow] = true)
+        if fired
+            push!(events, GpuRewriteEvent(Int32(turn), Int32(event_box_idx), true))
+            rewrite_count[] += 1
+            if state.compact_every > 0 && rewrite_count[] % state.compact_every == 0
+                compact_gpu_acset!(g, schema, backend)
+            end
+        end
+        return true
+    end
+
+    return false
+end
+
+"""
+    _exec_agent_loop!(box, b_idx, sched, g, schema, enc, state, turn,
+                      events, rewrite_count, backend)
+
+Execute a `BOX_AGENT_LOOP`: dispatch the body sub-schedule once per live
+instance of the agent object, mirroring the CPU runner's
+
+    for am in homomorphisms(agent_interface, world); run_body(am); end
+
+The body mutates the GPU world `g` in place, so the world threads through
+iterations automatically.  The instance count `k` is the live part count of the
+agent object read directly from `g.n_live` — a single host-side scalar, no GPU
+data round-trip and no fixed cap, so larger worlds iterate over *more* matches
+rather than silently dropping the overflow.
+"""
+function _exec_agent_loop!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched,
+                           g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder,
+                           state::GPUSchedulerState, turn::Int,
+                           events::Vector,   # Vector{GpuRewriteEvent}; type defined later
+                           rewrite_count::Base.RefValue{Int}, backend;
+                           event_box_idx::Int = b_idx)
+    sub_idx = Int(box.sub_sched_idx)
+    (sub_idx < 1 || sub_idx > length(sched.sub_schedules)) && return
+    sub = sched.sub_schedules[sub_idx]
+    isempty(sub.boxes) && return
+
+    # Agent object symbol (e.g. :Platform) is recorded in box_players at compile.
+    agent_obj = b_idx <= length(sched.box_players) ? sched.box_players[b_idx] : :_none
+    k = haskey(g.n_live, agent_obj) ? g.n_live[agent_obj][] : 0
+    k <= 0 && return
+
+    for _inst in 1:k
+        # One pass of the (acyclic, tiny) body sub-schedule: seed its init wires,
+        # then sweep its boxes until an exit wire fires or nothing changes.
+        sub_wires = zeros(Bool, sub.n_wires)
+        for w in sub.init_wires
+            sub_wires[w] = true
+        end
+        for _pass in 1:(length(sub.boxes) + 1)
+            changed = false
+            for (sb_idx, sbox) in enumerate(sub.boxes)
+                changed |= _dispatch_gpu_box!(sbox, sb_idx, sub, g, schema, enc,
+                                              state, turn, sub_wires, events,
+                                              rewrite_count, backend;
+                                              event_box_idx=event_box_idx)
+            end
+            (any(sub_wires[w] for w in sub.exit_wires) || !changed) && break
+        end
+    end
+end
+
 function run_gpu_schedule!(state::GPUSchedulerState;
                            T_max::Int = 1000,
                            terminal_fn::Function = _DEFAULT_TERMINAL,
@@ -1115,7 +1256,7 @@ function run_gpu_schedule!(state::GPUSchedulerState;
     end
 
     events        = GpuRewriteEvent[]
-    rewrite_count = 0   # for compact_every triggering
+    rewrite_count = Ref(0)   # for compact_every triggering
     backend       = CUDA.functional() ? CUDA.CUDABackend() : CPU()
 
     for turn in 1:T_max
@@ -1129,58 +1270,10 @@ function run_gpu_schedule!(state::GPUSchedulerState;
         any_changed = false
 
         for (b_idx, box) in enumerate(sched.boxes)
-            in_w = Int(box.in_wire)
-            (in_w == 0 || !wire_active[in_w]) && continue
-
-            if box.box_type == BOX_WEAKEN
-                wire_active[in_w] = false
-                for ow in box.out_wires
-                    Int(ow) == 0 && break
-                    wire_active[Int(ow)] = true
-                end
-                any_changed = true
-
-            elseif box.box_type == BOX_COIN
-                wire_active[in_w] = false
-                p      = Float64(box.params[1])
-                branch = rand(state.rng) < p ? 1 : 2
-                ow     = Int(box.out_wires[branch])
-                ow != 0 && (wire_active[ow] = true)
-                any_changed = true
-
-            elseif box.box_type == BOX_NATIVE_RULE || box.box_type == BOX_PLAYER_RULE
-                wire_active[in_w] = false
-                any_changed = true
-                ridx     = Int(box.csp_idx)
-                csp      = sched.csps[ridx]
-                rule     = sched.rules[ridx]
-                adh_idx  = Int(box.adh_idx)
-                cube     = sched.adhesive_cubes[adh_idx]
-                gpu_cube = adh_idx <= length(sched.gpu_cubes) ?
-                           sched.gpu_cubes[adh_idx] : nothing
-
-                # NATIVE_RULE on CUDA uses the single-sync pipeline; PLAYER_RULE
-                # keeps the multi-sync path so the agent can inspect solutions.
-                fired = if box.box_type == BOX_NATIVE_RULE &&
-                           CUDA.functional() &&
-                           state.scratch !== nothing &&
-                           gpu_cube !== nothing
-                    _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule,
-                                          schema, enc, state)
-                else
-                    _gpu_solve_inplace!(g, csp, rule, cube, gpu_cube, schema, enc,
-                                        box, b_idx, sched, state, turn)
-                end
-                ow = Int(box.out_wires[fired ? 1 : 2])
-                ow != 0 && (wire_active[ow] = true)
-                if fired
-                    push!(events, GpuRewriteEvent(Int32(turn), Int32(b_idx), true))
-                    rewrite_count += 1
-                    if state.compact_every > 0 && rewrite_count % state.compact_every == 0
-                        compact_gpu_acset!(g, schema, backend)
-                    end
-                end
-            end
+            changed = _dispatch_gpu_box!(box, b_idx, sched, g, schema, enc,
+                                         state, turn, wire_active, events,
+                                         rewrite_count, backend)
+            any_changed |= changed
         end
 
         any(wire_active[w] for w in sched.exit_wires) && break

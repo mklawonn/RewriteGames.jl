@@ -1461,22 +1461,13 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     # Empty pattern: unique empty match always exists.
     n_vars == 0 && return [Int32[]]
 
-    # CPU AC fast-fail: run cpu_propagate! before the GPU kernel to detect
-    # infeasible CSPs.  In early training platforms haven't moved to target
-    # zones; per-variable domains are non-empty but hom propagation prunes
-    # them to empty instantly.  Downloading d_gpu + hf_flat_gpu costs ~1 ms
-    # and avoids a ~2 s GPU kernel call for every infeasible slot.
-    let d_cpu     = Array(d_gpu)
-        hf_offs_c = scratch !== nothing ? scratch.cached_hf_offs : Array(hf_offs_gpu)
-        n_homs    = length(hf_offs_c) - 1
-        hf_flat_c = Array(hf_flat_gpu)
-        hom_fwd   = Vector{Vector{UInt64}}(undef, n_homs)
-        for i in 1:n_homs
-            s = Int(hf_offs_c[i]); e = Int(hf_offs_c[i + 1])
-            hom_fwd[i] = hf_flat_c[s + 1 : e]
-        end
-        cpu_propagate!(d_cpu, csp.bytecodes, hom_fwd, nc) || return Vector{Int32}[]
-    end
+    # NOTE: an earlier "CPU AC fast-fail" downloaded d_gpu + hf_flat_gpu and ran
+    # cpu_propagate! here to skip the GPU kernel for infeasible CSPs.  That broke
+    # the "everything stays on the GPU" invariant (a GPU→CPU copy on the hot
+    # path, once per solve).  It is removed: the turbo/EPS kernels run AC-1
+    # propagation themselves and return zero solutions for infeasible CSPs, so
+    # correctness is unchanged.  If infeasible-slot throughput ever needs a
+    # pre-filter, add a GPU-resident feasibility kernel (no host round-trip).
 
     if scratch !== nothing
         b_gpu   = scratch.buf_bytecodes

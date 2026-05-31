@@ -99,6 +99,30 @@ include("reconstruction/Decode.jl")
 # ── Public API ────────────────────────────────────────────────────────────────
 
 """
+    _agent_loop_body_player(sched, agent_loop_box) -> Symbol
+
+The first acting player inside a `BOX_AGENT_LOOP`'s body sub-schedule (the move
+player, e.g. `:blue`), recursing through nested agent loops.  Returns `:_none`
+if the body has no player-rule box.  Used to attribute agent-loop body firings
+to the correct player during experience reconstruction.
+"""
+function _agent_loop_body_player(sched::CompiledGPUSched, agent_loop_box)::Symbol
+    sidx = Int(agent_loop_box.sub_sched_idx)
+    (sidx < 1 || sidx > length(sched.sub_schedules)) && return :_none
+    sub = sched.sub_schedules[sidx]
+    for (i, sbox) in enumerate(sub.boxes)
+        if sbox.box_type == BOX_AGENT_LOOP
+            pp = _agent_loop_body_player(sub, sbox)
+            pp !== :_none && return pp
+        elseif sbox.box_type == BOX_PLAYER_RULE
+            p = i <= length(sub.box_players) ? sub.box_players[i] : :_none
+            p !== :_none && return p
+        end
+    end
+    return :_none
+end
+
+"""
     gpu_run_game_sched!(gs, initial_world, agents; backend, T_max, terminal,
                         winner_wires, log_trajectory, compact_every)
         -> Vector{Experience}
@@ -179,7 +203,12 @@ function RewriteGames.gpu_run_game_sched!(
     for ev in gpu_events
         bidx = Int(ev.box_idx)
         1 <= bidx <= length(sched.boxes) || continue
-        player = sched.box_players[bidx]
+        # Agent-loop body firings are recorded against the parent AGENT_LOOP box,
+        # whose box_players entry is the agent *object* (e.g. :Platform), not the
+        # acting player.  Resolve the real player from the body sub-schedule.
+        player = sched.boxes[bidx].box_type == BOX_AGENT_LOOP ?
+                 _agent_loop_body_player(sched, sched.boxes[bidx]) :
+                 sched.box_players[bidx]
         player == :_none && continue
 
         turn_n     = Int(ev.turn)
