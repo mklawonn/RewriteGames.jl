@@ -58,7 +58,8 @@ import RewriteGames: GameSched, PlayerRuleApp, Experience, GameState, Action,
 
 function RewriteGames.select_action_gpu(p::GPUFunctionPlayer, g, enc, schema,
                                          cands::AbstractArray{Int32,2},
-                                         n_sols::Int, turn::Int)::Int
+                                         n_sols::Int, turn::Int;
+                                         graph_data=nothing)::Int
     clamp(Int(p.f(g, cands, n_sols, turn)), 1, max(n_sols, 1))
 end
 
@@ -83,11 +84,13 @@ include("rewriting/GPUACSet.jl")
 include("rewriting/DeletionKernel.jl")
 include("rewriting/AdditionKernel.jl")
 include("rewriting/IncrementalUpdate.jl")
+include("rewriting/GPUGraphData.jl")
 
 # ── Control layer ─────────────────────────────────────────────────────────────
 include("control/TrajectoryLogger.jl")
 include("control/StreamCompaction.jl")
 include("control/Scheduler.jl")
+include("control/ZonePartition.jl")
 include("control/MasterScheduler.jl")
 
 # ── Reconstruction layer ──────────────────────────────────────────────────────
@@ -133,8 +136,9 @@ function RewriteGames.gpu_run_game_sched!(
                         Dict{Symbol,Union{Symbol,Nothing}}(),
     log_trajectory :: Bool                                     = false,
     compact_every  :: Int                                      = 100,
-    discretizers  :: Dict{Symbol, Pair{Function,Function}}    = Dict{Symbol,Pair{Function,Function}}(),
+    discretizers   :: Dict{Symbol, Pair{Function,Function}}    = Dict{Symbol,Pair{Function,Function}}(),
     max_world_size :: Union{Int,Nothing}                       = nothing,
+    zone_partition :: Union{ZonePartition, Nothing}            = nothing,
 )::Vector{Experience}
 
     # ── Phase 1: Host-side compilation ────────────────────────────────────────
@@ -159,6 +163,7 @@ function RewriteGames.gpu_run_game_sched!(
     state = GPUSchedulerState(sched, g, schema, enc, world_type, agents;
                               log_trajectory = log_trajectory,
                               compact_every  = compact_every)
+    state.zone_partition = zone_partition
 
     # ── Phase 4: Execute on GPU ───────────────────────────────────────────────
     gpu_events = run_gpu_schedule!(state;

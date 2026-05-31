@@ -118,7 +118,7 @@ export
     AbstractAgent, Action,
     FunctionAgent,
     select_action,
-    AbstractGPUPlayer, GPUFunctionPlayer,
+    AbstractGPUPlayer, AbstractGNNPlayer, GPUFunctionPlayer,
     select_action_gpu,
 
     # Engine
@@ -155,6 +155,20 @@ export
 
     # GPU extension (available when KernelAbstractions + CUDA are loaded)
     gpu_run_game_sched!,
-    turbo_homomorphisms
+    turbo_homomorphisms,
+
+    # GPU graph representation
+    GPUGraphData,
+    build_gpu_graph,
+    rebuild_gpu_graph!,
+    update_graph_deletions!,
+    update_graph_additions!,
+    live_coo,
+
+    # Zone-partitioned CSP
+    ZonePartition,
+    build_zone_partition,
+    update_zone_masks!,
+    collect_zoned_solutions!
 
 end # module RewriteGames
