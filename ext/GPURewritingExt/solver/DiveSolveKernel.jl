@@ -924,7 +924,7 @@ thread 1 drives branching decisions and the DFS stack.
 
 Variable domains are stored in block-local shared memory (`dom`, 16 DFS levels).
 No per-call workspace allocation: storage is statically sized via `Val{NM}`
-(nc_max) and `Val{NVNM16}` (n_vars × nc_max × 16).
+(nc_max) and `Val{NVNM16}` (nc_max × 128 = 8 × nc_max × 16; one specialization per nc_max).
 
 Launch with blocksize=32, n_blocks = min(2^D, 576).
 """
@@ -1521,7 +1521,11 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        nvnm16 = n_vars * nc_max * 16
+        # Use nc_max*128 (= 8×nc_max×16) instead of n_vars×nc_max×16 so that
+        # all n_vars values sharing the same nc_max compile to one Val{NVNM16}
+        # specialization.  @localmem over-allocates slightly for n_vars < 8;
+        # actual indexing uses n_vars_nm = n_vars*NM so no out-of-bounds.
+        nvnm16 = nc_max * 128
         if scratch !== nothing
             sub_gpu = scratch.buf_turbo_nextsub
             KernelAbstractions.fill!(sub_gpu, Int32(0))
@@ -1588,7 +1592,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        nvnm16 = n_vars * nc_max * 16
+        nvnm16 = nc_max * 128   # fixed per nc_max; collapses ~8 specializations to 1
         sub_gpu = scratch.buf_turbo_nextsub
         KernelAbstractions.fill!(sub_gpu, Int32(0))
         _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
