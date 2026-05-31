@@ -269,3 +269,97 @@ exps = gpu_run_game_sched!(gs, world, gpu_agents; T_max=10)
 `f` receives: the GPU-resident `GPUACSet` `g`, a `CuArray{Int32,2}` of shape
 `[n_vars × n_sols]`, the solution count `n_sols`, and the turn number.
 It must return an `Int` index into the solution columns (1-based).
+
+---
+
+## TODO: Fix EPS Threshold (Too Conservative for nc_max=48)
+
+See **Known Issue: EPS Threshold Too Conservative for nc_max=48** above for full diagnosis and the correct fix recipe. Summary:
+
+- Change `nvnm16 = nc_max * 128` → `nvnm16 = 7 * nc_max * 16`
+- Update `use_eps` to `nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152`
+- This restores `turbo_block` for n_vars ≤ 7 with nc_max=48 (43 KB < 48 KB limit)
+- nc_max=64 must always use EPS regardless (57 KB > 48 KB hard limit)
+
+File: `ext/GPURewritingExt/solver/DiveSolveKernel.jl` — both the `gpu_turbo_solve` and `_gpu_turbo_fill_scratch!` call sites.
+
+---
+
+## TODO: Reduce CPU/GPU Round-trips in GNNAgent
+
+### Current Bottleneck
+
+Every time a rewrite rule fires and marks the world dirty, `select_action_gpu` in the training script does:
+
+1. **Full world download**: `ext.download_acset(g_world, enc, FalconACSet)` — transfers the entire `GPUACSet` to CPU.
+2. **CPU graph construction**: `world_to_graph_data(world_cpu)` — builds edge lists, type-id arrays, and node-attr tensors on CPU.
+3. **GNN forward + embedding download**: `p.model.gnn(gnn_g, x_init)` runs on GPU, but the input graph was built on CPU and uploaded; output embeddings are then downloaded back.
+
+Every agent call (even with a cached world) also incurs:
+
+4. **Match download**: `Array(cands)` — downloads all candidate match columns from device.
+5. **Match fuser round-trip**: `CUDA.cu(all_match_inputs)` upload + `p.model.match_fuser(...)` + `Array(Flux.cpu(...))` download.
+6. **Logit download**: `Array(logits)` — downloads transformer output to select an action.
+
+The `world_dirty` flag caches steps 1–3 across multiple calls within the same schedule step, but steps 4–6 happen on every agent invocation.
+
+### Goal: GPU-Side Graph Construction After Rewrites
+
+The ideal architecture keeps the world on the GPU throughout an episode:
+
+- Maintain a `GPUGraphData` structure (edge index, type IDs, node-attr tensor) resident on device.
+- After a rewrite fires, **incrementally update** `GPUGraphData` on the GPU rather than re-downloading the whole ACSet:
+  - Insertions: append new node rows and update affected edge lists in place.
+  - Deletions: mark nodes/edges as inactive (masked attention) rather than reallocating.
+- The GNN input graph is already on device → no CPU upload needed.
+- GNN embeddings stay on device; the match fuser and transformer operate entirely on device.
+- Only the final scalar action index is returned to CPU (1 Int32 per call).
+
+### Immediate (Lower-Effort) Wins
+
+1. **GPU match encoding**: Build `all_match_inputs` on the GPU from already-resident embeddings and the `cands` array — eliminate `Array(cands)` + CPU loop + `CUDA.cu(all_match_inputs)`.
+2. **Fused GNN + match_fuser**: Run GNN and match scoring without intermediate host transfers.
+3. **GPU-side argmax**: Compute the action index on device; download only 1 Int32 instead of the full logit vector.
+
+### Full Solution: Incremental GPU Graph Updates
+
+Requires a `GPUGraphData` type in `GPURewritingExt` that the GPU runner updates after each rewrite application (the new world already lives on device as `codom(maps[:rh])`). Needs:
+
+- A device-side CSR or COO graph representation.
+- A mapping from ACSet part IDs to node indices.
+- Kernel or scatter/gather ops for incremental node/edge insertion and deletion.
+
+This eliminates the dominant per-step latency and is the highest-impact optimization for episode throughput.
+
+---
+
+## Stretch TODO: Decompose CSP for Shared Memory Regardless of Problem Size
+
+> **Note for future sessions:** If the user asks to "tackle all TODOs," confirm whether they also mean this stretch TODO — it is a significant research/engineering effort distinct from the items above.
+
+### Motivation
+
+`turbo_block` (shared memory) is ~100× faster per access than `turbo_eps` (global memory). The current design routes to EPS whenever the domain bitset exceeds 48 KB (nc_max ≥ 48 on A40 GPUs). For the full Falcon Tornado scenario (nc_max=48), every CSP call uses EPS.
+
+### Approach: User-Supplied ACSet Partition
+
+The ACSet can be partitioned by a user-supplied decomposition — e.g., a geographic zone partition of `Target` and `Platform` objects. A CSP for a pattern that matches only within one zone has nc_max proportional to that zone's object count, not the total world size.
+
+For Falcon Tornado with 4 zones averaging ~710 targets per zone: nc_max per zone ≈ ⌈710/64⌉ = 12, well within the nc_max=16 turbo_block range.
+
+### Interface Sketch
+
+```julia
+# User supplies a partition function mapping (object type, part ID) → shard index
+partition = ZonePartition(world)   # inspects PlatformZone / TargetZone FKs
+
+# GPU runner shards the world per partition, solves each shard with turbo_block,
+# and re-indexes matches to global IDs before returning to the agent
+exps = gpu_run_game_sched!(sched, world, agents; partition=partition, T_max=T_max)
+```
+
+### Caveats
+
+- Rules whose patterns span multiple partitions (e.g., "platform in zone A engages target in zone A") are the common case — the partition must respect each rule's variable typing so all variables for a given match fall within one shard.
+- Cross-partition rules must fall back to EPS or a multi-shard join.
+- Infrastructure for sharding `GPUACSet` and merging match results across shards does not yet exist.
