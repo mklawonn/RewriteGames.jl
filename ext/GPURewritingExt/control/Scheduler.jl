@@ -50,6 +50,9 @@ mutable struct GPUSchedulerState
     turn          :: Ref{Int}
     step_log      :: Vector{NamedTuple}
     scratch       :: Union{GPUScratchBuffers, Nothing}   # nothing on CPU-only path
+    graph_data      :: Union{GPUGraphData, Nothing}        # built lazily for GNN players
+    graph_dirty     :: Bool                               # set true after each rewrite
+    zone_partition  :: Any                                 # Union{ZonePartition,Nothing} — defined in ZonePartition.jl
 end
 
 function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
@@ -98,7 +101,8 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
     end
 
     GPUSchedulerState(sched, g, schema, enc, world_type, agents,
-                      traj, compact_every, Xoshiro(42), Ref(1), NamedTuple[], scratch)
+                      traj, compact_every, Xoshiro(42), Ref(1), NamedTuple[], scratch,
+                      nothing, false, nothing)
 end
 
 # ── GPU kernels for domain and hom-forward building ───────────────────────────
@@ -794,7 +798,22 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
             KernelAbstractions.synchronize(backend)
         end
         candidates = @view scratch.buf_solutions[1:n_vars, 1:n_presented]
-        idx        = select_action_gpu(agent, g, enc, schema, candidates, n_presented, turn)
+
+        # Lazy graph build/refresh for GNN players
+        gd = nothing
+        if agent isa AbstractGNNPlayer
+            if state.graph_data === nothing
+                state.graph_data = build_gpu_graph(g, schema, enc; backend)
+                state.graph_dirty = false
+            elseif state.graph_dirty
+                rebuild_gpu_graph!(state.graph_data, g, schema, enc; backend)
+                state.graph_dirty = false
+            end
+            gd = state.graph_data
+        end
+
+        idx = select_action_gpu(agent, g, enc, schema, candidates, n_presented, turn;
+                                 graph_data = gd)
         can_pass && Int(idx) > n_sols && return false   # player passed
         chosen_col = clamp(Int(idx), 1, n_sols)
         Array(@view scratch.buf_solutions[1:n_vars, chosen_col])
@@ -856,6 +875,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         end
         _gpu_apply_inplace!(g, chosen_sol, cube, rule, schema, enc, scratch;
                             gpu_cube = gpu_cube, d_match = d_match)
+        state.graph_dirty = true
     end
     true
 end

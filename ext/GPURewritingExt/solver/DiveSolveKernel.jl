@@ -924,7 +924,7 @@ thread 1 drives branching decisions and the DFS stack.
 
 Variable domains are stored in block-local shared memory (`dom`, 16 DFS levels).
 No per-call workspace allocation: storage is statically sized via `Val{NM}`
-(nc_max) and `Val{NVNM16}` (nc_max × 128 = 8 × nc_max × 16; one specialization per nc_max).
+(nc_max) and `Val{NVNM16}` (7 × nc_max × 16; one specialization per nc_max, covering n_vars ≤ 7).
 
 Launch with blocksize=32, n_blocks = min(2^D, 576).
 """
@@ -1492,12 +1492,14 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
     end
 
-    # Use EPS (global-memory) when nc==1 or when block-kernel smem would exceed
-    # the 48 KB CUDA per-block limit (n_vars × nc_max × 128 bytes).
-    # turbo_block @localmem dom uses nc_max*128 UInt64 words = nc_max*1024 bytes;
-    # plus ~256 bytes for stack_v/stnext/flags. Total > 49152 (48 KB A40 limit)
-    # when nc_max ≥ 48. Route those to EPS which uses global-memory workspace.
-    use_eps = nc == 1 || nc_max * 1024 + 256 > 49152
+    # Use EPS (global-memory) when nc==1, n_vars>7, or when block-kernel smem
+    # would exceed the 48 KB CUDA per-block limit.
+    # turbo_block @localmem dom uses 7*nc_max*16 UInt64 words = 7*nc_max*128 bytes;
+    # plus ~256 bytes for stack_v/stnext/flags.  n_vars>7 always routes to EPS;
+    # for n_vars≤7 the threshold is n_vars*nc_max*128+256 > 49152.
+    # For nc_max=48, n_vars=7: 7×48×128+256 = 43264 < 49152 → turbo_block.
+    # For nc_max=64: 7×64×128+256 = 57600 > 49152 → always EPS.
+    use_eps = nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
@@ -1524,11 +1526,11 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        # Use nc_max*128 (= 8×nc_max×16) instead of n_vars×nc_max×16 so that
-        # all n_vars values sharing the same nc_max compile to one Val{NVNM16}
-        # specialization.  @localmem over-allocates slightly for n_vars < 8;
-        # actual indexing uses n_vars_nm = n_vars*NM so no out-of-bounds.
-        nvnm16 = nc_max * 128
+        # Use 7*nc_max*16 instead of n_vars×nc_max×16 so that all n_vars≤7
+        # values sharing the same nc_max compile to one Val{NVNM16} specialization.
+        # @localmem over-allocates slightly for n_vars < 7; actual indexing uses
+        # n_vars_nm = n_vars*NM so no out-of-bounds.  n_vars>7 routes to EPS above.
+        nvnm16 = 7 * nc_max * 16
         if scratch !== nothing
             sub_gpu = scratch.buf_turbo_nextsub
             KernelAbstractions.fill!(sub_gpu, Int32(0))
@@ -1579,10 +1581,11 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
 
-    # turbo_block @localmem dom uses nc_max*128 UInt64 words = nc_max*1024 bytes;
-    # plus ~256 bytes for stack_v/stnext/flags. Total > 49152 (48 KB A40 limit)
-    # when nc_max ≥ 48. Route those to EPS which uses global-memory workspace.
-    use_eps = nc == 1 || nc_max * 1024 + 256 > 49152
+    # turbo_block @localmem dom uses 7*nc_max*16 UInt64 words = 7*nc_max*128 bytes;
+    # plus ~256 bytes for stack_v/stnext/flags.  n_vars>7 always routes to EPS;
+    # for n_vars≤7 threshold is n_vars*nc_max*128+256 > 49152.
+    # nc_max=48,n_vars=7: 43264 < 49152 → turbo_block. nc_max=64: always EPS.
+    use_eps = nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
@@ -1598,7 +1601,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        nvnm16 = nc_max * 128   # fixed per nc_max; collapses ~8 specializations to 1
+        nvnm16 = 7 * nc_max * 16   # fixed per nc_max; collapses n_vars≤7 to 1 specialization
         sub_gpu = scratch.buf_turbo_nextsub
         KernelAbstractions.fill!(sub_gpu, Int32(0))
         _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,

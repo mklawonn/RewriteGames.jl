@@ -52,6 +52,21 @@ value is a 1-based index into its columns.
 abstract type AbstractGPUPlayer <: AbstractAgent end
 
 """
+    AbstractGNNPlayer <: AbstractGPUPlayer
+
+Subtype for GNN-based GPU players that need the category-of-elements graph of
+the world for inference.  The scheduler builds and maintains a `GPUGraphData`
+automatically, refreshing it after each rewrite, and passes it as the
+`graph_data` keyword to `select_action_gpu`.
+
+Concrete subtypes should implement:
+
+    select_action_gpu(player, g, enc, schema, candidates, n_sols, turn;
+                      graph_data::GPUGraphData) -> Int
+"""
+abstract type AbstractGNNPlayer <: AbstractGPUPlayer end
+
+"""
     GPUFunctionPlayer(f)
 
 Wrap a function `f(g, candidates, n_sols, turn) -> Int` as a GPU player.
