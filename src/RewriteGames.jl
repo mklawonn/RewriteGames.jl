@@ -98,14 +98,75 @@ function turbo_homomorphisms end
 
 """
     select_action_gpu(player::AbstractGPUPlayer, g, enc, schema,
-                      candidates, n_sols, turn) -> Int
+                      candidates, n_sols, turn; graph_data=nothing) -> Int
 
 Choose one candidate solution (1-based column index) from the GPU-resident
 `candidates` matrix of shape `[n_vars × n_sols]`.  Implemented by concrete
 `AbstractGPUPlayer` subtypes.  The default for `GPUFunctionPlayer` calls
-`player.f(g, candidates, n_sols, turn)`.
+`player.f(g, candidates, n_sols, turn)`.  `AbstractGNNPlayer` subtypes receive
+`graph_data` (a `GPUGraphData`) built from the current world.
 """
 function select_action_gpu end
+
+"""
+    build_gpu_graph(g, schema, enc; backend) -> GPUGraphData
+
+Build a GPU-resident category-of-elements graph of the world ACSet `g`.
+Requires `KernelAbstractions` and `CUDA`.
+"""
+function build_gpu_graph end
+
+"""
+    rebuild_gpu_graph!(graph, g, schema, enc; backend)
+
+Full in-place rebuild of a `GPUGraphData` after compaction or when
+incremental updates are impractical.
+"""
+function rebuild_gpu_graph! end
+
+"""
+    update_graph_deletions!(graph, schema, deleted_slots; backend)
+
+Mark deleted slots as inactive in the `GPUGraphData` node mask.
+"""
+function update_graph_deletions! end
+
+"""
+    update_graph_additions!(graph, g, schema, added_slots; backend)
+
+Write node features and append edges for newly added slots.
+"""
+function update_graph_additions! end
+
+"""
+    live_coo(graph) -> (src, dst, edge_type, node_feat)
+
+Return the live COO edge list (active nodes only) from a `GPUGraphData`.
+"""
+function live_coo end
+
+"""
+    build_zone_partition(g, schema, nc, zone_fn; backend) -> ZonePartition
+
+Build a `ZonePartition` from `g` using the user-supplied `zone_fn`.
+Requires `KernelAbstractions` and `CUDA`.
+"""
+function build_zone_partition end
+
+"""
+    update_zone_masks!(partition, g, schema, affected_types, zone_fn; backend)
+
+Rebuild GPU bitmasks for the affected object types.
+"""
+function update_zone_masks! end
+
+"""
+    collect_zoned_solutions!(backend, csp, g, schema, enc, scratch, partition;
+                              max_solutions) -> Vector{Vector{Int32}}
+
+Run the CSP once per zone, collect zone-local solutions, remap to global IDs.
+"""
+function collect_zoned_solutions! end
 
 # ─── Public API ─────────────────────────────────────────────────────────────
 
