@@ -55,19 +55,34 @@ mutable struct GPUSchedulerState
     zone_partition  :: Any                                 # Union{ZonePartition,Nothing} — defined in ZonePartition.jl
 end
 
+# All CSPs reachable from a compiled schedule, including those nested inside
+# agent-loop body sub-schedules.  The shared scratch buffers must be sized for
+# the largest CSP that any box — top-level or agent-loop body — will solve.
+function _all_csps(sched::CompiledGPUSched)
+    csps = collect(sched.csps)
+    for sub in sched.sub_schedules
+        append!(csps, _all_csps(sub))
+    end
+    csps
+end
+
 function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
                             log_trajectory=false, compact_every=100)
     traj = log_trajectory ? GPUTrajectoryLog(schema) : nothing
 
     scratch = if CUDA.functional()
-        max_nc = isempty(sched.csps) ? 1 :
-                 maximum(Int(csp.n_chunks) for csp in sched.csps; init=1)
+        # Include agent-loop body CSPs: a top-level agent sched keeps only the
+        # interface CSP in sched.csps, while the body rule (often more variables)
+        # lives in a sub-schedule and is solved via the same scratch buffers.
+        all_csps = _all_csps(sched)
+        max_nc = isempty(all_csps) ? 1 :
+                 maximum(Int(csp.n_chunks) for csp in all_csps; init=1)
         nc_max = _select_nc_max(max_nc)
         nc     = max_nc   # for hf_flat sizing
-        max_n_vars = isempty(sched.csps) ? 1 :
-                     maximum(Int(csp.n_vars) for csp in sched.csps; init=1)
-        max_n_bc   = isempty(sched.csps) ? 1 :
-                     maximum(length(csp.bytecodes) for csp in sched.csps; init=1)
+        max_n_vars = isempty(all_csps) ? 1 :
+                     maximum(Int(csp.n_vars) for csp in all_csps; init=1)
+        max_n_bc   = isempty(all_csps) ? 1 :
+                     maximum(length(csp.bytecodes) for csp in all_csps; init=1)
         n_homs     = length(schema.homs)
         total_alloc = sum(values(g.n_alloc); init=0)
         # initial hf_flat capacity: sum of per-hom source sizes × nc, × 4 headroom
