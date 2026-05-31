@@ -161,6 +161,30 @@ to change an attribute.
 
 ---
 
+## Known Issue: EPS Threshold Too Conservative for nc_max=48
+
+**Context (commit a0d7082):** To fix a shared-memory overflow when `@localmem UInt64
+(nc_max*128,)` allocated exactly 48 KB with no room for other kernel arrays, the
+`use_eps` condition was changed to `nc_max * 1024 + 256 > 49152` (i.e., nc_max ≥ 48
+always uses EPS). This over-corrects: for n_vars ≤ 7 with nc_max=48 the workspace is
+only 43 KB and turbo_block would fit fine.
+
+**Impact:** The Falcon Tornado scenario (nc_max=48) routes all CSP calls to the EPS
+pipeline (global-memory workspace) instead of turbo_block (shared memory, ~100× faster
+per access). EPS is GPU-parallel and cpu_propagate! fast-fails infeasible cases, so
+absolute throughput may still be acceptable, but turbo_block would be faster.
+
+**Proper fix:** Change `nvnm16 = nc_max * 128` to `nvnm16 = 7 * nc_max * 16` (allocate
+for 7 variables instead of 8), and update `use_eps` to:
+```julia
+use_eps = nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152
+```
+This restores turbo_block for n_vars ≤ 7 with nc_max=48 (43 KB + overhead < 48 KB),
+routes n_vars=8 and nc_max ≥ 64 to EPS. nc_max=64 (>4096 elements/type) must always
+use EPS regardless — the 48 KB shared-memory limit is a hard physical constraint.
+
+---
+
 ## Known Issue: `done` flag in `gpu_run_game_sched!`
 
 `run_game_sched!` (CPU) sets `experience.done = true` on the final experience
