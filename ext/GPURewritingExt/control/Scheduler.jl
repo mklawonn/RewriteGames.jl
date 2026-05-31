@@ -76,7 +76,7 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
             CUDA.zeros(UInt64, hf_flat_init),
             CUDA.zeros(Int32,  n_homs + 1),
             CuArray{TCNBytecode}(undef, max(max_n_bc, 1)),
-            CUDA.zeros(Int32,  max(max_n_vars, 1), 10_000),
+            CUDA.zeros(Int32,  max(max_n_vars, 1), 10_001),
             CUDA.zeros(Int32,  1),
             CUDA.zeros(UInt64, max(max_n_vars * nc_max, 1), 16),
             CUDA.zeros(UInt64, max(nc, 1)),

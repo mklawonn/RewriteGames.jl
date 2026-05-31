@@ -22,7 +22,10 @@ function _select_nc_max(nc::Int)
     nc <= 4  && return 4
     nc <= 8  && return 8
     nc <= 16 && return 16
-    error("nc=$(nc) exceeds maximum supported chunks (16 = 1024 elements/type)")
+    nc <= 32 && return 32
+    nc <= 48 && return 48   # 48×64=3072 elems; smem=n_vars×48×16×8 ≤ 43 KB < 48 KB CUDA limit
+    nc <= 64 && return 64
+    error("nc=$(nc) exceeds maximum supported chunks (64 = 4096 elements/type)")
 end
 
 # Convert 1-based element index to (chunk_idx, bit_idx)

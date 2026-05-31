@@ -148,10 +148,7 @@ function RewriteGames.gpu_run_game_sched!(
     end
     max_n    = isempty(schema.obj_types) ? 1 :
                maximum(nparts(initial_world, o) for o in schema.obj_types; init=1)
-    # MAX_CHUNKS = 4 limits the solver kernel to 256 elements per type.
-    # Clamp here so nc never exceeds what the MVector{MAX_CHUNKS} can index.
-    n_chunks = min(cld(max(max_world_size !== nothing ? max_world_size : max_n, 1), 64),
-                   MAX_CHUNKS)
+    n_chunks = cld(max(max_world_size !== nothing ? max_world_size : max_n, 1), 64)
     sched    = compile_schedule(gs, initial_world, schema, enc; n_chunks=n_chunks)
 
     # ── Phase 2: Upload initial world to GPU ─────────────────────────────────

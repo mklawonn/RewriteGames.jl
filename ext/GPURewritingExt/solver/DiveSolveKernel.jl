@@ -1461,6 +1461,23 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     # Empty pattern: unique empty match always exists.
     n_vars == 0 && return [Int32[]]
 
+    # CPU AC fast-fail: run cpu_propagate! before the GPU kernel to detect
+    # infeasible CSPs.  In early training platforms haven't moved to target
+    # zones; per-variable domains are non-empty but hom propagation prunes
+    # them to empty instantly.  Downloading d_gpu + hf_flat_gpu costs ~1 ms
+    # and avoids a ~2 s GPU kernel call for every infeasible slot.
+    let d_cpu     = Array(d_gpu)
+        hf_offs_c = scratch !== nothing ? scratch.cached_hf_offs : Array(hf_offs_gpu)
+        n_homs    = length(hf_offs_c) - 1
+        hf_flat_c = Array(hf_flat_gpu)
+        hom_fwd   = Vector{Vector{UInt64}}(undef, n_homs)
+        for i in 1:n_homs
+            s = Int(hf_offs_c[i]); e = Int(hf_offs_c[i + 1])
+            hom_fwd[i] = hf_flat_c[s + 1 : e]
+        end
+        cpu_propagate!(d_cpu, csp.bytecodes, hom_fwd, nc) || return Vector{Int32}[]
+    end
+
     if scratch !== nothing
         b_gpu   = scratch.buf_bytecodes
         sol_gpu = scratch.buf_solutions
@@ -1475,8 +1492,11 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
     end
 
-    if nc == 1
-        # Small problem (≤64 elements/var): EPS — one thread per domain element.
+    # Use EPS (global-memory) when nc==1 or when block-kernel smem would exceed
+    # the 48 KB CUDA per-block limit (n_vars × nc_max × 128 bytes).
+    use_eps = nc == 1 || n_vars * nc_max * 128 > 49152
+    if use_eps
+        # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
         ws_cap = nc_max * 64 * n_vars * nc_max
         if scratch !== nothing
@@ -1498,7 +1518,7 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
                                 ub_info, ub_elems, workspace)
         end
     else
-        # Large problem (≥128 elements/var): multi-block Turbo.
+        # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
         nvnm16 = n_vars * nc_max * 16
@@ -1552,8 +1572,9 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
 
-    if nc == 1
-        # Small problem (≤64 elements/var): EPS pipeline.
+    use_eps = nc == 1 || n_vars * nc_max * 128 > 49152
+    if use_eps
+        # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
         if size(scratch.buf_workspace, 1) < ws_cap
             scratch.buf_workspace = CUDA.zeros(UInt64, ws_cap * 2, 16)
@@ -1564,7 +1585,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
                             scratch.buf_ub_info, scratch.buf_ub_elems,
                             scratch.buf_workspace)
     else
-        # Large problem (≥128 elements/var): multi-block Turbo.
+        # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
         nvnm16 = n_vars * nc_max * 16
