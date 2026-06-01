@@ -68,6 +68,11 @@ struct CompiledGPUSched
     init_wires      :: Vector{Int}
     trace_wires     :: Vector{Int}
     exit_wires      :: Vector{Int}
+    # (trace-return wire, trace-input wire) pairs.  At each turn's end an active
+    # trace-return wire re-activates its trace-input wire for the next turn — the
+    # GPU analogue of the CPU runner feeding ret_names[1:n_trace] back into the
+    # trace inputs.  Empty ⇒ single-pass schedule.
+    trace_loops     :: Vector{Tuple{Int,Int}}
     n_wires         :: Int
     sub_schedules   :: Vector{CompiledGPUSched}
     rules           :: Vector{Any}
@@ -162,6 +167,21 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
         in_w   = UInt16(_w!(first(step.inputs)))
         out_ws = ntuple(i -> i <= length(step.outputs) ?
                              UInt16(_w!(step.outputs[i])) : UInt16(0), 4)
+
+        # A box written with several input wires (e.g. `form_sead([init, tr])`)
+        # fires on the FIRST active input.  Only the first wire is used as the
+        # box's in_wire, so merge the remaining inputs into it with a BOX_WEAKEN
+        # each, emitted before the box so they run first in the per-turn sweep.
+        # Without this, a traced schedule's body fires only on turn 1 (when
+        # :init is active) and never on the trace input (:tr) in later turns.
+        for k in 2:length(step.inputs)
+            ew = UInt16(_w!(step.inputs[k]))
+            push!(boxes, CompiledBox(BOX_WEAKEN, UInt16(0), UInt16(0),
+                                     _p_idx(:_none), ew,
+                                     (in_w, UInt16(0), UInt16(0), UInt16(0)),
+                                     (0f0,0f0,0f0,0f0), UInt16(0)))
+            push!(box_players, :_none)
+        end
 
         if box isa PlayerRuleApp
             ridx = _reg!(box)
@@ -301,7 +321,7 @@ function compile_schedule(gs::GameSched, world,
         return CompiledGPUSched(
             [box], wire_set, wire_index, csps, adhesive_cubes,
             [gpu_upload_cube(c) for c in adhesive_cubes],
-            [1], Int[], [2], 2, [sub], rules_list, [gs._agent_name],
+            [1], Int[], [2], Tuple{Int,Int}[], 2, [sub], rules_list, [gs._agent_name],
             device_boxes,
             CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
     end
@@ -358,13 +378,23 @@ function compile_schedule(gs::GameSched, world,
     exit_wires  = [wire_index[gs._ret_names[i]]
                    for i in (n_trace+1):n_ret
                    if haskey(wire_index, gs._ret_names[i])]
+    # Loopback pairs: the i-th trace RETURN (ret_names[i]) re-feeds the i-th
+    # trace INPUT (trace_names[i]) for the next turn.  Mirrors the CPU runner.
+    trace_loops = Tuple{Int,Int}[]
+    for i in 1:min(n_trace, n_ret)
+        (haskey(wire_index, gs._ret_names[i]) &&
+         i <= length(gs._trace_names) &&
+         haskey(wire_index, gs._trace_names[i])) || continue
+        push!(trace_loops, (wire_index[gs._ret_names[i]],
+                            wire_index[gs._trace_names[i]]))
+    end
 
     device_boxes = CUDA.functional() ? CuArray(boxes) : nothing
     CompiledGPUSched(
         boxes, wire_set, wire_index,
         csps, adhesive_cubes,
         [gpu_upload_cube(c) for c in adhesive_cubes],
-        init_wires, trace_wires, exit_wires,
+        init_wires, trace_wires, exit_wires, trace_loops,
         length(wire_set), sub_schedules,
         rules_list, box_players,
         device_boxes,

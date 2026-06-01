@@ -1335,9 +1335,30 @@ function run_gpu_schedule!(state::GPUSchedulerState;
             any_changed |= changed
         end
 
+        # A true exit wire (a non-trace return) ends the episode.
         any(wire_active[w] for w in sched.exit_wires) && break
-        trace_active = any(wire_active[w] for w in sched.trace_wires)
-        !trace_active && !any_changed && break
+
+        # Otherwise loop the schedule: a trace-return wire re-activates its
+        # trace-input wire for the next turn.  We rebuild wire_active from
+        # scratch (like the CPU runner's fresh `_init_wires`) so stale
+        # intermediate wires from this turn don't leak into the next one.  The
+        # world `g` is mutated in place, so it threads forward automatically.
+        if isempty(sched.trace_loops)
+            # No trace structure: legacy single-pass behaviour.
+            trace_active = any(wire_active[w] for w in sched.trace_wires)
+            !trace_active && !any_changed && break
+        else
+            next_active = zeros(Bool, sched.n_wires)
+            looped = false
+            for (ret_w, in_w) in sched.trace_loops
+                if wire_active[ret_w]
+                    next_active[in_w] = true
+                    looped = true
+                end
+            end
+            looped || break          # body produced no continuing wire — done
+            wire_active = next_active
+        end
     end
 
     events

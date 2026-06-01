@@ -263,3 +263,28 @@ end
         @test length(exps_cpu) == length(exps_gpu)
     end
 end
+
+# ── Traced schedule loops multiple turns ──────────────────────────────────────
+#
+# A schedule with a trace wire (`tr=:I`) and a first box written with both the
+# init and trace inputs (`add_v([init, tr])`) must loop for T_max turns, firing
+# once per turn — not exit after turn 1.  Regression for two GPU-runner bugs:
+#   * the trace RETURN wire was never fed back into the trace INPUT wire, and
+#   * a box's extra input wires (the `tr` in `[init, tr]`) were dropped, so the
+#     body could only ever fire on turn 1 (when `init` was active).
+
+@testset "GPU schedule — traced schedule loops T_max turns" begin
+    pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
+    gs  = mk_game_sched((tr=:I,), (init=:I,), N_empty,
+                        (add_v=pra, mw=merge_wires(I_empty)),
+                        quote
+                            s, f = add_v([init, tr])
+                            out  = mw(s, f)
+                            return out
+                        end)
+    agents = Dict(:alice => first_agent)
+    for T in (1, 4)
+        exps = gpu_run_game_sched!(gs, Graph(0), agents; T_max=T)
+        @test count(e -> e.player == :alice, exps) == T
+    end
+end
