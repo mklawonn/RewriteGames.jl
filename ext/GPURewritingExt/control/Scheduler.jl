@@ -605,10 +605,11 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
                             schema::SchemaInfo,
                             g::GPUACSet, enc::AttributeEncoder,
                             world_type, turn::Int;
-                            can_pass::Bool = false)
+                            can_pass::Bool = false,
+                            state = nothing)
     agent === nothing && return solutions[1]
 
-    # GPU player path: pass candidates matrix directly, no world download
+    # GPU player path: pass the (already NAC-filtered) candidates matrix directly.
     if agent isa AbstractGPUPlayer
         n_sols    = length(solutions)
         cands_raw = CUDA.functional() ? CuArray(reduce(hcat, solutions)) :
@@ -624,7 +625,23 @@ function _choose_gpu_match(solutions::Vector{Vector{Int32}},
             cands_ext = cands_raw
         end
         n_presented = can_pass ? n_sols + 1 : n_sols
-        idx = select_action_gpu(agent, g, enc, schema, cands_ext, n_presented, turn)
+        # GNN players need the world graph; build/refresh it like the fast path
+        # so conditional (NAC) rules — which always route here — work for every
+        # AbstractGPUPlayer, not just those that ignore graph_data.
+        gd = nothing
+        if agent isa AbstractGNNPlayer && state !== nothing && CUDA.functional()
+            backend = CUDA.CUDABackend()
+            if state.graph_data === nothing
+                state.graph_data = build_gpu_graph(g, schema, enc; backend)
+                state.graph_dirty = false
+            elseif state.graph_dirty
+                rebuild_gpu_graph!(state.graph_data, g, schema, enc; backend)
+                state.graph_dirty = false
+            end
+            gd = state.graph_data
+        end
+        idx = select_action_gpu(agent, g, enc, schema, cands_ext, n_presented, turn;
+                                graph_data = gd)
         can_pass && Int(idx) > n_sols && return nothing   # player passed
         return solutions[clamp(Int(idx), 1, n_sols)]
     end
@@ -790,9 +807,16 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
 
     can_pass = box.box_type == BOX_PLAYER_RULE && box.params[1] > 0f0
 
-    chosen_sol = if agent isa AbstractGPUPlayer && CUDA.functional() && scratch !== nothing
+    chosen_sol = if agent isa AbstractGPUPlayer && CUDA.functional() && scratch !== nothing &&
+                    !_rule_has_conditions(rule)
         # ── GPU player fast path: fill scratch.buf_solutions on device,
         #    download only the 4-byte count + one chosen column ───────────────
+        # NOTE: this fast path presents raw CSP solutions to the player WITHOUT
+        # running _filter_nac_solutions, so it is only safe for rules with no
+        # NAC/PAC conditions.  Conditional rules fall through to the standard
+        # path below, which filters NAC-violating candidates before the player
+        # ever sees them.  (NAC enforcement requires a host-side hom search over
+        # the extended pattern; there is no GPU NAC reification yet.)
         backend          = CUDA.CUDABackend()
         nc               = csp.n_chunks
         hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
@@ -871,7 +895,8 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
 
         if box.box_type == BOX_PLAYER_RULE
             _choose_gpu_match(solutions, agent, rule, csp, schema,
-                              g, enc, state.world_type, turn; can_pass=can_pass)
+                              g, enc, state.world_type, turn; can_pass=can_pass,
+                              state=state)
         else
             solutions[1]
         end
