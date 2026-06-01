@@ -792,6 +792,126 @@ function _filter_nac_solutions(solutions::Vector{Vector{Int32}},
     end
 end
 
+# ── GPU-native NAC/PAC checking ───────────────────────────────────────────────
+#
+# The CPU `_filter_nac_solutions` downloads the whole world and runs a host-side
+# homomorphism search per candidate.  For the common application-condition shape
+# — a single new element whose foreign keys all point at *pinned* L-elements
+# (e.g. rtb_bingo's "a FuelToken on this Platform", move's "a DestroyedPlatform
+# on this Platform", isr's "a TargetFix for this target by this platform") — the
+# check is just an existence query that can run on-device against `g.homs` /
+# `g.active`, with no GPU→CPU world round-trip.
+#
+# `NacSpec` captures one such condition.  `_extract_nac_specs` returns `nothing`
+# when *any* condition is not of this simple shape, so the caller falls back to
+# the (fully general) CPU filter rather than checking a condition incorrectly.
+
+struct NacSpec
+    is_nac      :: Bool
+    new_type    :: Symbol                      # type of the single new element
+    constraints :: Vector{Tuple{Symbol, Int}}  # (fk hom, target CSP-variable index)
+end
+
+function _extract_nac_specs(rule, csp::CSPProblem, schema::SchemaInfo)
+    inner_rule = hasproperty(rule, :rule) ? rule.rule : rule
+    hasproperty(inner_rule, :conditions)       || return NacSpec[]
+    isempty(inner_rule.conditions)             && return NacSpec[]
+    hasmethod(left, Tuple{typeof(inner_rule)}) || return nothing
+    L = codom(left(inner_rule))
+
+    specs = NacSpec[]
+    for cond in inner_rule.conditions
+        hasproperty(cond, :g)          || return nothing
+        nparts(cond.g, :V) >= 1        || return nothing
+        nparts(cond.g, :E) >= 1        || return nothing
+        ac_L = subpart(cond.g, 1, :vlabel)
+        ac_L isa ACSet                 || return nothing
+        f_edge = subpart(cond.g, 1, :elabel)
+        f_edge isa ACSetTransformation || return nothing
+        S_ac = acset_schema(ac_L)
+
+        # Pinned ac_L parts (the image of f_edge) and their L preimage indices.
+        pinned = Dict{Symbol, Dict{Int,Int}}()   # type → (ac_L part → L part)
+        for o in ob(acset_schema(L))
+            d = Dict{Int,Int}()
+            for i in parts(L, o)
+                d[f_edge[o](i)] = i
+            end
+            pinned[o] = d
+        end
+
+        # New elements = ac_L parts not in the f_edge image.
+        new_elems = Tuple{Symbol,Int}[]
+        for o in ob(S_ac)
+            img = get(pinned, o, Dict{Int,Int}())
+            for p in parts(ac_L, o)
+                haskey(img, p) || push!(new_elems, (o, p))
+            end
+        end
+        length(new_elems) == 1 || return nothing   # only single-new-element NACs
+        (T, p) = new_elems[1]
+
+        constraints = Tuple{Symbol,Int}[]
+        for h in schema.homs
+            schema.hom_dom[h] == T || continue
+            tgt = subpart(ac_L, p, h)
+            tgt == 0 && continue
+            cod   = schema.hom_cod[h]
+            base  = get(csp.var_offset, cod, 0)
+            base == 0 && return nothing
+            Lpart = get(get(pinned, cod, Dict{Int,Int}()), tgt, 0)
+            Lpart == 0 && return nothing            # FK points at another new elem
+            push!(constraints, (h, base + Lpart - 1))
+        end
+        # Concrete (non-AttrVar) attributes on the new element aren't handled here.
+        for a in schema.attrs
+            schema.attr_dom[a] == T || continue
+            subpart(ac_L, p, a) isa AttrVar || return nothing
+        end
+
+        push!(specs, NacSpec(_is_nac_condition(cond), T, constraints))
+    end
+    specs
+end
+
+# Does the world contain an instance of `spec.new_type` whose FKs match the
+# pinned slots in `sol`?  Evaluated entirely on-device.
+function _gpu_nac_exists(g::GPUACSet, spec::NacSpec, sol::Vector{Int32})::Bool
+    T = spec.new_type
+    n = get(g.n_alloc, T, 0)
+    n == 0 && return false
+    mask = copy(@view g.active[T][1:n])          # live instances of T
+    for (h, var) in spec.constraints
+        (var < 1 || var > length(sol)) && return false
+        s    = sol[var]
+        mask = mask .& (@view(g.homs[h][1:n]) .== s)
+    end
+    any(mask)
+end
+
+"""
+    _gpu_filter_nac_solutions(solutions, rule, csp, g, schema)
+
+GPU-resident NAC/PAC post-filter: returns the kept solutions, or `nothing` if
+the rule has a condition this fast path does not support (caller then uses the
+CPU `_filter_nac_solutions`).  Unlike the CPU path it never downloads the world.
+"""
+function _gpu_filter_nac_solutions(solutions::Vector{Vector{Int32}},
+                                    rule, csp::CSPProblem,
+                                    g::GPUACSet, schema::SchemaInfo)
+    specs = _extract_nac_specs(rule, csp, schema)
+    specs === nothing && return nothing
+    isempty(specs)    && return solutions
+    filter(solutions) do sol
+        for spec in specs
+            exists = _gpu_nac_exists(g, spec, sol)
+            (spec.is_nac && exists)  && return false   # NAC fired
+            (!spec.is_nac && !exists) && return false  # PAC unsatisfied
+        end
+        true
+    end
+end
+
 # ── Per-box solve-and-apply ───────────────────────────────────────────────────
 
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
@@ -888,9 +1008,12 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         end
         isempty(solutions) && return false
 
-        # ── NAC/PAC post-filter ──────────────────────────────────────────────
-        solutions = _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
-                                          state.world_type)
+        # ── NAC/PAC post-filter (GPU-native; CPU fallback for complex ACs) ──
+        gpu_filtered = _gpu_filter_nac_solutions(solutions, rule, csp, g, schema)
+        solutions = gpu_filtered === nothing ?
+            _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
+                                  state.world_type) :
+            gpu_filtered
         isempty(solutions) && return false
 
         if box.box_type == BOX_PLAYER_RULE

@@ -53,4 +53,18 @@ using CUDA
         exps = gpu_run_game_sched!(gs, G, agents; T_max = 1)
         @test count(e -> e.player == :alice, exps) >= 1
     end
+
+    @testset "NAC filters selectively (mixed candidates)" begin
+        # v1, v2 already have self-loops; v3 does not.  The NAC must block the two
+        # looped vertices but leave v3 a valid match — the filter has to select,
+        # not act all-or-nothing.  This exercises the GPU-native NAC path
+        # (single new element = the self-loop edge, FKs to the pinned vertex).
+        G = Graph(3); add_edge!(G, 1, 1); add_edge!(G, 2, 2)
+        exps = gpu_run_game_sched!(gs, G, agents; T_max = 1)
+        @test count(e -> e.player == :alice, exps) == 1   # fires once, on v3
+        wf = exps[end].next_state.world
+        has_loop(v) = any(i -> wf[i, :src] == v && wf[i, :tgt] == v, parts(wf, :E))
+        @test all(has_loop, parts(wf, :V))   # v3 received its self-loop
+        @test nparts(wf, :E) == 3            # and no duplicate loop on v1/v2
+    end
 end
