@@ -102,7 +102,8 @@ function _compact_gpu_native!(g::GPUACSet, schema::SchemaInfo, backend)
 
         old_n[o] = n
         live_flags = CuArray{Int32}(undef, n)
-        mark_live_kernel!(backend, 256)(live_flags, @view(g.active[o][1:n]); ndrange=n)
+        # Kernel signature is (active::Bool, live_ids::Int32) — pass in that order.
+        mark_live_kernel!(backend, 256)(@view(g.active[o][1:n]), live_flags; ndrange=n)
         KernelAbstractions.synchronize(backend)
         gpu_new_ids[o] = cumsum(live_flags)   # CUDA.jl inclusive prefix-sum on device
     end
