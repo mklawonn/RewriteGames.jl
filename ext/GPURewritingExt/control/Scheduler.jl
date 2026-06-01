@@ -1116,6 +1116,22 @@ end
 const _DEFAULT_TERMINAL = (W) -> (false, nothing)
 
 """
+    _rule_has_conditions(rule) -> Bool
+
+True if the rule carries NAC/PAC application conditions.  Such rules must NOT use
+the fast single-sync native pipeline, which skips NAC enforcement: new-element
+NACs (e.g. rtb_bingo's "platform still has a FuelToken") are not lowered into the
+CSP (see CSPLowering.jl) and are only enforced by `_filter_nac_solutions` on the
+standard solve path.  Bypassing it lets a conditional rule fire when its NAC
+should block it (rtb_bingo deleting a fuelled platform's PlatformZone).
+"""
+function _rule_has_conditions(rule)::Bool
+    rule === nothing && return false
+    inner = hasproperty(rule, :rule) ? rule.rule : rule
+    hasproperty(inner, :conditions) && !isempty(inner.conditions)
+end
+
+"""
     _dispatch_gpu_box!(box, b_idx, sched, g, schema, enc, state, turn,
                        wire_active, events, rewrite_count, backend) -> Bool
 
@@ -1179,11 +1195,14 @@ function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSche
                    sched.gpu_cubes[adh_idx] : nothing
 
         # NATIVE_RULE on CUDA uses the single-sync pipeline; PLAYER_RULE keeps
-        # the multi-sync path so the agent can inspect solutions.
+        # the multi-sync path so the agent can inspect solutions.  Rules with
+        # NAC/PAC conditions must take the standard path so _filter_nac_solutions
+        # runs — the fast pipeline does not enforce application conditions.
         fired = if box.box_type == BOX_NATIVE_RULE &&
                    CUDA.functional() &&
                    state.scratch !== nothing &&
-                   gpu_cube !== nothing
+                   gpu_cube !== nothing &&
+                   !_rule_has_conditions(rule)
             _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule,
                                   schema, enc, state)
         else
