@@ -93,46 +93,61 @@ function download_acset(g::GPUACSet, enc::AttributeEncoder, world_type)
     # Build a compact (no-tombstone) new ACSet
     result = world_type()
 
-    # New IDs after compaction: old_id → new_id (0 = deleted)
-    new_id = Dict{Symbol, Vector{Int}}()
+    # New IDs after compaction: old_id → new_id (0 = deleted).  Vectorized:
+    # the new id of the k-th live part is its running count of live flags; dead
+    # parts map to 0.  `live_ids[o]` holds the old ids of live parts in compacted
+    # (new-id) order, so columns can be gathered and written in bulk below.
+    new_id   = Dict{Symbol, Vector{Int}}()
+    live_ids = Dict{Symbol, Vector{Int}}()
     for o in schema.obj_types
-        flags  = host_act[o]
-        n_live = sum(flags)
-        add_parts!(result, o, n_live)
-        mapping = zeros(Int, length(flags))
-        cursor  = 0
-        for (old, alive) in enumerate(flags)
-            alive || continue
-            cursor += 1
-            mapping[old] = cursor
-        end
-        new_id[o] = mapping
+        flags   = host_act[o]
+        mapping = cumsum(flags)             # Bool → Int running count
+        @inbounds for i in eachindex(flags); flags[i] || (mapping[i] = 0); end
+        new_id[o]   = mapping
+        live_ids[o] = findall(flags)        # old ids of live parts, ascending
+        add_parts!(result, o, length(live_ids[o]))
     end
 
-    # Set morphisms (skip deleted sources/targets)
+    # Set morphisms (skip deleted sources/targets).  Gather the target column for
+    # live sources, remap through the codomain's compaction, then write the whole
+    # column at once when it is fully defined; fall back to per-element only when
+    # some targets are missing/deleted (0), preserving the original "skip 0"
+    # semantics exactly.
     for h in schema.homs
         owner = schema.hom_dom[h]
         cod   = schema.hom_cod[h]
+        live  = live_ids[owner]
+        isempty(live) && continue
         fks   = host_hom[h]
-        flags = host_act[owner]
-        for (old_i, (alive, tgt)) in enumerate(zip(flags, fks))
-            alive || continue
-            new_i   = new_id[owner][old_i]
-            new_tgt = tgt > 0 ? new_id[cod][tgt] : 0
-            new_tgt > 0 && set_subpart!(result, new_i, h, new_tgt)
+        cmap  = new_id[cod]
+        col   = Vector{Int}(undef, length(live))
+        @inbounds for k in eachindex(live)
+            t = fks[live[k]]
+            col[k] = t > 0 ? cmap[t] : 0
+        end
+        if all(>(0), col)
+            set_subpart!(result, :, h, col)
+        else
+            @inbounds for k in eachindex(col)
+                col[k] > 0 && set_subpart!(result, k, h, col[k])
+            end
         end
     end
 
-    # Set attributes
+    # Set attributes.  Decode the live column, then bulk-write when no value is
+    # `nothing`; otherwise per-element (preserving the original "skip nothing").
     for a in schema.attrs
         owner = schema.attr_dom[a]
-        avs   = host_att[a]
-        flags = host_act[owner]
-        for (old_i, (alive, enc_v)) in enumerate(zip(flags, avs))
-            alive || continue
-            new_i = new_id[owner][old_i]
-            v = decode_value(enc, a, enc_v)
-            v !== nothing && set_subpart!(result, new_i, a, v)
+        live  = live_ids[owner]
+        isempty(live) && continue
+        avs     = host_att[a]
+        decoded = [decode_value(enc, a, avs[i]) for i in live]
+        if !any(isnothing, decoded)
+            set_subpart!(result, :, a, decoded)
+        else
+            @inbounds for k in eachindex(decoded)
+                decoded[k] !== nothing && set_subpart!(result, k, a, decoded[k])
+            end
         end
     end
 
