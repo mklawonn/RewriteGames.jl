@@ -16,4 +16,5 @@ using Test
     include("test_gpu_schedule.jl")
     include("test_gpu_agent_loop.jl")
     include("test_gpu_nac.jl")
+    include("test_gpu_sampling.jl")
 end

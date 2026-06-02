@@ -72,6 +72,146 @@ function _dfs!(solutions, assignment, domains::Vector{UInt64}, bytecodes,
     end
 end
 
+# ── Host-side count-weighted random sampler (SampleSearch) ────────────────────
+#
+# Reference implementation of "take N" uniform-ish sampling, used as the CPU
+# fallback and as the correctness oracle for the GPU sampling kernel.
+#
+# Principle (Gogate–Dechter): descend the search tree choosing, at each branching
+# variable, a value with probability proportional to an estimate of the number of
+# solutions in that branch's subtree.  We use the cheap relaxation weight
+# w = ∏_v |D_v| (product of remaining domain sizes after one-step AC-1
+# propagation) — an upper bound on completions.  On a dead end we backtrack and
+# exclude the failed value (SampleSearch), so every returned assignment is a valid
+# solution.  Uniformity is best-effort (the weight is an upper bound); validity is
+# guaranteed.
+
+# Extract the (single) element of each variable from a fully-determined domain set.
+@inline function _extract_assignment(domains::Vector{UInt64}, n_vars::Int, nc::Int)
+    sol = Vector{Int32}(undef, n_vars)
+    for v in 1:n_vars
+        off  = (v - 1) * nc
+        elem = Int32(0)
+        for c in 1:nc
+            ch = domains[off + c]
+            if ch != UInt64(0)
+                bi   = trailing_zeros(ch)
+                elem = Int32((c - 1) * 64 + bi + 1)
+                break
+            end
+        end
+        sol[v] = elem
+    end
+    return sol
+end
+
+# Product of domain sizes (∏_v popcount(D_v)) — subtree-size estimate.
+@inline function _domain_product(domains::Vector{UInt64}, n_vars::Int, nc::Int)
+    w = 1.0
+    for v in 1:n_vars
+        off  = (v - 1) * nc
+        ones = 0
+        for c in 1:nc; ones += count_ones(domains[off + c]); end
+        w *= ones
+    end
+    return w
+end
+
+# One weighted random descent with backtracking. `domains` must already be
+# arc-consistent and non-empty.  Returns a valid assignment or `nothing` if the
+# subtree has no solution.
+function _sample_descent(domains::Vector{UInt64}, bytecodes, hom_forward,
+                         n_vars::Int, nc::Int, rng)
+    # Find first unbound variable (popcount > 1).
+    unbound = 0
+    for v in 1:n_vars
+        off  = (v - 1) * nc
+        ones = 0
+        for c in 1:nc; ones += count_ones(domains[off + c]); end
+        ones == 0 && return nothing          # empty domain (defensive)
+        ones > 1  && (unbound = v; break)
+    end
+    unbound == 0 && return _extract_assignment(domains, n_vars, nc)
+
+    # Enumerate candidate values of the branching variable.
+    off_ub = (unbound - 1) * nc
+    cands  = Int[]
+    for c in 1:nc
+        chunk = domains[off_ub + c]
+        while chunk != 0
+            lsb = chunk & (-chunk); chunk &= ~lsb
+            push!(cands, (c - 1) * 64 + trailing_zeros(lsb) + 1)
+        end
+    end
+
+    # One-step lookahead: pin each candidate, propagate, weight by ∏|D_v|.
+    children = Vector{Vector{UInt64}}(undef, length(cands))
+    weights  = zeros(Float64, length(cands))
+    for (k, e) in enumerate(cands)
+        child = copy(domains)
+        for ci in 1:nc; child[off_ub + ci] = UInt64(0); end
+        cc = (e - 1) >> 6 + 1; bb = (e - 1) & 63
+        child[off_ub + cc] = UInt64(1) << bb
+        if cpu_propagate!(child, bytecodes, hom_forward, nc)
+            weights[k]  = _domain_product(child, n_vars, nc)
+            children[k] = child
+        end
+    end
+
+    # Weighted sample without replacement; recurse, backtrack on failure.
+    remaining = sum(weights)
+    while remaining > 0
+        r   = rand(rng) * remaining
+        acc = 0.0; j = 0
+        for k in eachindex(weights)
+            weights[k] <= 0 && continue
+            acc += weights[k]
+            if r <= acc; j = k; break; end
+        end
+        j == 0 && (j = findlast(>(0.0), weights))   # floating-point guard
+        res = _sample_descent(children[j], bytecodes, hom_forward, n_vars, nc, rng)
+        res !== nothing && return res
+        remaining -= weights[j]; weights[j] = 0.0    # exclude failed branch
+    end
+    return nothing
+end
+
+"""
+    cpu_sample_solve(csp, initial_domains; take, rng) -> Vector{Vector{Int32}}
+
+Return up to `take` distinct valid solutions sampled (best-effort uniformly) from
+the CSP solution space via count-weighted random descent.  CPU reference for the
+GPU sampling path and fallback when CUDA is unavailable.
+"""
+function cpu_sample_solve(csp::CSPProblem, initial_domains::Vector{UInt64};
+                          take::Int, rng = default_rng())::Vector{Vector{Int32}}
+    n_vars = Int(csp.n_vars)
+    nc     = csp.n_chunks
+    solutions = Vector{Int32}[]
+    n_vars == 0 && return [Int32[]]
+    take <= 0 && return solutions
+
+    root = copy(initial_domains)
+    cpu_propagate!(root, csp.bytecodes, csp.hom_forward, nc) || return solutions
+
+    seen = Set{Vector{Int32}}()
+    # Cap attempts so that solution spaces smaller than `take` terminate; the
+    # multiplier trades a few wasted descents for high coverage.
+    max_attempts = take * 20 + 50
+    attempts = 0
+    while length(solutions) < take && attempts < max_attempts
+        attempts += 1
+        sol = _sample_descent(copy(root), csp.bytecodes, csp.hom_forward,
+                              n_vars, nc, rng)
+        sol === nothing && break                 # subtree has no solution at all
+        if !(sol in seen)
+            push!(seen, sol)
+            push!(solutions, sol)
+        end
+    end
+    return solutions
+end
+
 # ── GPU kernel ────────────────────────────────────────────────────────────────
 
 @kernel function dive_solve_kernel!(
@@ -385,6 +525,349 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     count == 0 && return Vector{Int32}[]
     res = Array(sol_gpu)[:, 1:min(count, max_solutions)]
     return [res[:, i] for i in 1:size(res, 2)]
+end
+
+# ── GPU count-weighted random-descent sampler ("take N") ──────────────────────
+#
+# One CUDA thread = one independent weighted random descent (= one sample).
+# Mirrors `dive_solve_kernel!` but, at each branching variable, chooses a value
+# with probability ∝ ∏_v |D_v| (subtree-size estimate after one-step AC-1) rather
+# than enumerating exhaustively, and stops at the first leaf.  Full SampleSearch
+# backtracking (try other weighted candidates on a deeper dead-end) guarantees a
+# valid solution whenever one exists.  Each thread writes to its own output column
+# `solutions[:, t]`, so no atomics are needed.  See `cpu_sample_solve` (the
+# matching host reference / oracle).
+
+# splitmix64 — advances `state`, returns `(new_state, output)`.  Chosen because it
+# decorrelates structured / sequential seeds well (one xorshift step from a
+# `seed ⊻ t·golden` seed biases the first draw, starving some branches).
+@inline function _sm64_next(state::UInt64)
+    state += 0x9E3779B97F4A7C15
+    z = state
+    z = (z ⊻ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ⊻ (z >> 27)) * 0x94D049BB133111EB
+    z = z ⊻ (z >> 31)
+    return state, z
+end
+
+# Single-thread AC-1 propagation on workspace column `col` (chunked, nc_max
+# stride).  Returns true iff every variable domain is non-empty at fixpoint.
+# Mirrors the inlined propagation in `dive_solve_kernel!`.  Attribute / domain-
+# size constraints are pre-baked into the initial domains, so only PROP_FUNC /
+# PROP_EQ / PROP_NEQ are handled here (as in the dive kernel).
+@inline function _ac1_propagate_col!(ws, col::Int, bytecodes, n_bc::Int,
+                                     n_vars::Int, nc::Int, nc_max::Int,
+                                     hom_fwd_flat, hom_fwd_offs, new_d, reachable)
+    n_homs = length(hom_fwd_offs) - 1
+    for _ in 1:8
+        changed = false
+        for i in 1:n_bc
+            bc = bytecodes[i]
+            v1 = Int(bc.var1); v1 == 0 && continue
+            off1 = (v1 - 1) * nc_max
+            if bc.op == PROP_FUNC && bc.var2 != 0
+                v2 = Int(bc.var2); off2 = (v2 - 1) * nc_max
+                h_idx = Int(bc.param1)
+                if 1 <= h_idx <= n_homs
+                    off_h     = Int(hom_fwd_offs[h_idx])
+                    n_elems_h = (Int(hom_fwd_offs[h_idx + 1]) - off_h) ÷ nc
+                    for c in 1:nc; new_d[c] = UInt64(0); end
+                    for c in 1:nc
+                        chunk = ws[off1 + c, col]
+                        while chunk != 0
+                            lsb = chunk & (-chunk); chunk &= ~lsb
+                            w   = (c - 1) * 64 + trailing_zeros(lsb) + 1
+                            w > n_elems_h && continue
+                            off_w = off_h + (w - 1) * nc
+                            for ci in 1:nc
+                                (hom_fwd_flat[off_w + ci] & ws[off2 + ci, col]) != 0 &&
+                                    (new_d[c] |= lsb; break)
+                            end
+                        end
+                    end
+                    for c in 1:nc
+                        old_c = ws[off1 + c, col]
+                        ws[off1 + c, col] = new_d[c]
+                        old_c != new_d[c] && (changed = true)
+                    end
+                    for c in 1:nc; reachable[c] = UInt64(0); end
+                    for c in 1:nc
+                        chunk = new_d[c]
+                        while chunk != 0
+                            lsb = chunk & (-chunk); chunk &= ~lsb
+                            w   = (c - 1) * 64 + trailing_zeros(lsb) + 1
+                            w > n_elems_h && continue
+                            off_w = off_h + (w - 1) * nc
+                            for ci in 1:nc; reachable[ci] |= hom_fwd_flat[off_w + ci]; end
+                        end
+                    end
+                    for c in 1:nc
+                        new_c = ws[off2 + c, col] & reachable[c]
+                        new_c != ws[off2 + c, col] && (changed = true)
+                        ws[off2 + c, col] = new_c
+                    end
+                end
+            elseif bc.op == PROP_NEQ && bc.var2 != 0
+                v2 = Int(bc.var2); off2 = (v2 - 1) * nc_max
+                ones2 = 0
+                for c in 1:nc; ones2 += count_ones(ws[off2 + c, col]); end
+                if ones2 == 1
+                    for c in 1:nc
+                        new_c = ws[off1 + c, col] & ~ws[off2 + c, col]
+                        new_c != ws[off1 + c, col] && (changed = true)
+                        ws[off1 + c, col] = new_c
+                    end
+                end
+            elseif bc.op == PROP_EQ && bc.var2 != 0
+                v2 = Int(bc.var2); off2 = (v2 - 1) * nc_max
+                for c in 1:nc
+                    old1 = ws[off1 + c, col]
+                    new1 = old1 & ws[off2 + c, col]
+                    ws[off1 + c, col] = new1
+                    old1 != new1 && (changed = true)
+                end
+            end
+        end
+        changed || break
+    end
+    for v in 1:n_vars
+        off = (v - 1) * nc_max
+        allz = true
+        for c in 1:nc
+            ws[off + c, col] != UInt64(0) && (allz = false; break)
+        end
+        allz && return false
+    end
+    return true
+end
+
+# ∏_v popcount(D_v) for workspace column `col` — subtree-size estimate.
+@inline function _domain_product_col(ws, col::Int, n_vars::Int, nc::Int, nc_max::Int)
+    w = 1.0
+    for v in 1:n_vars
+        off = (v - 1) * nc_max
+        o = 0
+        for c in 1:nc; o += count_ones(ws[off + c, col]); end
+        w *= o
+    end
+    return w
+end
+
+# Copy all variable domains from column `src` to column `dst`.
+@inline function _copy_col!(ws, dst::Int, src::Int, n_vars::Int, nc::Int, nc_max::Int)
+    for v in 1:n_vars
+        off = (v - 1) * nc_max
+        for c in 1:nc; ws[off + c, dst] = ws[off + c, src]; end
+    end
+end
+
+@kernel function sample_descent_kernel!(
+    domains_in   :: AbstractVector{UInt64},   # [n_vars * nc] initial domains
+    bytecodes    :: AbstractVector{TCNBytecode},
+    n_bc         :: Int,
+    n_vars       :: Int,
+    nc           :: Int,
+    max_levels   :: Int,                       # = n_vars + 1
+    n_threads    :: Int,
+    seed         :: UInt64,
+    solutions    :: AbstractMatrix{Int32},     # [n_vars × n_threads], col t = thread t's sample
+    ws           :: AbstractMatrix{UInt64},    # [n_vars*NM × n_threads*(max_levels+1)]
+    hom_fwd_flat :: AbstractVector{UInt64},
+    hom_fwd_offs :: AbstractVector{Int32},
+    ::Val{NM},
+) where {NM}
+    t = @index(Global)
+    if t <= n_threads
+        nc_max    = NM
+        new_d     = MVector{NM, UInt64}(undef)
+        reachable = MVector{NM, UInt64}(undef)
+        stack_var = MVector{16, Int32}(undef)
+
+        cols_per_thread = max_levels + 1
+        base   = (t - 1) * cols_per_thread
+        tmpcol = base + cols_per_thread        # last per-thread column = candidate scratch
+
+        # Level-1 column ← initial domains.
+        col1 = base + 1
+        for v in 1:n_vars
+            offw = (v - 1) * nc_max
+            offd = (v - 1) * nc
+            for c in 1:nc; ws[offw + c, col1] = domains_in[offd + c]; end
+        end
+
+        rs = seed ⊻ (UInt64(t) * 0x9E3779B97F4A7C15)
+        rs == UInt64(0) && (rs = 0x9E3779B97F4A7C15)
+
+        lvl    = 1
+        state  = 1
+        safety = 0
+        while lvl > 0 && safety < 2_000_000
+            safety += 1
+            col = base + lvl
+
+            if state == 1
+                ok = _ac1_propagate_col!(ws, col, bytecodes, n_bc, n_vars, nc, nc_max,
+                                         hom_fwd_flat, hom_fwd_offs, new_d, reachable)
+                if !ok
+                    lvl -= 1; state = 2
+                else
+                    unbound = 0
+                    for v in 1:n_vars
+                        offv = (v - 1) * nc_max
+                        ones = 0
+                        for c in 1:nc; ones += count_ones(ws[offv + c, col]); end
+                        if ones > 1; unbound = v; break; end
+                    end
+                    if unbound == 0
+                        for v in 1:n_vars
+                            offv = (v - 1) * nc_max
+                            elem = Int32(0)
+                            for c in 1:nc
+                                ch = ws[offv + c, col]
+                                if ch != UInt64(0)
+                                    elem = Int32((c - 1) * 64 + trailing_zeros(ch) + 1)
+                                    break
+                                end
+                            end
+                            solutions[v, t] = elem
+                        end
+                        lvl = 0                       # leaf reached → thread done
+                    else
+                        stack_var[lvl] = Int32(unbound)
+                        state = 2
+                    end
+                end
+
+            else  # state == 2: weighted pick among the branching var's remaining values
+                ub    = Int(stack_var[lvl])
+                offub = (ub - 1) * nc_max
+
+                # Pass A — total feasible weight over remaining candidate bits.
+                W = 0.0
+                for c in 1:nc
+                    chunk = ws[offub + c, col]
+                    while chunk != 0
+                        lsb = chunk & (-chunk); chunk &= ~lsb
+                        _copy_col!(ws, tmpcol, col, n_vars, nc, nc_max)
+                        for cc in 1:nc; ws[offub + cc, tmpcol] = UInt64(0); end
+                        ws[offub + c, tmpcol] = lsb
+                        _ac1_propagate_col!(ws, tmpcol, bytecodes, n_bc, n_vars, nc, nc_max,
+                                            hom_fwd_flat, hom_fwd_offs, new_d, reachable) &&
+                            (W += _domain_product_col(ws, tmpcol, n_vars, nc, nc_max))
+                    end
+                end
+
+                if W <= 0.0
+                    lvl -= 1; state = 2               # node exhausted → backtrack
+                else
+                    rs, z = _sm64_next(rs)
+                    r  = (Float64(z >> 11) * (1.0 / 9007199254740992.0)) * W
+                    # Pass B — re-walk, pick the chosen candidate, leave child in tmpcol.
+                    acc        = 0.0
+                    chosen_c   = 0
+                    chosen_lsb = UInt64(0)
+                    for c in 1:nc
+                        chunk = ws[offub + c, col]
+                        while chunk != 0
+                            lsb = chunk & (-chunk); chunk &= ~lsb
+                            _copy_col!(ws, tmpcol, col, n_vars, nc, nc_max)
+                            for cc in 1:nc; ws[offub + cc, tmpcol] = UInt64(0); end
+                            ws[offub + c, tmpcol] = lsb
+                            if _ac1_propagate_col!(ws, tmpcol, bytecodes, n_bc, n_vars, nc, nc_max,
+                                                   hom_fwd_flat, hom_fwd_offs, new_d, reachable)
+                                acc += _domain_product_col(ws, tmpcol, n_vars, nc, nc_max)
+                                if acc >= r
+                                    chosen_c = c; chosen_lsb = lsb; break
+                                end
+                            end
+                        end
+                        chosen_c != 0 && break
+                    end
+                    if chosen_c == 0
+                        lvl -= 1; state = 2           # floating-point guard → backtrack
+                    else
+                        ws[offub + chosen_c, col] &= ~chosen_lsb    # exclude (mark tried)
+                        if lvl < max_levels
+                            _copy_col!(ws, base + lvl + 1, tmpcol, n_vars, nc, nc_max)
+                            lvl += 1; state = 1
+                        else
+                            state = 2                 # depth cap: retry remaining here
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+"""
+    gpu_turbo_sample(backend, csp, initial_domains; take, seed, oversample) -> Vector{Vector{Int32}}
+
+Sample up to `take` distinct valid solutions via the count-weighted random-descent
+kernel (one thread per sample, `take*oversample` threads launched, deduplicated on
+host).  GPU analog of `cpu_sample_solve`.  Falls back to full solve + uniform
+subsample when the pattern is too deep for the fixed 16-level thread stack.
+"""
+function gpu_turbo_sample(backend, csp::CSPProblem, initial_domains::Vector{UInt64};
+                          take::Int, seed::Integer = 0,
+                          oversample::Int = 4)::Vector{Vector{Int32}}
+    n_vars = Int(csp.n_vars)
+    n_bc   = length(csp.bytecodes)
+    nc     = csp.n_chunks
+    n_vars == 0 && return [Int32[]]
+    take  <= 0 && return Vector{Int32}[]
+    @assert length(initial_domains) == n_vars * nc
+    nc_max = _select_nc_max(nc)
+
+    if n_vars + 1 > 16
+        # Pattern deeper than the fixed thread stack: full solve + uniform subsample.
+        return _subsample_solutions(gpu_dive_solve(backend, csp, initial_domains), take, seed)
+    end
+
+    max_levels = n_vars + 1
+    K = max(take * oversample, take + 8)
+
+    d_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * nc)
+    KernelAbstractions.copyto!(backend, d_gpu, initial_domains)
+    b_gpu = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
+    n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+    sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, K)
+    KernelAbstractions.fill!(sol_gpu, Int32(0))     # failed threads stay all-zero (invalid)
+    ws_gpu  = KernelAbstractions.allocate(backend, UInt64, n_vars * nc_max, K * (max_levels + 1))
+
+    hom_fwd_flat = UInt64[]; hom_fwd_offs = Int32[0]
+    for fwd in csp.hom_forward
+        append!(hom_fwd_flat, fwd); push!(hom_fwd_offs, Int32(length(hom_fwd_flat)))
+    end
+    isempty(hom_fwd_flat) && push!(hom_fwd_flat, UInt64(0))
+    hf_flat_gpu = KernelAbstractions.allocate(backend, UInt64, length(hom_fwd_flat))
+    KernelAbstractions.copyto!(backend, hf_flat_gpu, hom_fwd_flat)
+    hf_offs_gpu = KernelAbstractions.allocate(backend, Int32, length(hom_fwd_offs))
+    KernelAbstractions.copyto!(backend, hf_offs_gpu, hom_fwd_offs)
+
+    sample_descent_kernel!(backend)(
+        d_gpu, b_gpu, n_bc, n_vars, nc, max_levels, K, UInt64(seed),
+        sol_gpu, ws_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange = K)
+    KernelAbstractions.synchronize(backend)
+
+    res  = Array(sol_gpu)                            # [n_vars × K]
+    out  = Vector{Int32}[]
+    seen = Set{Tuple}()
+    for j in 1:K
+        res[1, j] == Int32(0) && continue            # thread found no solution
+        col = res[:, j]
+        key = Tuple(col)
+        key in seen && continue
+        push!(seen, key); push!(out, col)
+        length(out) >= take && break
+    end
+    return out
+end
+
+# Uniform random subsample (without replacement) of `take` from `sols`.
+function _subsample_solutions(sols::Vector{Vector{Int32}}, take::Int, seed::Integer)
+    length(sols) <= take && return sols
+    return shuffle(Xoshiro(UInt64(seed)), sols)[1:take]
 end
 
 # ── GPU branching-point detection kernels ────────────────────────────────────
@@ -1601,6 +2084,82 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     end
     KernelAbstractions.synchronize(backend)
     CUDA.@allowscalar min(Int(scratch.buf_sol_count[1]), max_solutions)
+end
+
+"""
+    _gpu_turbo_sample_scratch!(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
+                               take, seed, oversample, scratch) -> Int
+
+Scratch-buffer "take N" sampler for the GPU player fast path.  Fills
+`scratch.buf_solutions[:, 1:n]` with up to `take` DISTINCT valid solutions produced
+by `sample_descent_kernel!` (count-weighted random descent) and returns `n` (≤take).
+Mirrors `_gpu_turbo_fill_scratch!`; deduplication uses a tiny host round-trip over
+the K = take·oversample per-thread output columns (cheap because `take` is small
+when sampling is active).  Only valid for rules with no NAC/PAC conditions (same
+guard as the fill-scratch fast path).
+"""
+function _gpu_turbo_sample_scratch!(backend, csp::CSPProblem,
+                                    d_gpu, hf_flat_gpu, hf_offs_gpu;
+                                    take::Int, seed::Integer = 0,
+                                    oversample::Int = 4, scratch)::Int
+    n_vars = Int(csp.n_vars)
+    n_bc   = length(csp.bytecodes)
+    nc     = csp.n_chunks
+    nc_max = _select_nc_max(nc)
+
+    if n_vars == 0
+        KernelAbstractions.fill!(scratch.buf_sol_count, Int32(1))
+        return 1
+    end
+    take <= 0 && return 0
+
+    # Pattern deeper than the fixed 16-level thread stack: fall back to the full
+    # solver (take ignored for these rare large patterns; none occur in Falcon).
+    if n_vars + 1 > 16
+        return _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu;
+                                        scratch = scratch)
+    end
+
+    max_levels = n_vars + 1
+    K = min(max(take * oversample, take + 8), size(scratch.buf_solutions, 2))
+
+    b_gpu = scratch.buf_bytecodes
+    n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
+
+    # Grow per-thread descent workspace if needed.
+    ws_rows = n_vars * nc_max
+    ws_cols = K * (max_levels + 1)
+    if size(scratch.buf_sample_ws, 1) < ws_rows || size(scratch.buf_sample_ws, 2) < ws_cols
+        scratch.buf_sample_ws = CUDA.zeros(UInt64, ws_rows, ws_cols)
+    end
+
+    sol_view = view(scratch.buf_solutions, 1:n_vars, 1:K)
+    KernelAbstractions.fill!(sol_view, Int32(0))      # failed threads stay all-zero
+    ws_view  = view(scratch.buf_sample_ws, 1:ws_rows, 1:ws_cols)
+
+    sample_descent_kernel!(backend)(
+        d_gpu, b_gpu, n_bc, n_vars, nc, max_levels, K, UInt64(seed),
+        sol_view, ws_view, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange = K)
+    KernelAbstractions.synchronize(backend)
+
+    # Dedup the K sampled columns on host (tiny: K·n_vars Int32), compact to ≤ take.
+    host     = Array(sol_view)                        # [n_vars × K]
+    distinct = Vector{Int32}[]
+    seen     = Set{Tuple}()
+    for j in 1:K
+        host[1, j] == Int32(0) && continue
+        col = host[:, j]
+        key = Tuple(col)
+        key in seen && continue
+        push!(seen, key); push!(distinct, col)
+        length(distinct) >= take && break
+    end
+    n = length(distinct)
+    n == 0 && return 0
+    out = reduce(hcat, distinct)                      # [n_vars × n]
+    KernelAbstractions.copyto!(backend, view(scratch.buf_solutions, 1:n_vars, 1:n), out)
+    KernelAbstractions.synchronize(backend)
+    return n
 end
 
 """

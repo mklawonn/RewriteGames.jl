@@ -41,7 +41,7 @@ using AlgebraicRewriting
 using KernelAbstractions
 using CUDA
 using Atomix, StaticArrays
-using Random: Xoshiro
+using Random: Xoshiro, AbstractRNG, default_rng, shuffle
 
 import Catlab.CategoricalAlgebra:
     acset_schema, ob, hom, attr, dom, codom, nparts, parts, subpart,
@@ -163,6 +163,8 @@ function RewriteGames.gpu_run_game_sched!(
     discretizers   :: Dict{Symbol, Pair{Function,Function}}    = Dict{Symbol,Pair{Function,Function}}(),
     max_world_size :: Union{Int,Nothing}                       = nothing,
     zone_partition :: Union{ZonePartition, Nothing}            = nothing,
+    take                                                       = nothing,
+    sample_seed    :: Int                                      = 0,
 )::Vector{Experience}
 
     # ── Phase 1: Host-side compilation ────────────────────────────────────────
@@ -186,7 +188,9 @@ function RewriteGames.gpu_run_game_sched!(
     # ── Phase 3: Build scheduler state ───────────────────────────────────────
     state = GPUSchedulerState(sched, g, schema, enc, world_type, agents;
                               log_trajectory = log_trajectory,
-                              compact_every  = compact_every)
+                              compact_every  = compact_every,
+                              take           = take,
+                              sample_seed    = sample_seed)
     state.zone_partition = zone_partition
 
     # ── Phase 4: Execute on GPU ───────────────────────────────────────────────
@@ -243,7 +247,9 @@ Falls back to the CPU solver when `!CUDA.functional()`.
 function RewriteGames.turbo_homomorphisms(L, G;
                            backend = CUDA.functional() ? CUDA.CUDABackend() : nothing,
                            monic   = false,
-                           initial :: Union{Nothing, NamedTuple, Dict} = nothing)
+                           initial :: Union{Nothing, NamedTuple, Dict} = nothing,
+                           take    :: Union{Nothing, Int} = nothing,
+                           seed    :: Integer = 0)
 
     schema   = extract_schema_info(G)
     enc      = build_encoder(G, schema)
@@ -270,7 +276,14 @@ function RewriteGames.turbo_homomorphisms(L, G;
         _pin_initial!(domains, initial, csp, G, schema)
     end
 
-    if backend === nothing
+    if take !== nothing
+        # "take N": count-weighted random-descent sampling of up to N solutions.
+        # GPU path goes through gpu_turbo_sample; CPU path (and the no-GPU
+        # fallback) uses the cpu_sample_solve reference.
+        solutions = backend === nothing ?
+            cpu_sample_solve(csp, domains; take=take, rng=Xoshiro(seed)) :
+            gpu_turbo_sample(backend, csp, domains; take=take, seed=seed)
+    elseif backend === nothing
         solutions = cpu_dive_solve(csp, domains)
     else
         solutions = gpu_dive_solve(backend, csp, domains)

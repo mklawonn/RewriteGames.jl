@@ -35,6 +35,7 @@ mutable struct GPUScratchBuffers
     buf_fired         :: CuVector{Int32}        # [1] — fired flag for single-sync native pipeline
     buf_g_type_offs   :: CuVector{Int32}        # type_idx → 0-based offset in buf_to_del (length = n_obj_types)
     buf_turbo_nextsub :: CuVector{Int32}        # [1] global atomic subproblem counter for turbo_block_kernel!
+    buf_sample_ws     :: CuMatrix{UInt64}       # per-thread descent workspace for "take N" sampling (grown on demand)
 end
 
 mutable struct GPUSchedulerState
@@ -53,6 +54,8 @@ mutable struct GPUSchedulerState
     graph_data      :: Union{GPUGraphData, Nothing}        # built lazily for GNN players
     graph_dirty     :: Bool                               # set true after each rewrite
     zone_partition  :: Any                                 # Union{ZonePartition,Nothing} — defined in ZonePartition.jl
+    take            :: Any                                 # nothing | Int | (turn,box_idx)->Int : "take N" sampling cap
+    sample_seed     :: Int                                 # base PRNG seed for "take N" sampling
 end
 
 # All CSPs reachable from a compiled schedule, including those nested inside
@@ -67,7 +70,8 @@ function _all_csps(sched::CompiledGPUSched)
 end
 
 function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
-                            log_trajectory=false, compact_every=100)
+                            log_trajectory=false, compact_every=100,
+                            take=nothing, sample_seed::Int=0)
     traj = log_trajectory ? GPUTrajectoryLog(schema) : nothing
 
     scratch = if CUDA.functional()
@@ -110,6 +114,7 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
             CUDA.zeros(Int32,  1),            # buf_fired: single-sync fired flag
             CUDA.zeros(Int32,  max(length(schema.obj_types), 1)),  # buf_g_type_offs
             CUDA.zeros(Int32,  1),                                  # buf_turbo_nextsub
+            CUDA.zeros(UInt64, 1, 1),                               # buf_sample_ws (grown on demand)
         )
     else
         nothing
@@ -117,7 +122,7 @@ function GPUSchedulerState(sched, g, schema, enc, world_type, agents;
 
     GPUSchedulerState(sched, g, schema, enc, world_type, agents,
                       traj, compact_every, Xoshiro(42), Ref(1), NamedTuple[], scratch,
-                      nothing, false, nothing)
+                      nothing, false, nothing, take, sample_seed)
 end
 
 # ── GPU kernels for domain and hom-forward building ───────────────────────────
@@ -940,6 +945,17 @@ end
 
 # ── Per-box solve-and-apply ───────────────────────────────────────────────────
 
+# Resolve the "take N" sampling cap for a given box / turn.  `state.take` may be
+# `nothing` (no sampling), an `Int`, or a function `(turn, box_idx) -> Int|nothing`
+# (for annealing schedules).  Returns `nothing` to mean "present all matches".
+function _effective_take(state, b_idx::Int, turn::Int)
+    t = state.take
+    t === nothing && return nothing
+    val = t isa Function ? t(turn, b_idx) : t
+    (val === nothing || val <= 0) && return nothing
+    return Int(val)
+end
+
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               cube::AdhesiveCube,
                               gpu_cube::Union{GPUAdhesiveCube, Nothing},
@@ -972,8 +988,16 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
         KernelAbstractions.synchronize(backend)
 
-        n_sols = _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
-                                          scratch = scratch)
+        # "take N": when a sampling cap is active for this box/turn, present a
+        # count-weighted random subset of matches instead of the full set.
+        take_eff = _effective_take(state, b_idx, turn)
+        n_sols = take_eff === nothing ?
+            _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
+                                     scratch = scratch) :
+            _gpu_turbo_sample_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
+                                       take = take_eff,
+                                       seed = state.sample_seed + 1009 * turn + 9176 * b_idx,
+                                       scratch = scratch)
         n_sols == 0 && return false
 
         n_vars      = Int(csp.n_vars)
