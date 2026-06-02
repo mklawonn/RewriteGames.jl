@@ -912,13 +912,40 @@ function _gpu_filter_nac_solutions(solutions::Vector{Vector{Int32}},
     end
 end
 
+# ── Agent-loop per-instance pin ───────────────────────────────────────────────
+#
+# Inside a BOX_AGENT_LOOP the body must be solved once per agent instance, with
+# the interface element pinned to that instance — mirroring the CPU runner's
+# `homomorphisms(L, world; initial=initial_map)` (sched_runner.jl).  The GPU port
+# previously dropped this pin and re-solved the body globally every iteration
+# (O(instances²)).  `_pin_agent_var!` constrains the domain of the agent
+# object's CSP variable to the single live slot `slot`, so the body solve only
+# considers that instance's matches.  No-op when this csp has no variable of the
+# agent object's type.  `agent_pin = (agent_obj::Symbol, slot::Int)`.
+function _pin_agent_var!(d_gpu, csp::CSPProblem, agent_pin::Tuple{Symbol,Int})
+    agent_obj, slot = agent_pin
+    va = get(csp.var_offset, agent_obj, 0)
+    va == 0 && return
+    nc      = csp.n_chunks
+    ci, bi  = elem_to_chunk(slot)
+    base    = (va - 1) * nc
+    (ci < 1 || ci > nc) && return
+    # AND the variable's domain with {slot}: keep only slot's bit in chunk ci,
+    # zero every other chunk.  Reading the one chunk preserves any attr mask.
+    old_ci  = CUDA.@allowscalar d_gpu[base + ci]
+    @view(d_gpu[base + 1 : base + nc]) .= UInt64(0)
+    CUDA.@allowscalar d_gpu[base + ci] = old_ci & (UInt64(1) << bi)
+    return
+end
+
 # ── Per-box solve-and-apply ───────────────────────────────────────────────────
 
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               cube::AdhesiveCube,
                               gpu_cube::Union{GPUAdhesiveCube, Nothing},
                               schema::SchemaInfo, enc::AttributeEncoder,
-                              box, b_idx::Int, sched, state, turn::Int)::Bool
+                              box, b_idx::Int, sched, state, turn::Int;
+                              agent_pin::Union{Nothing,Tuple{Symbol,Int}}=nothing)::Bool
     scratch = state.scratch
 
     # Detect agent early: GPU players get a fast path that skips bulk download
@@ -942,6 +969,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
         d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
         _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+        agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
         KernelAbstractions.synchronize(backend)
 
         n_sols = _gpu_turbo_fill_scratch!(backend, csp, d_gpu, hf_flat, hf_offs;
@@ -984,6 +1012,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
             hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
             d_gpu            = _build_domains_gpu!(backend, csp, g, schema, scratch)
             _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
+            agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
             KernelAbstractions.synchronize(backend)
             gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
         else
@@ -993,6 +1022,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                 hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)
                 d_gpu            = _build_domains_gpu(backend, csp, g, schema)
                 _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc)
+                agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
                 KernelAbstractions.synchronize(backend)
                 gpu_dive_solve(backend, csp, d_gpu, hf_flat, hf_offs)
             else
@@ -1003,6 +1033,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                                        csp.sorted_type_bases)
                 domains   = _init_gpu_domains(fresh_csp, g, schema)
                 _apply_attr_masks_gpu!(domains, fresh_csp, g, schema, enc)
+                agent_pin !== nothing && _pin_agent_var!(domains, fresh_csp, agent_pin)
                 cpu_dive_solve(fresh_csp, domains)
             end
         end
@@ -1298,7 +1329,8 @@ function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSche
                             wire_active::Vector{Bool},
                             events::Vector,   # Vector{GpuRewriteEvent}; type defined later
                             rewrite_count::Base.RefValue{Int}, backend;
-                            event_box_idx::Int = b_idx)::Bool
+                            event_box_idx::Int = b_idx,
+                            agent_pin::Union{Nothing,Tuple{Symbol,Int}}=nothing)::Bool
     # `event_box_idx` is the index recorded in GpuRewriteEvents.  It equals
     # `b_idx` for top-level boxes; for boxes inside an agent-loop body it is the
     # parent agent-loop box's top-level index, so the event maps back into
@@ -1355,7 +1387,7 @@ function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSche
                                   schema, enc, state)
         else
             _gpu_solve_inplace!(g, csp, rule, cube, gpu_cube, schema, enc,
-                                box, b_idx, sched, state, turn)
+                                box, b_idx, sched, state, turn; agent_pin=agent_pin)
         end
         ow = Int(box.out_wires[fired ? 1 : 2])
         ow != 0 && (wire_active[ow] = true)
@@ -1403,7 +1435,19 @@ function _exec_agent_loop!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched
     k = haskey(g.n_live, agent_obj) ? g.n_live[agent_obj][] : 0
     k <= 0 && return
 
-    for _inst in 1:k
+    # Enumerate the live slot-ids of the agent object ONCE (the agent population is
+    # fixed for the loop's duration, mirroring the CPU runner's single
+    # `homomorphisms(interface, world)` call).  Each iteration pins the body solve
+    # to its instance via `_pin_agent_var!`, so the body only searches that
+    # instance's matches.  Without the pin the body re-solves globally k times
+    # (O(instances²)) AND loses the per-instance agent-box semantics.
+    n_alloc_obj = get(g.n_alloc, agent_obj, 0)
+    live_ids    = n_alloc_obj > 0 ?
+        findall(Array(@view g.active[agent_obj][1:n_alloc_obj])) : Int[]
+    isempty(live_ids) && return
+
+    for inst_id in live_ids
+        pin = (agent_obj, Int(inst_id))
         # One pass of the (acyclic, tiny) body sub-schedule: seed its init wires,
         # then sweep its boxes until an exit wire fires or nothing changes.
         sub_wires = zeros(Bool, sub.n_wires)
@@ -1416,7 +1460,8 @@ function _exec_agent_loop!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched
                 changed |= _dispatch_gpu_box!(sbox, sb_idx, sub, g, schema, enc,
                                               state, turn, sub_wires, events,
                                               rewrite_count, backend;
-                                              event_box_idx=event_box_idx)
+                                              event_box_idx=event_box_idx,
+                                              agent_pin=pin)
             end
             (any(sub_wires[w] for w in sub.exit_wires) || !changed) && break
         end
