@@ -68,3 +68,60 @@ using CUDA
         @test nparts(wf, :E) == 3            # and no duplicate loop on v1/v2
     end
 end
+
+@testset "GPU NAC enforcement (general path: 2-new-element NAC)" begin
+    # Rule: add a self-loop to a vertex that has NO outgoing edge.  The NAC adds
+    # a NEW vertex w AND a NEW edge v→w, so its forbidden structure has TWO new
+    # elements and the edge's target is itself new.  That disqualifies the
+    # single-element NacSpec fast path and routes to the general GPU-native
+    # condition solver (`_gpu_filter_conditions`, which lowers the condition
+    # pattern and runs `gpu_dive_solve` pinned to the match).
+    K     = Graph(1)
+    L     = Graph(1)
+    R     = Graph(1); add_edge!(R, 1, 1)
+    L_out = Graph(2); add_edge!(L_out, 1, 2)         # v has an out-edge to a new vertex
+    # Build the NAC morphism explicitly (maps the matched vertex to vertex 1, the
+    # source of the new edge); `homomorphism(L, L_out; monic=true)` errors here
+    # because two monic homs exist (v→1, v→2) and it expects a unique one.
+    nac_mor = ACSetTransformation(L, L_out; V=[1])
+    rule  = Rule(homomorphism(K, L; monic=true),
+                 homomorphism(K, R; monic=true);
+                 ac = [NAC(nac_mor)])
+    pra   = PlayerRuleApp(:loop_if_no_out, rule, K, :alice)
+    gs    = mk_game_sched((;), (init=:I,), Names(Dict("I" => K)), (r=pra,),
+                          quote
+                              s, f = r(init)
+                              return s, f
+                          end)
+    agents = Dict{Symbol, AbstractAgent}(:alice => GPUFunctionPlayer((_, _c, _n, _t) -> 1))
+
+    @testset "NAC blocks every match (all vertices have an out-edge)" begin
+        G = Graph(2); add_edge!(G, 1, 2); add_edge!(G, 2, 1)   # 2-cycle
+        exps = gpu_run_game_sched!(gs, G, agents; T_max = 3)
+        @test count(e -> e.player == :alice, exps) == 0
+    end
+
+    @testset "NAC satisfied → rule fires (no out-edges)" begin
+        G = Graph(2)                                            # no edges
+        exps = gpu_run_game_sched!(gs, G, agents; T_max = 1)
+        @test count(e -> e.player == :alice, exps) >= 1
+    end
+
+    @testset "general filter == CPU homsearch filter (mixed world)" begin
+        # Only v1 has an out-edge (1→2); v2, v3 do not.  The general NAC path must
+        # block v1 and leave v2/v3.  RG_NAC_DIAG makes the engine run BOTH the GPU
+        # and CPU filters per solve and count kept-set mismatches.
+        ext = Base.get_extension(RewriteGames, :GPURewritingExt)
+        ext._NAC_DIAG_CHECKS[] = 0; ext._NAC_DIAG_MISM[] = 0
+        ENV["RG_NAC_DIAG"] = "1"
+        try
+            G = Graph(3); add_edge!(G, 1, 2)
+            exps = gpu_run_game_sched!(gs, G, agents; T_max = 1)
+            @test count(e -> e.player == :alice, exps) >= 1   # fires on a valid (out-edge-free) vertex
+        finally
+            delete!(ENV, "RG_NAC_DIAG")
+        end
+        @test ext._NAC_DIAG_CHECKS[] > 0     # the general path was actually exercised
+        @test ext._NAC_DIAG_MISM[]   == 0    # GPU-native filter kept the identical set to CPU
+    end
+end

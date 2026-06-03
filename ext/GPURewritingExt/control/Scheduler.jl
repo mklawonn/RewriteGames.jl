@@ -917,6 +917,153 @@ function _gpu_filter_nac_solutions(solutions::Vector{Vector{Int32}},
     end
 end
 
+# ── General GPU-native NAC/PAC checking via the rule solver ───────────────────
+#
+# The `NacSpec` fast path above only covers a single new element pinned to L.
+# For a general application condition (e.g. sam_aim's NAC3: a fresh ThreatSystem
+# AND a ShotAt referencing it), the principled check is exactly a homomorphism
+# search of the condition's extended pattern `ac_L` into the world, with the
+# shared L-elements pinned to the candidate match — and a NAC fires iff that
+# search finds ANY extension (a PAC is satisfied iff it finds one).  We lower
+# each condition's `ac_L` to its own `CSPProblem` (`lower_pattern_to_csp`) and
+# run the SAME `gpu_dive_solve` a rule uses, so this needs no world download and
+# no host-side Catlab homsearch.  This mirrors the CPU filter's
+# `homomorphisms(ac_L, world; no_bind=true)` (non-monic, free AttrVars), so an
+# existence test is exactly equivalent.
+
+struct ConditionCSP
+    csp    :: CSPProblem
+    shared :: Vector{Tuple{Int,Int}}   # (ac_L variable, rule-L variable) for shared elements
+    is_nac :: Bool
+end
+
+# Cache lowered condition CSPs per (rule identity, n_chunks).  The pattern
+# structure is fixed; domains/hom-forward are rebuilt from live g at solve time.
+const _COND_CSP_CACHE = IdDict{Any, Dict{Int, Union{Nothing, Vector{ConditionCSP}}}}()
+
+function _build_condition_csps(rule, csp::CSPProblem, g::GPUACSet,
+                               schema::SchemaInfo, enc::AttributeEncoder)
+    inner_rule = hasproperty(rule, :rule) ? rule.rule : rule
+    hasproperty(inner_rule, :conditions)       || return ConditionCSP[]
+    isempty(inner_rule.conditions)             && return ConditionCSP[]
+    hasmethod(left, Tuple{typeof(inner_rule)}) || return nothing
+    L  = codom(left(inner_rule))
+    nc = csp.n_chunks
+    n_alloc = Dict{Symbol,Int}(o => Int(get(g.n_alloc, o, 0)) for o in schema.obj_types)
+
+    out = ConditionCSP[]
+    for cond in inner_rule.conditions
+        hasproperty(cond, :g) || return nothing
+        ac_L = try
+            raw = subpart(cond.g, 1, :vlabel); raw isa ACSet ? raw : (return nothing)
+        catch; return nothing; end
+        f = try
+            subpart(cond.g, 1, :elabel)
+        catch; return nothing; end
+        f isa Catlab.CategoricalAlgebra.ACSetTransformation || return nothing
+
+        ccsp = lower_pattern_to_csp(ac_L, schema, enc; n_chunks=nc, n_alloc=n_alloc)
+
+        shared = Tuple{Int,Int}[]
+        for o in ob(acset_schema(L))
+            (haskey(csp.var_offset, o) && haskey(ccsp.var_offset, o)) || continue
+            for i in parts(L, o)
+                rv  = csp.var_offset[o]  + (i - 1)
+                acp = f[o](i)
+                cv  = ccsp.var_offset[o] + (acp - 1)
+                push!(shared, (cv, rv))
+            end
+        end
+        push!(out, ConditionCSP(ccsp, shared, _is_nac_condition(cond)))
+    end
+    out
+end
+
+function _condition_csps_cached(rule, csp::CSPProblem, g::GPUACSet,
+                                schema::SchemaInfo, enc::AttributeEncoder)
+    bync = get!(() -> Dict{Int, Union{Nothing, Vector{ConditionCSP}}}(),
+                _COND_CSP_CACHE, rule)
+    get!(() -> _build_condition_csps(rule, csp, g, schema, enc), bync, Int(csp.n_chunks))
+end
+
+# Pin CSP variable `v` to world slot `slot` by ANDing its domain to {slot}.
+function _pin_csp_var!(d_gpu, csp::CSPProblem, v::Int, slot::Int)
+    nc     = csp.n_chunks
+    ci, bi = elem_to_chunk(slot)
+    base   = (v - 1) * nc
+    (ci < 1 || ci > nc) && return
+    old_ci = CUDA.@allowscalar d_gpu[base + ci]
+    @view(d_gpu[base + 1 : base + nc]) .= UInt64(0)
+    CUDA.@allowscalar d_gpu[base + ci] = old_ci & (UInt64(1) << bi)
+    return
+end
+
+"""
+    _gpu_filter_conditions(solutions, rule, csp, g, schema, enc) -> kept | nothing
+
+GPU-native general NAC/PAC post-filter.  Returns the kept solutions, or `nothing`
+if a condition could not be lowered (caller then uses the CPU `homomorphisms`
+fallback).  Each condition is checked by pinning its shared-L variables to the
+candidate match and running `gpu_dive_solve` on the condition pattern: NAC fires
+on ≥1 solution, PAC requires ≥1.
+"""
+function _gpu_filter_conditions(solutions::Vector{Vector{Int32}}, rule,
+                                csp::CSPProblem, g::GPUACSet,
+                                schema::SchemaInfo, enc::AttributeEncoder)
+    haskey(ENV, "RG_FORCE_CPU_NAC") && return nothing
+    conds = _condition_csps_cached(rule, csp, g, schema, enc)
+    conds === nothing && return nothing
+    isempty(conds)    && return solutions
+
+    backend = CUDA.CUDABackend()
+    nc = csp.n_chunks
+    hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)   # world-only; shared by all conds
+    bases = map(conds) do cc
+        d0 = _build_domains_gpu(backend, cc.csp, g, schema)
+        _apply_attr_masks_gpu_device!(d0, cc.csp, g, schema, enc)
+        d0
+    end
+    KernelAbstractions.synchronize(backend)
+
+    filter(solutions) do sol
+        for (cc, d0) in zip(conds, bases)
+            d = copy(d0)
+            for (cv, rv) in cc.shared
+                (rv < 1 || rv > length(sol)) && continue
+                _pin_csp_var!(d, cc.csp, cv, Int(sol[rv]))
+            end
+            exists = !isempty(gpu_dive_solve(backend, cc.csp, d, hf_flat, hf_offs))
+            (cc.is_nac && exists)   && return false   # NAC fired → reject
+            (!cc.is_nac && !exists) && return false   # PAC unsatisfied → reject
+        end
+        true
+    end
+end
+
+# Equivalence harness (env RG_NAC_DIAG): compare the ACTUAL kept solution sets
+# from the GPU-native filter vs the CPU homsearch filter, for the same
+# solve/world.  This is the true correctness check — immune to RNG/ordering: if
+# the sets ever differ, the GPU NAC is wrong; if they never differ, any
+# trajectory divergence between the two paths is only RNG consumption (the CPU
+# Catlab homsearch touches the global RNG; the GPU kernels do not), not a NAC
+# logic difference.  Counters let a test assert zero mismatches over many solves.
+const _NAC_DIAG_CHECKS = Ref(0)
+const _NAC_DIAG_MISM   = Ref(0)
+function _nac_diag(solutions::Vector{Vector{Int32}}, rule, csp::CSPProblem,
+                   g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder, world_type)
+    saved = get(ENV, "RG_FORCE_CPU_NAC", nothing)
+    saved !== nothing && delete!(ENV, "RG_FORCE_CPU_NAC")     # force the GPU path on
+    kept_gpu = _gpu_filter_conditions(copy(solutions), rule, csp, g, schema, enc)
+    saved !== nothing && (ENV["RG_FORCE_CPU_NAC"] = saved)
+    kept_gpu === nothing && return
+    kept_cpu = _filter_nac_solutions(copy(solutions), rule, csp, g, enc, schema, world_type)
+    _NAC_DIAG_CHECKS[] += 1
+    if Set(kept_gpu) != Set(kept_cpu)
+        _NAC_DIAG_MISM[] += 1
+        @warn "NAC SET mismatch" ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+    end
+end
+
 # ── Agent-loop per-instance pin ───────────────────────────────────────────────
 #
 # Inside a BOX_AGENT_LOOP the body must be solved once per agent instance, with
@@ -1063,12 +1210,22 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         end
         isempty(solutions) && return false
 
-        # ── NAC/PAC post-filter (GPU-native; CPU fallback for complex ACs) ──
+        # ── NAC/PAC post-filter ──
+        # Tier 1: fast single-new-element GPU existence check (NacSpec).
+        # Tier 2: general GPU-native check — lower each condition pattern and
+        #         run the rule solver pinned to the match (no world download).
+        # Tier 3: CPU host-side Catlab homsearch, only if a pattern won't lower.
         gpu_filtered = _gpu_filter_nac_solutions(solutions, rule, csp, g, schema)
-        solutions = gpu_filtered === nothing ?
-            _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
-                                  state.world_type) :
-            gpu_filtered
+        if gpu_filtered === nothing
+            haskey(ENV, "RG_NAC_DIAG") && _nac_diag(solutions, rule, csp, g, schema, enc, state.world_type)
+            gpu_general = _gpu_filter_conditions(solutions, rule, csp, g, schema, enc)
+            solutions = gpu_general === nothing ?
+                _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
+                                      state.world_type) :
+                gpu_general
+        else
+            solutions = gpu_filtered
+        end
         isempty(solutions) && return false
 
         if box.box_type == BOX_PLAYER_RULE

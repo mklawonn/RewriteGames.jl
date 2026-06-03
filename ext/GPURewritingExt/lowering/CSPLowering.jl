@@ -231,6 +231,89 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
                nac_count, pac_count, agent_var_map, hom_forward, nc, sorted_bases)
 end
 
+"""
+    lower_pattern_to_csp(pattern, schema, enc; n_chunks, n_alloc) -> CSPProblem
+
+Lower a *bare* pattern ACSet (e.g. a NAC/PAC extended pattern `ac_L`) into a
+`CSPProblem` for matching against the live world with the same GPU solver a rule
+uses.  Unlike `lower_rule_to_csp`, this assigns a variable to **every** pattern
+element of every type present — including elements a NAC adds beyond `L` — emits
+structural (`PROP_FUNC`) and concrete-attribute (`PROP_ATTR_EQ`) constraints,
+leaves free `AttrVar`s unconstrained, and adds **no** monic / NAC / PAC / agent
+constraints.  This mirrors the host `homomorphisms(ac_L, world; no_bind=true)`
+semantics used by the CPU application-condition filter, so an existence query on
+the result is an exact NAC/PAC check.
+
+`n_chunks` must match the rule CSP's (same world).  `n_alloc` (`g.n_alloc`) only
+seeds `domain_sizes` metadata — at solve time the real domains and hom-forward
+bitmasks are rebuilt from the live `g`, so `domain_sizes`/`hom_forward` here are
+not read on the GPU path.
+"""
+function lower_pattern_to_csp(pattern, schema::SchemaInfo, enc::AttributeEncoder;
+                              n_chunks::Int,
+                              n_alloc::Dict{Symbol,Int} = Dict{Symbol,Int}())::CSPProblem
+    # ── 1. Assign a variable to every element of every type in the pattern ─────
+    var_offset = Dict{Symbol,Int}()
+    cursor = 1
+    for o in schema.obj_types
+        n = nparts(pattern, o)
+        if n > 0
+            var_offset[o] = cursor
+            cursor += n
+        end
+    end
+    n_vars = cursor - 1
+
+    # ── 2. Domain sizes (metadata only; GPU domains come from live g) ──────────
+    domain_sizes = Int32[]
+    for o in schema.obj_types
+        n = nparts(pattern, o)
+        n > 0 || continue
+        sz = Int32(get(n_alloc, o, 0))
+        for _ in 1:n
+            push!(domain_sizes, sz)
+        end
+    end
+
+    bytecodes = TCNBytecode[]
+
+    # ── 3. PROP_FUNC: structural morphism constraints (incl. new elements) ─────
+    for (h_idx, h) in enumerate(schema.homs)
+        hom_ob = schema.hom_dom[h]
+        nparts(pattern, hom_ob) == 0 && continue
+        b_dom = get(var_offset, hom_ob, 0)
+        b_cod = get(var_offset, schema.hom_cod[h], 0)
+        (b_dom == 0 || b_cod == 0) && continue
+        for i in parts(pattern, hom_ob)
+            j = subpart(pattern, i, h)
+            j == 0 && continue
+            push!(bytecodes, tcn(PROP_FUNC; var1=b_dom+(i-1), var2=b_cod+(j-1), param1=h_idx))
+        end
+    end
+
+    # ── 4. PROP_ATTR_EQ: concrete attribute values (free AttrVars skipped) ─────
+    for (a_idx, a) in enumerate(schema.attrs)
+        owner = schema.attr_dom[a]
+        nparts(pattern, owner) == 0 && continue
+        haskey(var_offset, owner) || continue
+        for i in parts(pattern, owner)
+            raw = subpart(pattern, i, a)
+            raw isa AttrVar && continue
+            encoded = encode_value(enc, a, raw)
+            encoded == Int32(0) && continue
+            push!(bytecodes, tcn(PROP_ATTR_EQ; var1=var_offset[owner]+(i-1),
+                                 param1=a_idx, param2=encoded))
+        end
+    end
+
+    # hom_forward is rebuilt from live g at solve time; placeholder here.
+    hom_forward = [UInt64[] for _ in schema.homs]
+    sorted_bases = sort([(base, o) for (o, base) in pairs(var_offset)], by=first)
+
+    CSPProblem(Int32(n_vars), var_offset, domain_sizes, bytecodes,
+               Int32(0), Int32(0), Int32[], hom_forward, n_chunks, sorted_bases)
+end
+
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)
     # Extract the extended pattern from an AlgebraicRewriting Constraint.
     # AppCond/NAC/PAC creates a CGraph with vlabel = [codom(f), dom(f), nothing]
