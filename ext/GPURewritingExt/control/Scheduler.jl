@@ -1031,30 +1031,59 @@ function _gpu_filter_conditions(solutions::Vector{Vector{Int32}}, rule,
     conds = _condition_csps_cached(rule, csp, g, schema, enc)
     conds === nothing && return nothing
     isempty(conds)    && return solutions
+    N = length(solutions)
+    N == 0 && return solutions
 
     backend = CUDA.CUDABackend()
     nc = csp.n_chunks
     hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)   # world-only; shared by all conds
-    bases = map(conds) do cc
-        d0 = _build_domains_gpu(backend, cc.csp, g, schema)
-        _apply_attr_masks_gpu_device!(d0, cc.csp, g, schema, enc)
-        d0
-    end
-    KernelAbstractions.synchronize(backend)
 
-    filter(solutions) do sol
-        for (cc, d0) in zip(conds, bases)
-            d = copy(d0)
+    # For each condition, check all N candidates with a SINGLE host sync: queue
+    # one (stream-ordered) existence sub-solve per candidate, each writing its own
+    # count slot, then read all N counts at once.  The previous code synced once
+    # per (candidate × condition) — N×C host round-trips, the dominant full-game
+    # cost.  The per-candidate dives reuse one domain/workspace buffer; stream
+    # ordering serialises them (dive i completes before candidate i+1 overwrites
+    # the domain), so this is the same per-candidate existence test, batched.
+    keep = trues(N)
+    for cc in conds
+        ccsp    = cc.csp
+        cn_vars = Int(ccsp.n_vars)
+        n_bc    = length(ccsp.bytecodes)
+        nc_max  = _select_nc_max(nc)
+
+        d0 = _build_domains_gpu(backend, ccsp, g, schema)              # world domains
+        _apply_attr_masks_gpu_device!(d0, ccsp, g, schema, enc)        # concrete-attr masks
+        d        = KernelAbstractions.allocate(backend, UInt64, max(cn_vars * nc, 1))
+        b_gpu    = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, ccsp.bytecodes)
+        sol_gpu  = KernelAbstractions.allocate(backend, Int32, max(cn_vars, 1), 1)  # existence only
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, max(cn_vars, 1) * MAX_CHUNKS, 16)
+        cnt_all  = KernelAbstractions.allocate(backend, Int32, N)
+        KernelAbstractions.fill!(cnt_all, Int32(0))
+        kern = dive_solve_kernel!(backend)
+
+        @inbounds for i in 1:N
+            keep[i] || continue                       # already rejected by an earlier condition
+            sol = solutions[i]
+            KernelAbstractions.copyto!(backend, d, d0)
             for (cv, rv) in cc.shared
                 (rv < 1 || rv > length(sol)) && continue
-                _pin_csp_var!(d, cc.csp, cv, Int(sol[rv]))
+                _pin_var!(d, nc, cv, Int(sol[rv]))    # on-device pin (async)
             end
-            exists = !isempty(gpu_dive_solve(backend, cc.csp, d, hf_flat, hf_offs))
-            (cc.is_nac && exists)   && return false   # NAC fired → reject
-            (!cc.is_nac && !exists) && return false   # PAC unsatisfied → reject
+            # max_solutions=1: we only need existence (count>0); one solution slot.
+            kern(d, b_gpu, n_bc, cn_vars, nc, sol_gpu, view(cnt_all, i:i), 1,
+                 work_gpu, hf_flat, hf_offs, Val(nc_max); ndrange = 1)
         end
-        true
+        KernelAbstractions.synchronize(backend)        # ONE sync for all N candidates
+        e = Array(cnt_all)
+        @inbounds for i in 1:N
+            keep[i] || continue
+            exists = e[i] > 0
+            ((cc.is_nac && exists) || (!cc.is_nac && !exists)) && (keep[i] = false)
+        end
     end
+    solutions[keep]
 end
 
 # Equivalence harness (env RG_NAC_DIAG): compare the ACTUAL kept solution sets
