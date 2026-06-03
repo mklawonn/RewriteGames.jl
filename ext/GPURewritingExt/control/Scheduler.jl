@@ -1575,9 +1575,15 @@ function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSche
     elseif box.box_type == BOX_AGENT_LOOP
         # Run the body sub-schedule once per live agent instance (dynamic, no
         # cap), mirroring the CPU runner's `for am in homomorphisms(iface,world)`.
+        # Fast path: a batched-PINNED solve (build the whole-world hom_forward
+        # once per box, pin each agent like the sequential loop).  Falls back to
+        # the per-instance `_exec_agent_loop!` for bodies it can't handle.
         wire_active[in_w] = false
-        _exec_agent_loop!(box, b_idx, sched, g, schema, enc, state, turn,
-                          events, rewrite_count, backend; event_box_idx=event_box_idx)
+        handled = _exec_agent_loop_batched!(box, b_idx, sched, g, schema, enc, state,
+                                            turn, events, rewrite_count, backend;
+                                            event_box_idx=event_box_idx)
+        handled || _exec_agent_loop!(box, b_idx, sched, g, schema, enc, state, turn,
+                                     events, rewrite_count, backend; event_box_idx=event_box_idx)
         ow = Int(box.out_wires[1])
         ow != 0 && (wire_active[ow] = true)
         return true
@@ -1684,6 +1690,184 @@ function _exec_agent_loop!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched
             (any(sub_wires[w] for w in sub.exit_wires) || !changed) && break
         end
     end
+end
+
+# ── Batched-PINNED agent loop ─────────────────────────────────────────────────
+#
+# Equivalent to `_exec_agent_loop!` for the common "each agent picks one move"
+# body (a single PLAYER_RULE box wrapped in WEAKEN plumbing), but builds the
+# whole-world hom_forward + base domains ONCE per box instead of once per agent.
+# Each agent's matches come from a PINNED solve (pin the agent var to its slot,
+# exactly as the sequential loop does) → IDENTICAL witnesses.  This fixes the
+# reverted `perf/batch-agent-loop` failure mode, where a single unpinned solve
+# grouped by agent var picked different interchangeable-resource witnesses
+# (a Platform with several FuelTokens) than the per-agent pinned solves.
+#
+# Matches are enumerated against the BOX-ENTRY world (a snapshot, so all agents
+# are solved before any apply — required to collapse the per-agent host syncs).
+# The per-agent NAC re-filter then runs against the LIVE (mutating) world, so a
+# move invalidated by an earlier apply is still dropped.  This equals the
+# sequential loop exactly when one agent's applied move can't change another
+# agent's match set (within-turn independence; holds for Falcon `move`: each
+# platform consumes its own fuel and moves itself).  Slot indices are stable
+# across applies (deletes tombstone, adds extend the high-water mark; no
+# compaction inside the loop), so box-entry matches remain valid at apply time.
+#
+# Returns true if it handled the loop; false → caller falls back to
+# `_exec_agent_loop!`.  Disable via env RG_NO_BATCH_AGENT.  RG_AGENT_DIAG
+# cross-checks each agent's turbo solve against the reference `gpu_dive_solve`
+# (counters `_AGENT_DIAG_{CHECKS,MISM}`; a test asserts 0 mismatches).
+const _AGENT_DIAG_CHECKS = Ref(0)
+const _AGENT_DIAG_MISM   = Ref(0)
+function _exec_agent_loop_batched!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched,
+                                    g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder,
+                                    state::GPUSchedulerState, turn::Int, events::Vector,
+                                    rewrite_count::Base.RefValue{Int}, backend;
+                                    event_box_idx::Int = b_idx)::Bool
+    haskey(ENV, "RG_NO_BATCH_AGENT")                 && return false
+    (CUDA.functional() && state.scratch !== nothing) || return false
+    sub_idx = Int(box.sub_sched_idx)
+    (sub_idx < 1 || sub_idx > length(sched.sub_schedules)) && return false
+    sub = sched.sub_schedules[sub_idx]
+    isempty(sub.boxes) && return false
+
+    # Body must be exactly one PLAYER_RULE box surrounded by WEAKEN plumbing.
+    eff_idxs = findall(b -> b.box_type == BOX_PLAYER_RULE || b.box_type == BOX_NATIVE_RULE,
+                       sub.boxes)
+    (length(eff_idxs) == 1 &&
+     all(b -> b.box_type == BOX_PLAYER_RULE || b.box_type == BOX_NATIVE_RULE ||
+              b.box_type == BOX_WEAKEN, sub.boxes)) || return false
+    sbox = sub.boxes[eff_idxs[1]]
+    sbox.box_type == BOX_PLAYER_RULE                 || return false
+
+    agent_obj = b_idx <= length(sched.box_players) ? sched.box_players[b_idx] : :_none
+    ridx      = Int(sbox.csp_idx)
+    csp       = sub.csps[ridx]
+    rule      = sub.rules[ridx]
+    av        = get(csp.var_offset, agent_obj, 0)    # agent object's CSP variable
+    av == 0                                          && return false
+    adh_idx   = Int(sbox.adh_idx)
+    gpu_cube  = adh_idx <= length(sub.gpu_cubes) ? sub.gpu_cubes[adh_idx] : nothing
+    gpu_cube === nothing                             && return false
+    cube      = sub.adhesive_cubes[adh_idx]
+    player_sym = eff_idxs[1] <= length(sub.box_players) ? sub.box_players[eff_idxs[1]] : :_none
+    agent      = get(state.agents, player_sym, nothing)
+    agent isa AbstractGPUPlayer                      || return false
+    can_pass   = sbox.params[1] > 0f0
+    scratch    = state.scratch
+
+    n_alloc_obj = get(g.n_alloc, agent_obj, 0)
+    live_ids    = n_alloc_obj > 0 ?
+        findall(Array(@view g.active[agent_obj][1:n_alloc_obj])) : Int[]
+    isempty(live_ids) && return true
+
+    # ── Build whole-world hom_forward + base domains ONCE (box-entry snapshot) ──
+    nc               = csp.n_chunks
+    hf_flat, hf_offs = _build_hom_fwd_gpu!(backend, g, schema, nc, scratch)
+    d0               = _build_domains_gpu!(backend, csp, g, schema, scratch)
+    _apply_attr_masks_gpu_device!(d0, csp, g, schema, enc, backend, scratch)
+    KernelAbstractions.synchronize(backend)
+    base_d = copy(d0)               # standalone: per-agent pinning won't corrupt it
+    d_work = similar(base_d)
+
+    # ── Per-agent PINNED solve (identical witnesses to the sequential loop) ────
+    diag   = haskey(ENV, "RG_AGENT_DIAG")
+    groups = Dict{Int, Vector{Vector{Int32}}}()
+    for inst_id in live_ids
+        copyto!(d_work, base_d)
+        _pin_agent_var!(d_work, csp, (agent_obj, Int(inst_id)))
+        sols = gpu_turbo_solve(backend, csp, d_work, hf_flat, hf_offs; scratch = scratch)
+        groups[Int(inst_id)] = sols
+        if diag
+            # Cross-check the shared-memory turbo solve against the reference dive
+            # solver on a fresh (non-scratch) pinned domain.  Compare on the first
+            # n_vars rows only: the scratch turbo path returns buffer-width vectors
+            # (n_vars + garbage padding); only rows 1..n_vars are meaningful and
+            # only those are ever indexed downstream.
+            hf2, ho2 = _build_hom_fwd_gpu(backend, g, schema, nc)
+            d2       = _build_domains_gpu(backend, csp, g, schema)
+            _apply_attr_masks_gpu_device!(d2, csp, g, schema, enc, backend, scratch)
+            _pin_agent_var!(d2, csp, (agent_obj, Int(inst_id)))
+            KernelAbstractions.synchronize(backend)
+            ref = gpu_dive_solve(backend, csp, d2, hf2, ho2)
+            nv  = Int(csp.n_vars)
+            _AGENT_DIAG_CHECKS[] += 1
+            sset = Set(Vector{Int32}(s[1:min(nv, length(s))]) for s in sols)
+            rset = Set(Vector{Int32}(r[1:min(nv, length(r))]) for r in ref)
+            sset != rset && (_AGENT_DIAG_MISM[] += 1)
+        end
+    end
+
+    # ── Phase 1: NAC-filter every agent (box-entry world) + build its candidate
+    #    matrix (mirrors _choose_gpu_match's GPU-player branch).  No applies yet,
+    #    so all agents are filtered against the same box-entry world — consistent
+    #    with the simultaneous-move semantics and a prerequisite for batched
+    #    scoring (one forward over all agents). ──
+    sel_ids      = Int[]
+    sel_filtered = Vector{Vector{Vector{Int32}}}()
+    sel_cands    = Any[]
+    sel_nsols    = Int[]
+    for inst_id in live_ids
+        cands = get(groups, Int(inst_id), nothing)
+        (cands === nothing || isempty(cands)) && continue
+        gpu_filtered = _gpu_filter_nac_solutions(cands, rule, csp, g, schema)
+        filtered = if gpu_filtered === nothing
+            gpu_general = _gpu_filter_conditions(cands, rule, csp, g, schema, enc)
+            gpu_general === nothing ?
+                _filter_nac_solutions(cands, rule, csp, g, enc, schema, state.world_type) :
+                gpu_general
+        else
+            gpu_filtered
+        end
+        isempty(filtered) && continue
+        cands_raw = CUDA.functional() ? CuArray(reduce(hcat, filtered)) : reduce(hcat, filtered)
+        cands_ext = can_pass ?
+            hcat(cands_raw, CUDA.functional() ? CUDA.zeros(Int32, size(cands_raw, 1), 1) :
+                                                zeros(Int32, size(cands_raw, 1), 1)) :
+            cands_raw
+        push!(sel_ids, Int(inst_id))
+        push!(sel_filtered, filtered)
+        push!(sel_cands, cands_ext)
+        push!(sel_nsols, length(filtered))
+    end
+    isempty(sel_ids) && return true
+
+    # ── Phase 2: batched player scoring — ONE forward over all agents. ──
+    gd = nothing
+    if agent isa AbstractGNNPlayer
+        if state.graph_data === nothing
+            state.graph_data = build_gpu_graph(g, schema, enc; backend); state.graph_dirty = false
+        elseif state.graph_dirty
+            rebuild_gpu_graph!(state.graph_data, g, schema, enc; backend); state.graph_dirty = false
+        end
+        gd = state.graph_data
+    end
+    n_presented = Int[can_pass ? sel_nsols[a] + 1 : sel_nsols[a] for a in eachindex(sel_ids)]
+    idxs = select_action_gpu_batched(agent, g, enc, schema, sel_cands, n_presented, turn;
+                                     graph_data = gd)
+
+    # ── Phase 3: apply each agent's chosen move (box-entry slots stay valid —
+    #    deletes tombstone, adds extend the high-water mark; no compaction here). ──
+    for a in eachindex(sel_ids)
+        ns  = sel_nsols[a]
+        idx = idxs[a]
+        (can_pass && idx > ns) && continue          # player passed on this agent
+        chosen = sel_filtered[a][clamp(idx, 1, ns)]
+        n_v = length(chosen)
+        if length(scratch.buf_match) < n_v
+            scratch.buf_match = CUDA.zeros(Int32, n_v * 2)
+        end
+        d_match = @view scratch.buf_match[1:n_v]
+        copyto!(d_match, chosen)
+        fired = _gpu_apply_inplace!(g, chosen, cube, rule, schema, enc, scratch;
+                                    gpu_cube = gpu_cube, d_match = d_match)
+        if fired
+            push!(events, GpuRewriteEvent(Int32(turn), Int32(event_box_idx), true))
+            rewrite_count[] += 1
+            state.graph_dirty = true
+        end
+    end
+    return true
 end
 
 function run_gpu_schedule!(state::GPUSchedulerState;
