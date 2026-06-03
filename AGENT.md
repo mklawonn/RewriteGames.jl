@@ -215,6 +215,19 @@ even from the same initial world.
 - Safe invariants: both produce non-empty experiences; all experiences have
   valid `player`/`state` fields; both terminate within `T_max`.
 
+**The RNG-consumption corollary (cost a lot of debugging time — read this).** Even
+holding the engine *fixed*, two code paths that make *identical* match/filter
+decisions can produce **different trajectories** if they consume the global RNG
+differently. Concretely: the CPU NAC filter runs Catlab `homomorphisms` (which
+touches the RNG), the GPU-native NAC filter does not — so a stochastic-policy
+episode under `RG_FORCE_CPU_NAC` diverges from the GPU path *even though every
+kept solution set is identical*. **Do not** "equivalence-test" a filter/solver
+change by comparing episode trajectories on a fixed seed. Compare the **per-solve
+kept solution SET** instead (see `_nac_diag` / env `RG_NAC_DIAG`, which runs both
+filters on the same world and counts set mismatches). The pipeline is otherwise
+deterministic per process (same seed + same model ⇒ identical episode), so a
+trajectory diff is a real signal *only* when RNG consumption is held equal.
+
 ## GPU Kernel Compilation (JIT Tax) — Val{NM} and Val{NVNM16}
 
 ### Background
@@ -378,3 +391,55 @@ Implemented in `FalconRewriteGame/src/gnn_agent.jl` on branch `feature/gpu-share
 - `select_action_gpu` receives `graph_data::GPUGraphData`, constructs a `GNNGraph` from `live_coo`, runs GNN forward entirely on device, gathers embeddings for match variables via CUDA fancy indexing, scores solutions, returns argmax (1 Int32 to CPU).
 - **`make_falcon_gnn_agents`**: convenience constructor for Blue/Red agents.
 - Add `GraphNeuralNetworks` v1.1.0 as FalconRewriteGame dependency.
+
+---
+
+## Performance: the engine is HOST-TRANSFER bound, not compute bound (2026-06)
+
+A profiling pass on an agent-dense episode (game_E) found the GPU CSP solve
+kernels have **~0 self-time** — the cost is on the host. **Profile self-time and
+optimize what the profile shows; do not assume the GPU kernels are the
+bottleneck.** Two host costs dominated, both now fixed:
+
+### DONE: `download_acset` vectorized (bulk column writes)
+
+`download_acset` (`rewriting/GPUACSet.jl`) rebuilt the host ACSet with a
+per-element `set_subpart!` loop per live part per hom/attr — the **#1 self-time**
+(~27% of an episode), and it runs ~2×/turn (terminal check + any GNN-agent graph
+rebuild). Replaced with vectorized compaction (`cumsum` of the active-flag
+vector + `findall`) and **bulk** `set_subpart!(result, :, name, col)` writes, with
+a per-element fallback only when a hom target is missing/deleted (`0`) or an
+attribute decodes to `nothing` (preserves the original "skip" semantics exactly).
+Equivalence: `test/test_gpu_download.jl`. Result: **~2.6–3× faster game_E
+episode**; the per-call download win grows with schema richness (Falcon has many
+homs/attrs). Lesson: building a Catlab ACSet element-by-element is expensive —
+always write whole columns.
+
+### DONE: GPU-native general NAC/PAC (no host homsearch, no world download)
+
+After the download fix, the new #1 cost was the CPU application-condition filter
+(`_filter_nac_solutions`): it downloads the world and runs a host-side Catlab
+`homomorphisms` **per candidate solution**. The single-new-element `NacSpec` fast
+path couldn't cover conditions whose forbidden structure has ≥2 new elements
+(e.g. Falcon's red `sam_aim` NAC3: a fresh `ThreatSystem` + a `ShotAt` referencing
+it), so those fell to the CPU. **Fix (the principled one): check a condition with
+the SAME GPU solver a rule uses.** `lower_pattern_to_csp` (`lowering/CSPLowering.jl`)
+lowers the condition's extended pattern `ac_L` into its own `CSPProblem` — a
+variable for *every* element including the NAC's new ones, `PROP_FUNC` +
+concrete-attr `PROP_ATTR_EQ`, free `AttrVar`s left unconstrained, non-monic
+(mirrors `homomorphisms(ac_L, world; no_bind=true)`). `_gpu_filter_conditions`
+(`control/Scheduler.jl`) pins the shared-`L` variables to the candidate match
+(`_pin_csp_var!`) and runs `gpu_dive_solve`: a NAC fires on ≥1 solution, a PAC
+needs one. Wired as **tier 2** in `_gpu_solve_inplace!` between the `NacSpec` fast
+path (tier 1) and the CPU homsearch (tier 3, now only a fallback for patterns that
+fail to lower). Reuses `_build_domains_gpu`/`_build_hom_fwd_gpu` (which read the
+live `g`), so **no world download**. Validated by per-solve kept-set equivalence
+(`_nac_diag`, env `RG_NAC_DIAG`) — see the RNG-consumption note above for *why*
+set-equivalence (not trajectory) is the correct gate.
+
+### Catlab gotcha: `homomorphism(...; monic=true)` errors when non-unique
+
+`homomorphism(X, Y; monic=true)` throws `Exceeded 1: [...]` when **more than one**
+monic homomorphism exists (e.g. `Graph(1) → Graph(2)`), rather than returning the
+first. When you need a specific morphism (e.g. a NAC inclusion) and it isn't
+unique, build it explicitly: `ACSetTransformation(L, L_out; V=[...], ...)`.
