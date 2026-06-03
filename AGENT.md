@@ -443,3 +443,47 @@ set-equivalence (not trajectory) is the correct gate.
 monic homomorphism exists (e.g. `Graph(1) → Graph(2)`), rather than returning the
 first. When you need a specific morphism (e.g. a NAC inclusion) and it isn't
 unique, build it explicitly: `ACSetTransformation(L, L_out; V=[...], ...)`.
+
+---
+
+## Batched-PINNED agent loop + batched scoring (`perf/incremental-batched-agent`)
+
+`BOX_AGENT_LOOP` has a fast path `_exec_agent_loop_batched!` (`control/Scheduler.jl`)
+for the common "each agent picks one move" body (a single `PLAYER_RULE` box +
+WEAKEN plumbing; agent is a CSP variable; a GPU player).  It builds the whole-world
+`hom_forward` + base domains **once per box**, then does a **PINNED solve per
+agent** (copy base domains → `_pin_agent_var!` → `gpu_turbo_solve`), so each
+agent's matches are byte-identical to the sequential loop's pinned solve.  This
+fixes the reverted `perf/batch-agent-loop`, which solved once UNPINNED and grouped
+by the agent variable: the solver returns one witness per corner, so
+interchangeable-resource matches (a Platform with several FuelTokens) diverged from
+the per-agent enumeration.  Falls back to the per-instance `_exec_agent_loop!` for
+any body it can't handle; `RG_NO_BATCH_AGENT` forces the fallback.  Gate:
+`RG_AGENT_DIAG` (each agent's turbo solve == reference `gpu_dive_solve`, compared on
+the first `n_vars` rows — the scratch turbo path returns buffer-width vectors padded
+past `n_vars`; only rows `1..n_vars` are meaningful and ever indexed downstream).
+
+**Semantics:** the batched loop solves all agents against the BOX-ENTRY world (a
+snapshot) and applies their moves with no compaction in between (deletes tombstone,
+adds extend the high-water mark, so box-entry slots stay valid).  This is
+**simultaneous-move** semantics; the sequential loop is order-dependent (an earlier
+move can enable a later one).  They are NOT required to match — simultaneous is the
+intended behaviour.
+
+**Batched scoring** — `select_action_gpu_batched` (declared in `src/RewriteGames.jl`)
+scores ALL agents in ONE player call: the agent loop collects every agent's
+candidates, then calls it once.  The default loops `select_action_gpu` (so non-GNN
+GPU players are unchanged); a GNN player overrides it with a single batched (masked)
+transformer forward.
+
+**Perf lesson (measured on game_full, A40, T_MAX=2):** building `hom_forward` ONCE
+instead of 315×/turn gave **no wall-time win (1.00×)** — the per-agent rebuilds are
+~free (GPU-parallel), confirming the engine is host/sync-bound, not compute-bound.
+After the merged sync work (`perf/fewer-syncs`, `perf/batch-nac`), a flat profile
+shows **no single dominant cost**: stream compaction, GNN scoring, rewrite apply,
+tier-1 NAC, per-episode `compile_schedule`, and solve-result download are each
+~5–13%.  Remaining single-episode levers: batched GNN scoring (done) and a
+cross-episode `compile_schedule` cache (deferred — a training-throughput win whose
+cache must guard `enc`/world consistency).  NB: low-variance timing needs a
+deterministic red + seeded model; a random red roughly doubles game_full episode
+time (more SAM activity → more downstream work).

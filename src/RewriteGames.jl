@@ -109,6 +109,26 @@ Choose one candidate solution (1-based column index) from the GPU-resident
 function select_action_gpu end
 
 """
+    select_action_gpu_batched(player, g, enc, schema, cands_list, n_sols_list, turn;
+                              graph_data=nothing) -> Vector{Int}
+
+Batched form of [`select_action_gpu`](@ref): choose one candidate (1-based index)
+for EACH agent in a single call, given a vector of per-agent candidate matrices
+`cands_list` and their per-agent token counts `n_sols_list`, returning one index
+per agent in the same order.  The default loops `select_action_gpu` per agent, so
+every `AbstractGPUPlayer` works unchanged; players that can amortise inference
+(e.g. one transformer forward over all agents) override this.  An override MUST
+consume the RNG and return choices identically to the per-agent loop.
+"""
+function select_action_gpu_batched(player, g, enc, schema,
+                                   cands_list::AbstractVector,
+                                   n_sols_list::AbstractVector,
+                                   turn::Int; graph_data = nothing)::Vector{Int}
+    Int[select_action_gpu(player, g, enc, schema, cands_list[a], Int(n_sols_list[a]),
+                          turn; graph_data = graph_data) for a in eachindex(cands_list)]
+end
+
+"""
     build_gpu_graph(g, schema, enc; backend) -> GPUGraphData
 
 Build a GPU-resident category-of-elements graph of the world ACSet `g`.
@@ -180,7 +200,7 @@ export
     FunctionAgent,
     select_action,
     AbstractGPUPlayer, AbstractGNNPlayer, GPUFunctionPlayer,
-    select_action_gpu,
+    select_action_gpu, select_action_gpu_batched,
 
     # Engine
     Experience,
