@@ -986,16 +986,33 @@ function _condition_csps_cached(rule, csp::CSPProblem, g::GPUACSet,
     get!(() -> _build_condition_csps(rule, csp, g, schema, enc), bync, Int(csp.n_chunks))
 end
 
+# Pin a CSP variable to a single world slot, entirely on-device (no host scalar
+# access).  For the variable's `nc` domain chunks based at `base`: AND chunk `ci`
+# with the slot's bit (preserving any attribute mask there) and zero every other
+# chunk.  The previous `@allowscalar` read+write cost two host↔device syncs per
+# pin — a large fraction of the agent loop (315 pins/turn) and the NAC filter.
+@kernel function _pin_var_kernel!(d, base::Int, nc::Int, ci::Int, bit::Int)
+    c = @index(Global, Linear)
+    @inbounds if c <= nc
+        d[base + c] = (c == ci) ? (d[base + c] & (UInt64(1) << bit)) : UInt64(0)
+    end
+end
+
+# Launch the pin for variable `v` (domain based at `(v-1)*nc`).  Async: the
+# launch is stream-ordered before any subsequent solve kernel on `d_gpu`, so no
+# explicit synchronize is needed here.
+function _pin_var!(d_gpu, nc::Int, v::Int, slot::Int)
+    ci, bi = elem_to_chunk(slot)
+    (ci < 1 || ci > nc) && return
+    base    = (v - 1) * nc
+    backend = KernelAbstractions.get_backend(d_gpu)
+    _pin_var_kernel!(backend, min(nc, 256))(d_gpu, base, nc, ci, bi; ndrange = nc)
+    return
+end
+
 # Pin CSP variable `v` to world slot `slot` by ANDing its domain to {slot}.
 function _pin_csp_var!(d_gpu, csp::CSPProblem, v::Int, slot::Int)
-    nc     = csp.n_chunks
-    ci, bi = elem_to_chunk(slot)
-    base   = (v - 1) * nc
-    (ci < 1 || ci > nc) && return
-    old_ci = CUDA.@allowscalar d_gpu[base + ci]
-    @view(d_gpu[base + 1 : base + nc]) .= UInt64(0)
-    CUDA.@allowscalar d_gpu[base + ci] = old_ci & (UInt64(1) << bi)
-    return
+    _pin_var!(d_gpu, csp.n_chunks, v, slot)
 end
 
 """
@@ -1078,16 +1095,7 @@ function _pin_agent_var!(d_gpu, csp::CSPProblem, agent_pin::Tuple{Symbol,Int})
     agent_obj, slot = agent_pin
     va = get(csp.var_offset, agent_obj, 0)
     va == 0 && return
-    nc      = csp.n_chunks
-    ci, bi  = elem_to_chunk(slot)
-    base    = (va - 1) * nc
-    (ci < 1 || ci > nc) && return
-    # AND the variable's domain with {slot}: keep only slot's bit in chunk ci,
-    # zero every other chunk.  Reading the one chunk preserves any attr mask.
-    old_ci  = CUDA.@allowscalar d_gpu[base + ci]
-    @view(d_gpu[base + 1 : base + nc]) .= UInt64(0)
-    CUDA.@allowscalar d_gpu[base + ci] = old_ci & (UInt64(1) << bi)
-    return
+    _pin_var!(d_gpu, csp.n_chunks, va, slot)   # on-device pin (no host scalar sync)
 end
 
 # ── Per-box solve-and-apply ───────────────────────────────────────────────────
