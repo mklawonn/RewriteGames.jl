@@ -1719,6 +1719,10 @@ end
 # (counters `_AGENT_DIAG_{CHECKS,MISM}`; a test asserts 0 mismatches).
 const _AGENT_DIAG_CHECKS = Ref(0)
 const _AGENT_DIAG_MISM   = Ref(0)
+# RG_DECOMP_DIAG cross-checks each agent's compact codomain-decomposed solve against the
+# full-world turbo solve (back-translated to world indices); a test asserts 0 mismatches.
+const _DECOMP_DIAG_CHECKS = Ref(0)
+const _DECOMP_DIAG_MISM   = Ref(0)
 function _exec_agent_loop_batched!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSched,
                                     g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder,
                                     state::GPUSchedulerState, turn::Int, events::Vector,
@@ -1770,20 +1774,49 @@ function _exec_agent_loop_batched!(box::CompiledBox, b_idx::Int, sched::Compiled
     base_d = copy(d0)               # standalone: per-agent pinning won't corrupt it
     d_work = similar(base_d)
 
-    # ── Per-agent PINNED solve (identical witnesses to the sequential loop) ────
-    diag   = haskey(ENV, "RG_AGENT_DIAG")
+    # ── Per-agent PINNED solve ────────────────────────────────────────────────
+    # Default: compact codomain-decomposed solve (restrict to the pinned agent's
+    # morphism-neighborhood, remapped to a small local nc → fast shared-memory solve).
+    # RG_NO_DECOMP forces the full-world solve.  RG_AGENT_DIAG / RG_DECOMP_DIAG also run
+    # the full-world (and dive) solve to cross-check per-solve solution SETS.
+    diag        = haskey(ENV, "RG_AGENT_DIAG")
+    decomp_diag = haskey(ENV, "RG_DECOMP_DIAG")
+    use_decomp  = !haskey(ENV, "RG_NO_DECOMP")
+    need_world  = (!use_decomp) || diag || decomp_diag
+    base_d_host = UInt64[]
+    fk_cols_dd  = Dict{Symbol,Vector{Int32}}()
+    if use_decomp || decomp_diag                      # per-box: download base domain + FK cols once
+        base_d_host = Array(base_d)
+        for h in _decomp_relevant_homs(schema, csp)
+            nh = g.n_alloc[schema.hom_dom[h]]
+            fk_cols_dd[h] = nh > 0 ? Array(@view g.homs[h][1:nh]) : Int32[]
+        end
+    end
     groups = Dict{Int, Vector{Vector{Int32}}}()
     for inst_id in live_ids
-        copyto!(d_work, base_d)
-        _pin_agent_var!(d_work, csp, (agent_obj, Int(inst_id)))
-        sols = gpu_turbo_solve(backend, csp, d_work, hf_flat, hf_offs; scratch = scratch)
+        sols_world = Vector{Vector{Int32}}()
+        if need_world
+            copyto!(d_work, base_d)
+            _pin_agent_var!(d_work, csp, (agent_obj, Int(inst_id)))
+            sols_world = gpu_turbo_solve(backend, csp, d_work, hf_flat, hf_offs; scratch = scratch)
+        end
+        sols_decomp = Vector{Vector{Int32}}()
+        if use_decomp || decomp_diag
+            sols_decomp = decomposed_pinned_solve(backend, csp, schema, agent_obj, Int(inst_id),
+                                                  base_d_host, fk_cols_dd, g.n_alloc)
+        end
+        sols = use_decomp ? sols_decomp : sols_world
         groups[Int(inst_id)] = sols
+        if decomp_diag
+            nv2 = Int(csp.n_vars)
+            _DECOMP_DIAG_CHECKS[] += 1
+            dset = Set(Vector{Int32}(s[1:min(nv2, length(s))]) for s in sols_decomp)
+            wset = Set(Vector{Int32}(s[1:min(nv2, length(s))]) for s in sols_world)
+            dset != wset && (_DECOMP_DIAG_MISM[] += 1)
+        end
         if diag
-            # Cross-check the shared-memory turbo solve against the reference dive
-            # solver on a fresh (non-scratch) pinned domain.  Compare on the first
-            # n_vars rows only: the scratch turbo path returns buffer-width vectors
-            # (n_vars + garbage padding); only rows 1..n_vars are meaningful and
-            # only those are ever indexed downstream.
+            # Cross-check the full-world shared-memory turbo solve against the reference
+            # dive solver (n_vars rows only; the scratch turbo path pads with garbage).
             hf2, ho2 = _build_hom_fwd_gpu(backend, g, schema, nc)
             d2       = _build_domains_gpu(backend, csp, g, schema)
             _apply_attr_masks_gpu_device!(d2, csp, g, schema, enc, backend, scratch)
@@ -1792,7 +1825,7 @@ function _exec_agent_loop_batched!(box::CompiledBox, b_idx::Int, sched::Compiled
             ref = gpu_dive_solve(backend, csp, d2, hf2, ho2)
             nv  = Int(csp.n_vars)
             _AGENT_DIAG_CHECKS[] += 1
-            sset = Set(Vector{Int32}(s[1:min(nv, length(s))]) for s in sols)
+            sset = Set(Vector{Int32}(s[1:min(nv, length(s))]) for s in sols_world)
             rset = Set(Vector{Int32}(r[1:min(nv, length(r))]) for r in ref)
             sset != rset && (_AGENT_DIAG_MISM[] += 1)
         end

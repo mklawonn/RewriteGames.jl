@@ -78,6 +78,7 @@ include("lowering/ScheduleCompiler.jl")
 # ── Solver layer ──────────────────────────────────────────────────────────────
 include("solver/PropagationKernel.jl")
 include("solver/DiveSolveKernel.jl")
+include("solver/CodomainDecomp.jl")   # compact per-agent codomain decomposition
 
 # ── Rewriting layer ───────────────────────────────────────────────────────────
 include("rewriting/GPUACSet.jl")

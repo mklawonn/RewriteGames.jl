@@ -1,0 +1,196 @@
+"""
+Compact codomain decomposition for pinned-agent hom-search solves.
+
+The dominant cost in agent-dense schedules is the per-agent pinned solve, which is
+handed the WHOLE world as its codomain (global `nc` chunks).  For a pinned agent the
+match can only involve elements FK-reachable from the agent through the rule's own
+morphisms, so the real codomain is tiny.  This module restricts each solve to that
+local neighborhood, remapped to a compact `1..k` index space (small `nc_local`), so the
+shared-memory `turbo_block` solver runs O(nc_local) propagation in a small `@localmem`
+(many blocks/SM).  See plan: please-write-a-plan-cozy-wall.md.
+
+Correctness is by construction: the compact domains are taken by RESTRICTING the
+already-built world initial domain (`base_d`, which already carries type + attribute
+masks) to the neighborhood and remapping; the compact `hom_forward` is the world FK
+restricted+remapped.  The bytecodes (which reference variable/hom indices, never world
+slots) are reused unchanged.  Solutions are translated back to world indices.
+
+The gate `RG_DECOMP_DIAG` asserts the back-translated decomposed solution SET equals the
+full-world `gpu_turbo_solve` set per solve (see `_exec_agent_loop_batched!`).
+"""
+
+# Map each CSP variable index (1..n_vars) to its object type, from sorted_type_bases.
+function _decomp_var_types(csp::CSPProblem)
+    vt = Vector{Symbol}(undef, Int(csp.n_vars))
+    tb = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(tb)
+        next_base = idx < length(tb) ? tb[idx + 1][1] : Int(csp.n_vars) + 1
+        for v in base:(next_base - 1)
+            vt[v] = o
+        end
+    end
+    vt
+end
+
+# Schema homs that are constraints in this CSP: both endpoints are rule-variable types.
+function _decomp_relevant_homs(schema::SchemaInfo, csp::CSPProblem)
+    [h for h in schema.homs
+       if haskey(csp.var_offset, schema.hom_dom[h]) &&
+          haskey(csp.var_offset, schema.hom_cod[h])]
+end
+
+"""
+    _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot) -> Dict{Symbol,Vector{Int}}
+
+Fixpoint over the rule's morphism edges (both directions), seeded with the pinned agent,
+returning the sorted world slots reachable per rule-variable type.  `fk_cols[h]` is the
+host FK column of hom `h` (length n_alloc[hom_dom[h]]).  Over-approximates the exact match
+support (safe: any valid match element is reachable), bounded by the local connectivity.
+"""
+function _decomp_gather(schema::SchemaInfo, csp::CSPProblem,
+                        fk_cols::Dict{Symbol,Vector{Int32}},
+                        n_alloc::Dict{Symbol,Int},
+                        agent_obj::Symbol, agent_slot::Int)
+    rel = _decomp_relevant_homs(schema, csp)
+    sets = Dict{Symbol,Set{Int}}(o => Set{Int}() for o in keys(csp.var_offset))
+    push!(sets[agent_obj], agent_slot)
+    changed = true
+    while changed
+        changed = false
+        for h in rel
+            A = schema.hom_dom[h]; B = schema.hom_cod[h]
+            col = fk_cols[h]
+            # forward: targets of gathered sources
+            for w in sets[A]
+                (1 <= w <= length(col)) || continue
+                t = Int(col[w])
+                if t > 0 && !(t in sets[B])
+                    push!(sets[B], t); changed = true
+                end
+            end
+            # reverse: sources whose target is gathered
+            if !isempty(sets[B])
+                for w in 1:length(col)
+                    t = Int(col[w])
+                    if t > 0 && (t in sets[B]) && !(w in sets[A])
+                        push!(sets[A], w); changed = true
+                    end
+                end
+            end
+        end
+    end
+    # Agent type is pinned to exactly its slot.
+    sets[agent_obj] = Set{Int}((agent_slot,))
+    # Fallback ONLY for ISOLATED var types (in no relevant hom): they range freely, so
+    # give them the full active set.  A connected-but-empty type (e.g. a NAC element with
+    # none linked to this agent) must stay empty — that is the correct "no candidates".
+    connected = Set{Symbol}()
+    for h in rel
+        push!(connected, schema.hom_dom[h]); push!(connected, schema.hom_cod[h])
+    end
+    for (o, _) in csp.var_offset
+        if o != agent_obj && !(o in connected) && isempty(sets[o])
+            for w in 1:get(n_alloc, o, 0); push!(sets[o], w); end
+        end
+    end
+    Dict{Symbol,Vector{Int}}(o => sort!(collect(s)) for (o, s) in sets)
+end
+
+"""
+    decomposed_pinned_solve(backend, csp, schema, agent_obj, agent_slot,
+                            base_d_host, fk_cols, n_alloc) -> Vector{Vector{Int32}}
+
+Solve the pinned-agent CSP over the compact local codomain and return solutions in WORLD
+indices (length n_vars each).  `base_d_host` = host copy of the world initial domain
+(`_build_domains_gpu!` + attr masks, UNPINNED), `fk_cols` = host FK columns of relevant
+homs, both built once per box.  Pure host setup + one small upload + one solve.
+"""
+function decomposed_pinned_solve(backend, csp::CSPProblem, schema::SchemaInfo,
+                                  agent_obj::Symbol, agent_slot::Int,
+                                  base_d_host::Vector{UInt64},
+                                  fk_cols::Dict{Symbol,Vector{Int32}},
+                                  n_alloc::Dict{Symbol,Int})
+    nv      = Int(csp.n_vars)
+    nc_w    = csp.n_chunks
+    vt      = _decomp_var_types(csp)
+    nbhd    = _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot)
+
+    # Per-type local index maps.
+    l2w = Dict{Symbol,Vector{Int}}()        # local idx -> world slot
+    w2l = Dict{Symbol,Dict{Int,Int}}()      # world slot -> local idx
+    for (o, ws) in nbhd
+        l2w[o] = ws
+        w2l[o] = Dict{Int,Int}(w => i for (i, w) in enumerate(ws))
+    end
+    k_max  = maximum((length(ws) for ws in values(l2w)); init = 1)
+    nc_l   = max(cld(k_max, 64), 1)
+
+    # Compact initial domains: restrict base_d's bits to the neighborhood, remap to local.
+    dl = zeros(UInt64, nv * nc_l)
+    for v in 1:nv
+        o   = vt[v]
+        ws  = l2w[o]
+        offw = (v - 1) * nc_w
+        offl = (v - 1) * nc_l
+        for (li, w) in enumerate(ws)
+            ciw, biw = elem_to_chunk(w)
+            (ciw <= nc_w && (base_d_host[offw + ciw] & (UInt64(1) << biw)) != 0) || continue
+            cil, bil = elem_to_chunk(li)
+            dl[offl + cil] |= (UInt64(1) << bil)
+        end
+    end
+
+    # Compact hom_forward aligned to schema.homs indexing (only relevant homs filled).
+    rel = Set(_decomp_relevant_homs(schema, csp))
+    hom_offs = Int32[Int32(0)]; total = 0
+    src_cnt  = Int[]
+    for h in schema.homs
+        domo = schema.hom_dom[h]
+        n_local = haskey(l2w, domo) ? max(length(l2w[domo]), 1) : 1
+        push!(src_cnt, n_local)
+        total += n_local * nc_l
+        push!(hom_offs, Int32(total))
+    end
+    hf = zeros(UInt64, max(total, 1))
+    for (hidx, h) in enumerate(schema.homs)
+        (h in rel) || continue
+        A = schema.hom_dom[h]; B = schema.hom_cod[h]
+        col = fk_cols[h]; off = Int(hom_offs[hidx])
+        for (ls, w) in enumerate(l2w[A])
+            (1 <= w <= length(col)) || continue
+            t = Int(col[w]); t > 0 || continue
+            lt = get(w2l[B], t, 0); lt > 0 || continue
+            cil, bil = elem_to_chunk(lt)
+            hf[off + (ls - 1) * nc_l + cil] = (UInt64(1) << bil)
+        end
+    end
+
+    # Compact CSP: same vars/bytecodes, small nc; hom_forward field unused by the solver.
+    domain_sizes = Int32[Int32(length(l2w[vt[v]])) for v in 1:nv]
+    csp_l = CSPProblem(csp.n_vars, csp.var_offset, domain_sizes, csp.bytecodes,
+                       csp.nac_groups, csp.pac_groups, csp.agent_var_map,
+                       Vector{Vector{UInt64}}(), nc_l, csp.sorted_type_bases)
+
+    d_gpu   = CuArray(dl)
+    hf_gpu  = CuArray(hf)
+    ho_gpu  = CuArray(hom_offs)
+    sols_l  = gpu_turbo_solve(backend, csp_l, d_gpu, hf_gpu, ho_gpu; scratch = nothing)
+
+    # Back-translate local solution indices to world slots (rows 1..nv are meaningful).
+    out = Vector{Vector{Int32}}()
+    for s in sols_l
+        ws = Vector{Int32}(undef, nv)
+        ok = true
+        for v in 1:nv
+            li = v <= length(s) ? Int(s[v]) : 0
+            tab = l2w[vt[v]]
+            if 1 <= li <= length(tab)
+                ws[v] = Int32(tab[li])
+            else
+                ok = false; break
+            end
+        end
+        ok && push!(out, ws)
+    end
+    out
+end
