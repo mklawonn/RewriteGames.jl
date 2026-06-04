@@ -39,6 +39,17 @@ function _decomp_relevant_homs(schema::SchemaInfo, csp::CSPProblem)
           haskey(csp.var_offset, schema.hom_cod[h])]
 end
 
+# Number of L-elements (CSP variables) of each object type, from sorted_type_bases.
+function _decomp_nvars_per_type(csp::CSPProblem)
+    nv = Dict{Symbol,Int}()
+    tb = csp.sorted_type_bases
+    for (idx, (base, o)) in enumerate(tb)
+        next_base = idx < length(tb) ? tb[idx + 1][1] : Int(csp.n_vars) + 1
+        nv[o] = next_base - base
+    end
+    nv
+end
+
 """
     _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot) -> Dict{Symbol,Vector{Int}}
 
@@ -54,33 +65,56 @@ function _decomp_gather(schema::SchemaInfo, csp::CSPProblem,
     rel = _decomp_relevant_homs(schema, csp)
     sets = Dict{Symbol,Set{Int}}(o => Set{Int}() for o in keys(csp.var_offset))
     push!(sets[agent_obj], agent_slot)
+    # ── Connectivity closure (bounds the universe).  FREEZE the agent type: never grow
+    #    its set, so reverse-FK neighbors (e.g. this platform's FuelTokens) stay local to
+    #    THIS agent instead of cascading to siblings via shared hubs (squadron/zone). ──
     changed = true
     while changed
         changed = false
         for h in rel
-            A = schema.hom_dom[h]; B = schema.hom_cod[h]
-            col = fk_cols[h]
-            # forward: targets of gathered sources
-            for w in sets[A]
-                (1 <= w <= length(col)) || continue
-                t = Int(col[w])
-                if t > 0 && !(t in sets[B])
-                    push!(sets[B], t); changed = true
+            A = schema.hom_dom[h]; B = schema.hom_cod[h]; col = fk_cols[h]
+            if B != agent_obj                              # forward: targets of sources
+                for w in sets[A]
+                    (1 <= w <= length(col)) || continue
+                    t = Int(col[w])
+                    if t > 0 && !(t in sets[B]); push!(sets[B], t); changed = true; end
                 end
             end
-            # reverse: sources whose target is gathered
-            if !isempty(sets[B])
+            if A != agent_obj && !isempty(sets[B])         # reverse: sources into B
                 for w in 1:length(col)
                     t = Int(col[w])
-                    if t > 0 && (t in sets[B]) && !(w in sets[A])
-                        push!(sets[A], w); changed = true
-                    end
+                    if t > 0 && (t in sets[B]) && !(w in sets[A]); push!(sets[A], w); changed = true; end
                 end
             end
         end
     end
-    # Agent type is pinned to exactly its slot.
-    sets[agent_obj] = Set{Int}((agent_slot,))
+    # ── AC-1 narrowing of SINGLE-VARIABLE types (sound: a 1-var type's set IS that
+    #    variable's domain).  For functional constraint h:A→B, prune A to elements mapping
+    #    into B, and B to the image of A.  Multi-var types (which would conflate distinct
+    #    L-elements, e.g. ZoneA vs ZoneB) are left at the connectivity set; the solver
+    #    separates them.  Over-approx inputs ⇒ monotone-safe; the set-equiv gate confirms. ──
+    nvar = _decomp_nvars_per_type(csp)
+    is_single(o) = o != agent_obj && get(nvar, o, 0) == 1
+    changed = true
+    while changed
+        changed = false
+        for h in rel
+            A = schema.hom_dom[h]; B = schema.hom_cod[h]; col = fk_cols[h]
+            if is_single(B)
+                img = Set{Int}()
+                for w in sets[A]
+                    (1 <= w <= length(col)) || continue
+                    t = Int(col[w]); t > 0 && push!(img, t)
+                end
+                ni = intersect(sets[B], img)
+                if length(ni) != length(sets[B]); sets[B] = ni; changed = true; end
+            end
+            if is_single(A)
+                keep = Set{Int}(w for w in sets[A] if 1 <= w <= length(col) && Int(col[w]) in sets[B])
+                if length(keep) != length(sets[A]); sets[A] = keep; changed = true; end
+            end
+        end
+    end
     # Fallback ONLY for ISOLATED var types (in no relevant hom): they range freely, so
     # give them the full active set.  A connected-but-empty type (e.g. a NAC element with
     # none linked to this agent) must stay empty — that is the correct "no candidates".
