@@ -433,6 +433,253 @@ end
     end  # while
 end
 
+# ── Batched NAC/PAC existence kernel ──────────────────────────────────────────
+#
+# One work-item per candidate match.  Each work-item, entirely on-device:
+#   1. copies the shared base domain `domains_in` (d0) into its own workspace slab,
+#   2. pins its candidate's shared-L variables (slot read from `sol_mat[rv, cand]`),
+#   3. runs the same dive-and-solve DFS as `dive_solve_kernel!` but stops at the
+#      first solution (existence only) and writes `cnt_out[cand] = 1`.
+#
+# This replaces the host `for i in 1:N` loop that issued, per candidate, a
+# `copyto!` + one `_pin_var!` launch per shared var + a `ndrange=1` dive — pure
+# launch overhead.  Here a whole tile of candidates is one launch.  The DFS body
+# is a faithful copy of `dive_solve_kernel!`; the only changes are the per-candidate
+# workspace dimension `t`, the on-device pin, and existence early-exit.  Results
+# (kept-set) are therefore identical to the serial filter.
+@kernel function nac_exist_batch_kernel!(
+    domains_in   :: AbstractVector{UInt64},   # [n_vars * n_chunks]  shared base (d0)
+    bytecodes    :: AbstractVector{TCNBytecode},
+    n_bc         :: Int,
+    n_vars       :: Int,
+    n_chunks     :: Int,
+    pin_cv       :: AbstractVector{Int32},    # [n_pin]  condition variable to pin
+    pin_rv       :: AbstractVector{Int32},    # [n_pin]  rule variable supplying the slot
+    n_pin        :: Int,
+    sol_mat      :: AbstractMatrix{Int32},    # [R × Ntot]  candidate solutions
+    R            :: Int,
+    Ntot         :: Int,
+    base_cand    :: Int,                      # tile offset (0-based) into candidates
+    keep_in      :: AbstractVector{Int32},    # [Ntot]  1 = still alive, 0 = already rejected
+    cnt_out      :: AbstractVector{Int32},    # [Ntot]  existence flag (0/1)
+    workspace    :: AbstractArray{UInt64, 3}, # [n_vars*nc_max × 16 × tile]
+    hom_fwd_flat :: AbstractVector{UInt64},
+    hom_fwd_offs :: AbstractVector{Int32},
+    ::Val{NM}
+) where NM
+    nc     = n_chunks
+    nc_max = NM
+
+    stack_vars = MVector{16, Int32}(undef)
+    stack_next = MVector{16, Int32}(undef)
+    new_d      = MVector{NM, UInt64}(undef)
+    reachable  = MVector{NM, UInt64}(undef)
+
+    t    = @index(Global, Linear)             # 1..tile
+    cand = base_cand + t                      # global candidate index
+
+    @inbounds if cand <= Ntot && keep_in[cand] != Int32(0)
+        # Level-1 init: copy shared base domain into this candidate's slab.
+        for v in 1:n_vars
+            off_w = (v - 1) * nc_max
+            off_d = (v - 1) * nc
+            for c in 1:nc
+                workspace[off_w + c, 1, t] = domains_in[off_d + c]
+            end
+        end
+
+        # Pin this candidate's shared-L variables (mirror of `_pin_var!`): for an
+        # out-of-range slot (ci ∉ 1:nc) leave the variable's full domain, exactly
+        # as the serial `_pin_var!` early-returns.
+        for p in 1:n_pin
+            cv   = Int(pin_cv[p])
+            rv   = Int(pin_rv[p])
+            slot = Int(sol_mat[rv, cand])
+            ci   = ((slot - 1) >> 6) + 1
+            bi   = (slot - 1) & 63
+            if 1 <= ci <= nc
+                off1 = (cv - 1) * nc_max
+                for c in 1:nc
+                    workspace[off1 + c, 1, t] = (c == ci) ?
+                        (workspace[off1 + c, 1, t] & (UInt64(1) << bi)) : UInt64(0)
+                end
+            end
+        end
+
+        # ── Dive-and-solve DFS (existence): identical to dive_solve_kernel! ────
+        found  = false
+        level  = 1
+        state  = 1
+        safety = 0
+
+        while level > 0 && safety < 100_000_000
+            safety += 1
+
+            if state == 1
+                # ── A. Propagate (inline AC-1) ────────────────────────────────
+                ok = true
+                for _ in 1:8
+                    changed = false
+                    for i in 1:n_bc
+                        bc = bytecodes[i]
+                        v1 = Int(bc.var1); v1 == 0 && continue
+                        off1 = (v1 - 1) * nc_max
+
+                        if bc.op == PROP_FUNC && bc.var2 != 0
+                            v2    = Int(bc.var2)
+                            off2  = (v2 - 1) * nc_max
+                            h_idx = Int(bc.param1)
+                            n_homs = length(hom_fwd_offs) - 1
+                            if 1 <= h_idx <= n_homs
+                                off_h    = Int(hom_fwd_offs[h_idx])
+                                n_elems_h = (Int(hom_fwd_offs[h_idx+1]) - off_h) ÷ nc
+
+                                # Forward: build new domain for v1
+                                for c in 1:nc; new_d[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = workspace[off1 + c, level, t]
+                                    while chunk != 0
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w = off_h + (w - 1) * nc
+                                        for ci in 1:nc
+                                            (hom_fwd_flat[off_w + ci] &
+                                             workspace[off2 + ci, level, t]) != 0 &&
+                                                (new_d[c] |= lsb; break)
+                                        end
+                                    end
+                                end
+                                for c in 1:nc
+                                    old_c = workspace[off1 + c, level, t]
+                                    workspace[off1 + c, level, t] = new_d[c]
+                                    old_c != new_d[c] && (changed = true)
+                                end
+
+                                # Backward: reachable set for v2
+                                for c in 1:nc; reachable[c] = UInt64(0); end
+                                for c in 1:nc
+                                    chunk = new_d[c]
+                                    while chunk != 0
+                                        lsb = chunk & (-chunk); chunk &= ~lsb
+                                        bi  = trailing_zeros(lsb)
+                                        w   = (c - 1) * 64 + bi + 1
+                                        w > n_elems_h && continue
+                                        off_w = off_h + (w - 1) * nc
+                                        for ci in 1:nc
+                                            reachable[ci] |= hom_fwd_flat[off_w + ci]
+                                        end
+                                    end
+                                end
+                                for c in 1:nc
+                                    new_c = workspace[off2 + c, level, t] & reachable[c]
+                                    new_c != workspace[off2 + c, level, t] && (changed = true)
+                                    workspace[off2 + c, level, t] = new_c
+                                end
+                            end
+
+                        elseif bc.op == PROP_NEQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = (v2 - 1) * nc_max
+                            ones2 = 0
+                            for c in 1:nc; ones2 += count_ones(workspace[off2 + c, level, t]); end
+                            if ones2 == 1
+                                for c in 1:nc
+                                    new_c = workspace[off1 + c, level, t] &
+                                            ~workspace[off2 + c, level, t]
+                                    new_c != workspace[off1 + c, level, t] && (changed = true)
+                                    workspace[off1 + c, level, t] = new_c
+                                end
+                            end
+
+                        elseif bc.op == PROP_EQ && bc.var2 != 0
+                            v2   = Int(bc.var2)
+                            off2 = (v2 - 1) * nc_max
+                            for c in 1:nc
+                                old1 = workspace[off1 + c, level, t]
+                                new1 = old1 & workspace[off2 + c, level, t]
+                                workspace[off1 + c, level, t] = new1
+                                old1 != new1 && (changed = true)
+                            end
+                        end
+                    end
+                    changed || break
+                end
+
+                # ── B. Consistency check ─────────────────────────────────────
+                for v in 1:n_vars
+                    off_v = (v - 1) * nc_max
+                    all_zero = true
+                    for c in 1:nc
+                        workspace[off_v + c, level, t] != UInt64(0) && (all_zero = false; break)
+                    end
+                    if all_zero; ok = false; break; end
+                end
+                if !ok; level -= 1; state = 2; continue; end
+
+                # ── C. Find first unbound variable ───────────────────────────
+                unbound = 0
+                for v in 1:n_vars
+                    off_v = (v - 1) * nc_max
+                    ones  = 0
+                    for c in 1:nc; ones += count_ones(workspace[off_v + c, level, t]); end
+                    if ones > 1; unbound = v; break; end
+                end
+
+                if unbound == 0
+                    found = true            # existence: first solution suffices
+                    break
+                end
+
+                # ── D. Set up branching ──────────────────────────────────────
+                stack_vars[level] = Int32(unbound)
+                stack_next[level] = Int32(1)
+                state = 2
+            end  # state == 1
+
+            if state == 2
+                v   = Int(stack_vars[level])
+                off = (v - 1) * nc_max
+                ne  = Int(stack_next[level])
+                found_next = false
+
+                while ne <= nc * 64
+                    c_ne  = (ne - 1) >> 6 + 1
+                    bi_ne = (ne - 1) & 63
+                    if (workspace[off + c_ne, level, t] & (UInt64(1) << bi_ne)) != 0
+                        if level < 16
+                            stack_next[level] = Int32(ne + 1)
+                            next_lv = level + 1
+                            for vi in 1:n_vars
+                                ofi = (vi - 1) * nc_max
+                                for c in 1:nc
+                                    workspace[ofi + c, next_lv, t] = workspace[ofi + c, level, t]
+                                end
+                            end
+                            for c in 1:nc; workspace[off + c, next_lv, t] = UInt64(0); end
+                            workspace[off + c_ne, next_lv, t] = UInt64(1) << bi_ne
+                            level = next_lv
+                            state = 1
+                            found_next = true
+                            break
+                        end
+                    end
+                    ne += 1
+                end
+
+                if !found_next
+                    stack_next[level] = Int32(1)
+                    level -= 1
+                    state = 2
+                end
+            end  # state == 2
+        end  # while
+
+        cnt_out[cand] = found ? Int32(1) : Int32(0)
+    end
+end
+
 """
     gpu_dive_solve(backend, csp, d_gpu, hf_flat_gpu, hf_offs_gpu; max_solutions, scratch)
 

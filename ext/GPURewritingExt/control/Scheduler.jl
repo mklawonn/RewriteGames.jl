@@ -1015,16 +1015,161 @@ function _pin_csp_var!(d_gpu, csp::CSPProblem, v::Int, slot::Int)
     _pin_var!(d_gpu, csp.n_chunks, v, slot)
 end
 
+# Per-candidate workspace is `rows*16` UInt64 words; cap the tile so the batched
+# filter's extra GPU memory stays bounded (~64 MB) regardless of candidate count.
+# Typical N fits in a single tile (one kernel launch per condition).
+function _nac_batch_tile(rows::Int, N::Int)
+    budget = 8_000_000                       # UInt64 words ≈ 64 MB
+    per    = max(rows * 16, 1)
+    cap    = max(div(budget, per), 1)
+    return min(N, cap)
+end
+
 """
     _gpu_filter_conditions(solutions, rule, csp, g, schema, enc) -> kept | nothing
 
 GPU-native general NAC/PAC post-filter.  Returns the kept solutions, or `nothing`
 if a condition could not be lowered (caller then uses the CPU `homomorphisms`
 fallback).  Each condition is checked by pinning its shared-L variables to the
-candidate match and running `gpu_dive_solve` on the condition pattern: NAC fires
+candidate match and running an existence dive on the condition pattern: NAC fires
 on ≥1 solution, PAC requires ≥1.
+
+Two implementations with identical kept-sets:
+  * `_gpu_filter_conditions_batched` — one batched kernel launch per *tile* of
+    candidates per condition, pinning + diving every candidate on-device.
+    O(tiles) launches per condition instead of the serial path's
+    O(N × shared_vars + N) per-candidate `_pin_var!`/dive launches.  Wins only
+    once the candidate count `N` is large enough to amortise its per-solve
+    upload/alloc overhead.
+  * `_gpu_filter_conditions_serial` — the original per-candidate host loop.
+
+Dispatch (default): batched when `N ≥ RG_NAC_BATCH_MIN` (the launch storm only
+exists at large N; small solves keep the lighter serial path so small games do
+not regress), serial otherwise.  Overrides: `RG_NO_BATCH_NAC` forces serial
+everywhere (kill-switch / A-B reference); `RG_FORCE_BATCH_NAC` forces batched
+at every N (so the batched kernel can be exercised on small worlds in tests).
 """
+# Cached so the dispatcher does no per-solve ENV string-parse on the hot path.
+# Read once; override at process start via env (tests set it before any solve).
+const _NAC_BATCH_MIN = Ref(-1)
+function _nac_batch_min()
+    m = _NAC_BATCH_MIN[]
+    m >= 0 && return m
+    m = parse(Int, get(ENV, "RG_NAC_BATCH_MIN", "32"))
+    _NAC_BATCH_MIN[] = m
+    return m
+end
+
 function _gpu_filter_conditions(solutions::Vector{Vector{Int32}}, rule,
+                                csp::CSPProblem, g::GPUACSet,
+                                schema::SchemaInfo, enc::AttributeEncoder)
+    haskey(ENV, "RG_NO_BATCH_NAC") &&
+        return _gpu_filter_conditions_serial(solutions, rule, csp, g, schema, enc)
+    if !haskey(ENV, "RG_FORCE_BATCH_NAC") && length(solutions) < _nac_batch_min()
+        return _gpu_filter_conditions_serial(solutions, rule, csp, g, schema, enc)
+    end
+    return _gpu_filter_conditions_batched(solutions, rule, csp, g, schema, enc)
+end
+
+# Batched candidate filter: see `_gpu_filter_conditions` docstring.  For each
+# condition, all N candidates are checked by `nac_exist_batch_kernel!` — one
+# work-item per candidate that copies the shared base domain `d0` into its own
+# workspace slab, pins its candidate's shared-L variables on-device, and runs an
+# existence dive.  Candidates are tiled to bound workspace memory; tiles on one
+# stream are serialised so they safely reuse the `work` buffer.
+function _gpu_filter_conditions_batched(solutions::Vector{Vector{Int32}}, rule,
+                                csp::CSPProblem, g::GPUACSet,
+                                schema::SchemaInfo, enc::AttributeEncoder)
+    haskey(ENV, "RG_FORCE_CPU_NAC") && return nothing
+    conds = _condition_csps_cached(rule, csp, g, schema, enc)
+    conds === nothing && return nothing
+    isempty(conds)    && return solutions
+    N = length(solutions)
+    N == 0 && return solutions
+
+    # A uniform solution length lets us pin from a dense [R × N] device matrix and
+    # filter shared pairs once per condition — equivalent to the serial path's
+    # per-candidate `rv > length(sol)` guard.  Differing lengths shouldn't occur
+    # (all solutions span the rule's vars); fall back to serial if they do.
+    R = length(solutions[1])
+    all(s -> length(s) == R, solutions) ||
+        return _gpu_filter_conditions_serial(solutions, rule, csp, g, schema, enc)
+
+    backend = CUDA.CUDABackend()
+    nc      = csp.n_chunks
+    nc_max  = _select_nc_max(nc)
+    hf_flat, hf_offs = _build_hom_fwd_gpu(backend, g, schema, nc)   # world-only; shared by all conds
+
+    # Upload all candidate solutions ONCE (not per candidate, as the serial path
+    # implicitly did by reading `solutions[i]` each iteration).
+    sol_host = Matrix{Int32}(undef, max(R, 1), N)
+    @inbounds for i in 1:N
+        s = solutions[i]
+        for r in 1:R; sol_host[r, i] = s[r]; end
+    end
+    sol_gpu = KernelAbstractions.allocate(backend, Int32, max(R, 1), N)
+    KernelAbstractions.copyto!(backend, sol_gpu, sol_host)
+
+    keep     = trues(N)
+    keep_i32 = Vector{Int32}(undef, N)
+    keep_gpu = KernelAbstractions.allocate(backend, Int32, N)
+    cnt_gpu  = KernelAbstractions.allocate(backend, Int32, N)
+    kern     = nac_exist_batch_kernel!(backend)
+
+    for cc in conds
+        ccsp    = cc.csp
+        cn_vars = Int(ccsp.n_vars)
+        n_bc    = length(ccsp.bytecodes)
+
+        d0 = _build_domains_gpu(backend, ccsp, g, schema)              # world domains
+        _apply_attr_masks_gpu_device!(d0, ccsp, g, schema, enc)        # concrete-attr masks
+        b_gpu = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
+        n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, ccsp.bytecodes)
+
+        # Shared-L pins for this condition (drop invalid rule vars once, up front).
+        cv_host = Int32[]; rv_host = Int32[]
+        for (cv, rv) in cc.shared
+            (rv < 1 || rv > R) && continue
+            push!(cv_host, Int32(cv)); push!(rv_host, Int32(rv))
+        end
+        n_pin  = length(cv_host)
+        cv_gpu = KernelAbstractions.allocate(backend, Int32, max(n_pin, 1))
+        rv_gpu = KernelAbstractions.allocate(backend, Int32, max(n_pin, 1))
+        n_pin > 0 && KernelAbstractions.copyto!(backend, cv_gpu, cv_host)
+        n_pin > 0 && KernelAbstractions.copyto!(backend, rv_gpu, rv_host)
+
+        # Upload the current keep mask (lets the kernel skip already-rejected
+        # candidates, matching the serial `keep[i] || continue`); reset counts.
+        @inbounds for i in 1:N; keep_i32[i] = keep[i] ? Int32(1) : Int32(0); end
+        KernelAbstractions.copyto!(backend, keep_gpu, keep_i32)
+        KernelAbstractions.fill!(cnt_gpu, Int32(0))
+
+        rows = max(cn_vars * nc_max, 1)
+        tile = _nac_batch_tile(rows, N)
+        work = KernelAbstractions.allocate(backend, UInt64, rows, 16, tile)
+
+        base = 0
+        while base < N
+            this = min(tile, N - base)
+            kern(d0, b_gpu, n_bc, cn_vars, nc,
+                 cv_gpu, rv_gpu, n_pin, sol_gpu, R, N, base,
+                 keep_gpu, cnt_gpu, work, hf_flat, hf_offs, Val(nc_max);
+                 ndrange = this)
+            base += this
+        end
+        KernelAbstractions.synchronize(backend)        # ONE sync per condition
+
+        e = Array(cnt_gpu)
+        @inbounds for i in 1:N
+            keep[i] || continue
+            exists = e[i] > 0
+            ((cc.is_nac && exists) || (!cc.is_nac && !exists)) && (keep[i] = false)
+        end
+    end
+    solutions[keep]
+end
+
+function _gpu_filter_conditions_serial(solutions::Vector{Vector{Int32}}, rule,
                                 csp::CSPProblem, g::GPUACSet,
                                 schema::SchemaInfo, enc::AttributeEncoder)
     haskey(ENV, "RG_FORCE_CPU_NAC") && return nothing
