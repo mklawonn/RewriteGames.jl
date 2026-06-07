@@ -59,6 +59,7 @@ include("engine/match_cache.jl")
 # ── Wiring-diagram schedule layer ────────────────────────────────────────────
 # (player_rule_app.jl defines _parse_body used by sched_runner.jl)
 include("schedule/player_rule_app.jl")
+include("schedule/attr_thresholds.jl")
 include("engine/sched_runner.jl")
 
 # ── Serialization ─────────────────────────────────────────────────────────
@@ -209,6 +210,11 @@ export
     PlayerRuleApp, GameSched,
     mk_game_sched, player_migrate,
     merge_wires, coin,
+
+    # Attribute threshold constraints (ordinal CSP pre-filters)
+    AttrThreshold, set_attr_thresholds!, get_attr_thresholds,
+    # Affine attribute deltas (post-rewrite ordinal mutation)
+    AttrDelta, set_attr_deltas!, get_attr_deltas,
     view_sched,
     run_game_sched!,
     _collect_rule_r_acssets,

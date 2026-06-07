@@ -46,7 +46,7 @@ end
 
 function _register_attr!(enc::AttributeEncoder, attr::Symbol, vals::Vector)
     isempty(vals) && return
-    concrete = filter(v -> !(v isa AttrVar), vals)
+    concrete = filter(v -> !(v isa AttrVar) && v !== nothing, vals)
     isempty(concrete) && return
 
     if first(concrete) isa Real
@@ -68,7 +68,7 @@ Encode a single attribute value.  Returns `Int32(0)` for `AttrVar`s or
 values not yet seen (treated as wildcards during matching).
 """
 function encode_value(enc::AttributeEncoder, attr::Symbol, v)::Int32
-    v isa AttrVar && return Int32(0)
+    (v isa AttrVar || v === nothing) && return Int32(0)   # unset / free var ⇒ wildcard
     if haskey(enc.custom, attr)
         return enc.custom[attr].first(v)
     end

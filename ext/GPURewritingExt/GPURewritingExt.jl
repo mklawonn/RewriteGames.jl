@@ -250,6 +250,7 @@ function RewriteGames.turbo_homomorphisms(L, G;
                            monic   = false,
                            initial :: Union{Nothing, NamedTuple, Dict} = nothing,
                            take    :: Union{Nothing, Int} = nothing,
+                           thresholds = nothing,
                            seed    :: Integer = 0)
 
     schema   = extract_schema_info(G)
@@ -260,6 +261,7 @@ function RewriteGames.turbo_homomorphisms(L, G;
 
     # Build a mock rule wrapping L so lower_rule_to_csp can access left(rule)
     mock_rule = _make_identity_rule(L, monic)
+    thresholds === nothing || RewriteGames.set_attr_thresholds!(mock_rule, thresholds)
     csp = lower_rule_to_csp(mock_rule, G, schema, enc; n_chunks=n_chunks)
 
     g_offset = Dict{Symbol,Int}()
@@ -341,7 +343,8 @@ end
 function _apply_attr_masks_world!(domains::Vector{UInt64}, csp, G, schema, enc)
     nc = csp.n_chunks
     for bc in csp.bytecodes
-        bc.op != PROP_ATTR_EQ && continue
+        cmp = _attr_cmp_code(bc.op)
+        cmp < 0 && continue
         v     = Int(bc.var1)
         a_idx = Int(bc.param1)
         req   = Int32(bc.param2)
@@ -351,7 +354,7 @@ function _apply_attr_masks_world!(domains::Vector{UInt64}, csp, G, schema, enc)
         mask  = zeros(UInt64, nc)
         for i in 1:min(n, nc * 64)
             raw = subpart(G, i, a)
-            encode_value(enc, a, raw) == req || continue
+            _attr_hit(encode_value(enc, a, raw), req, cmp) || continue
             ci, bi = elem_to_chunk(i)
             ci <= nc && (mask[ci] |= UInt64(1) << bi)
         end

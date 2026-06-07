@@ -305,16 +305,31 @@ end
 
 # ── GPU attribute-mask kernels (B2) ──────────────────────────────────────────
 
-# Pass 1: fill staging mask with bits for elements whose attribute == req.
+# Comparison mode for attribute domain masks:
+#   0 = EQ  (attr == req)
+#   1 = LEQ (1 <= attr <= req)   — the `>=1` excludes the 0 = unset/wildcard code
+#   2 = GEQ (attr >= req)
+@inline _attr_cmp_code(op::UInt16) =
+    op == PROP_ATTR_EQ  ? Int32(0) :
+    op == PROP_ATTR_LEQ ? Int32(1) :
+    op == PROP_ATTR_GEQ ? Int32(2) : Int32(-1)
+
+@inline _attr_hit(a::Int32, req::Int32, cmp::Int32) =
+    cmp == Int32(0) ? a == req :
+    cmp == Int32(1) ? (a >= Int32(1)) & (a <= req) :
+    cmp == Int32(2) ? a >= req : false
+
+# Pass 1: fill staging mask with bits for elements whose attribute satisfies cmp.
 @kernel function _attr_mask_fill_kernel!(
     mask   :: AbstractVector{UInt64},
     attrs  :: AbstractVector{Int32},
     active :: AbstractVector{Bool},
     req    :: Int32,
     nc     :: Int32,
+    cmp    :: Int32,
 )
     i = @index(Global, Linear)
-    if i <= length(active) && active[i] && attrs[i] == req
+    if i <= length(active) && active[i] && _attr_hit(attrs[i], req, cmp)
         ci, bi = elem_to_chunk(i)
         if ci <= Int(nc)
             Atomix.@atomic mask[ci] |= UInt64(1) << bi
@@ -348,7 +363,8 @@ function _apply_attr_masks_gpu_device!(d_gpu, csp::CSPProblem,
                                         scratch::Union{GPUScratchBuffers, Nothing} = nothing)
     nc = csp.n_chunks
     for bc in csp.bytecodes
-        bc.op != PROP_ATTR_EQ && continue
+        cmp = _attr_cmp_code(bc.op)
+        cmp < 0 && continue                       # not an attribute mask op
         v     = Int(bc.var1)
         a_idx = Int(bc.param1)
         req   = Int32(bc.param2)
@@ -363,7 +379,7 @@ function _apply_attr_masks_gpu_device!(d_gpu, csp::CSPProblem,
             KernelAbstractions.fill!(scratch.buf_attr_mask, UInt64(0))
             _attr_mask_fill_kernel!(backend, 256)(
                 scratch.buf_attr_mask, g.attrs[a], g.active[owner],
-                req, Int32(nc); ndrange = n_elems)
+                req, Int32(nc), cmp; ndrange = n_elems)
             _attr_mask_and_kernel!(backend, 256)(
                 d_gpu, scratch.buf_attr_mask, off, Int32(nc); ndrange = nc)
         else
@@ -372,7 +388,7 @@ function _apply_attr_masks_gpu_device!(d_gpu, csp::CSPProblem,
             n_capped = min(n_elems, nc * 64)
             mask     = zeros(UInt64, nc)
             for i in 1:n_capped
-                h_attrs[i] == req || continue
+                _attr_hit(h_attrs[i], req, cmp) || continue
                 ci, bi = elem_to_chunk(i)
                 ci <= nc && (mask[ci] |= UInt64(1) << bi)
             end
@@ -413,12 +429,13 @@ function _init_gpu_domains(csp::CSPProblem, g::GPUACSet, schema::SchemaInfo)
     domains
 end
 
-"""Apply PROP_ATTR_EQ domain masks (CPU path, used for non-CUDA backend)."""
+"""Apply PROP_ATTR_EQ/LEQ/GEQ domain masks (CPU path, used for non-CUDA backend)."""
 function _apply_attr_masks_gpu!(domains::Vector{UInt64}, csp::CSPProblem,
                                  g::GPUACSet, schema::SchemaInfo, enc::AttributeEncoder)
     nc = csp.n_chunks
     for bc in csp.bytecodes
-        bc.op != PROP_ATTR_EQ && continue
+        cmp = _attr_cmp_code(bc.op)
+        cmp < 0 && continue
         v     = Int(bc.var1)
         a_idx = Int(bc.param1)
         req   = Int32(bc.param2)
@@ -428,7 +445,7 @@ function _apply_attr_masks_gpu!(domains::Vector{UInt64}, csp::CSPProblem,
         n_elems = min(g.n_alloc[owner], nc * 64)
         mask    = zeros(UInt64, nc)
         for i in 1:n_elems
-            h_attrs[i] == req || continue
+            _attr_hit(h_attrs[i], req, cmp) || continue
             ci, bi = elem_to_chunk(i)
             ci <= nc && (mask[ci] |= UInt64(1) << bi)
         end
@@ -1432,9 +1449,42 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         end
         _gpu_apply_inplace!(g, chosen_sol, cube, rule, schema, enc, scratch;
                             gpu_cube = gpu_cube, d_match = d_match)
+        # Phase-2 affine attribute deltas: attr := matched_attr + delta on the
+        # matched (preserved) element, applied after the structural rewrite.
+        _apply_attr_deltas!(g, chosen_sol, csp, schema,
+                            RewriteGames.get_attr_deltas(rule, _inner_rule_of(rule)))
         state.graph_dirty = true
     end
     true
+end
+
+# Resolve the inner AlgebraicRewriting rule from a possibly-wrapped box rule, so
+# the threshold/delta registry can be keyed on either object.
+_inner_rule_of(rule) = hasproperty(rule, :rule) ? rule.rule : rule
+
+# Apply post-rewrite affine attribute deltas (Phase 2).  `chosen_sol[v]` is the
+# world element assigned to L-variable v; for a delta on element `idx` of type
+# `ob`, that variable is `var_offset[ob] + idx - 1`.  Preserved elements keep
+# their world IDs across the in-place rewrite, so the column index is stable.
+function _apply_attr_deltas!(g::GPUACSet, chosen_sol::Vector{Int32}, csp::CSPProblem,
+                             schema::SchemaInfo, deltas)
+    isempty(deltas) && return
+    for d in deltas
+        base = get(csp.var_offset, d.ob, 0)
+        base == 0 && continue
+        v = base + (d.idx - 1)
+        (v < 1 || v > length(chosen_sol)) && continue
+        w = Int(chosen_sol[v])
+        w == 0 && continue
+        haskey(g.attrs, d.attr) || continue
+        col = g.attrs[d.attr]
+        w <= length(col) || continue
+        if CUDA.functional() && col isa CuArray
+            CUDA.@allowscalar col[w] = max(Int32(1), col[w] + Int32(d.delta))
+        else
+            col[w] = max(Int32(1), col[w] + Int32(d.delta))
+        end
+    end
 end
 
 # ── Single-sync native-rule pipeline ─────────────────────────────────────────
@@ -2039,6 +2089,9 @@ function _exec_agent_loop_batched!(box::CompiledBox, b_idx::Int, sched::Compiled
         copyto!(d_match, chosen)
         fired = _gpu_apply_inplace!(g, chosen, cube, rule, schema, enc, scratch;
                                     gpu_cube = gpu_cube, d_match = d_match)
+        # Phase-2 affine attribute deltas (agent-loop body, batched path).
+        _apply_attr_deltas!(g, chosen, csp, schema,
+                            RewriteGames.get_attr_deltas(rule, _inner_rule_of(rule)))
         if fired
             push!(events, GpuRewriteEvent(Int32(turn), Int32(event_box_idx), true))
             rewrite_count[] += 1

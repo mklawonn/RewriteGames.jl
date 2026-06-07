@@ -298,7 +298,8 @@ function _apply_attr_masks_mc!(domains::Vector{UInt64}, csp::CSPProblem,
                                 g::GPUACSet, schema::SchemaInfo,
                                 enc::AttributeEncoder, nc::Int)
     for bc in csp.bytecodes
-        bc.op != PROP_ATTR_EQ && continue
+        cmp = _attr_cmp_code(bc.op)
+        cmp < 0 && continue
         v     = Int(bc.var1)
         a_idx = Int(bc.param1)
         req   = Int32(bc.param2)
@@ -310,7 +311,7 @@ function _apply_attr_masks_mc!(domains::Vector{UInt64}, csp::CSPProblem,
         n_elems  = min(g.n_alloc[owner], nc * 64)
         for i in 1:n_elems
             (i <= length(host_act) && host_act[i] &&
-             i <= length(host_av)  && host_av[i] == req) || continue
+             i <= length(host_av)  && _attr_hit(host_av[i], req, cmp)) || continue
             ci, bi = elem_to_chunk(i)
             ci <= nc && (mask[ci] |= UInt64(1) << bi)
         end

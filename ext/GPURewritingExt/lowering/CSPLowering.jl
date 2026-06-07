@@ -125,7 +125,7 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
         nparts(L, owner) == 0 && continue
         for i in parts(L, owner)
             raw = subpart(L, i, a)
-            raw isa AttrVar && continue          # free attribute variable — skip
+            (raw isa AttrVar || raw === nothing) && continue   # free var / unset — wildcard
             encoded = encode_value(enc, a, raw)
             encoded == Int32(0) && continue      # unknown value — skip
             haskey(var_offset, owner) || continue
@@ -133,6 +133,21 @@ function lower_rule_to_csp(rule, world, schema::SchemaInfo,
             push!(bytecodes, tcn(PROP_ATTR_EQ; var1=v_i,
                                  param1=a_idx, param2=encoded))
         end
+    end
+
+    # ── 5b. Ordinal thresholds: PROP_ATTR_LEQ / PROP_ATTR_GEQ ──────────────────
+    # Registered out-of-band via set_attr_thresholds!(rule, ...) since the ACSet
+    # pattern L can only express equality.  Applied as domain pre-filters, exactly
+    # like PROP_ATTR_EQ (no dive-kernel cost).
+    for t in RewriteGames.get_attr_thresholds(rule, inner_rule)
+        haskey(var_offset, t.ob) || continue
+        t.idx >= 1 && t.idx <= nparts(L, t.ob) || continue
+        a_idx = findfirst(==(t.attr), schema.attrs)
+        a_idx === nothing && continue
+        op, param = _lower_threshold(enc, t.attr, t.val, t.op)
+        op == UInt16(0) && continue
+        v_i = var_offset[t.ob] + (t.idx - 1)
+        push!(bytecodes, tcn(op; var1=v_i, param1=Int(a_idx), param2=param))
     end
 
     # ── 6. PROP_NEQ: monic constraints (all distinct within each type) ─────────
@@ -298,7 +313,7 @@ function lower_pattern_to_csp(pattern, schema::SchemaInfo, enc::AttributeEncoder
         haskey(var_offset, owner) || continue
         for i in parts(pattern, owner)
             raw = subpart(pattern, i, a)
-            raw isa AttrVar && continue
+            (raw isa AttrVar || raw === nothing) && continue
             encoded = encode_value(enc, a, raw)
             encoded == Int32(0) && continue
             push!(bytecodes, tcn(PROP_ATTR_EQ; var1=var_offset[owner]+(i-1),
@@ -312,6 +327,30 @@ function lower_pattern_to_csp(pattern, schema::SchemaInfo, enc::AttributeEncoder
 
     CSPProblem(Int32(n_vars), var_offset, domain_sizes, bytecodes,
                Int32(0), Int32(0), Int32[], hom_forward, n_chunks, sorted_bases)
+end
+
+# Map a raw threshold (attr `op` val) to a (bytecode op, encoded param) pair.
+# Custom (binned/identity) encoders use their exact encode fn; auto-ordinal
+# encoders use searchsorted on the live sorted value list so the boundary rank is
+# well-defined even when `val` is not itself a present value.  Returns
+# (UInt16(0), 0) for nominal/unknown attributes (no constraint emitted).
+function _lower_threshold(enc::AttributeEncoder, attr::Symbol, v, op::Symbol)::Tuple{UInt16,Int32}
+    if haskey(enc.custom, attr)
+        e = enc.custom[attr].first(v)
+        op === :leq && return (PROP_ATTR_LEQ, e)
+        op === :lt  && return (PROP_ATTR_LEQ, e - Int32(1))
+        op === :geq && return (PROP_ATTR_GEQ, e)
+        op === :gt  && return (PROP_ATTR_GEQ, e + Int32(1))
+        return (UInt16(0), Int32(0))
+    elseif haskey(enc.ordinal, attr)
+        vals = enc.ordinal[attr]
+        op === :leq && return (PROP_ATTR_LEQ, Int32(searchsortedlast(vals, v)))
+        op === :lt  && return (PROP_ATTR_LEQ, Int32(searchsortedfirst(vals, v) - 1))
+        op === :geq && return (PROP_ATTR_GEQ, Int32(searchsortedfirst(vals, v)))
+        op === :gt  && return (PROP_ATTR_GEQ, Int32(searchsortedlast(vals, v) + 1))
+        return (UInt16(0), Int32(0))
+    end
+    (UInt16(0), Int32(0))   # nominal / unknown attribute → no GPU threshold
 end
 
 function _lower_ac!(bytecodes, cond, schema, var_offset, enc, op_code, group_id)

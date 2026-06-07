@@ -58,9 +58,15 @@ const PROP_ATTR_EQ = UInt16(0x0004)
 
 """
 `PROP_ATTR_LEQ`: attribute inequality constraint (ordinal only).
-  var1's attribute column `param1` must be ≤ `param2`.
+  var1's attribute column `param1` must be ≤ `param2` (and ≥ 1, i.e. set).
 """
 const PROP_ATTR_LEQ = UInt16(0x0005)
+
+"""
+`PROP_ATTR_GEQ`: attribute inequality constraint (ordinal only).
+  var1's attribute column `param1` must be ≥ `param2`.
+"""
+const PROP_ATTR_GEQ = UInt16(0x0006)
 
 """
 `NAC_REIF`: reified NAC sub-constraint.
