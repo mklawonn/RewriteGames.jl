@@ -1462,6 +1462,128 @@ end
     nothing
 end
 
+# ── Intra-bytecode parallel PROP_FUNC (opt-in via RG_INTRA_PROP) ──────────────
+#
+# For game_full the turbo_block solves have FEW bytecodes (2-9) but HUGE domains
+# (nc=45), so the win is parallelizing WITHIN a PROP_FUNC over its nc domain
+# chunks across the 32 lanes (lane owns chunk c ⇒ race-free narrowing, no atomics)
+# rather than across bytecodes (lever #1, too little width here).  Three sync-free
+# phases (caller barriers between them; KA forbids @synchronize inside a device
+# fn).  UNTYPED args (required for device fns called from a KA @kernel).
+#
+# Phase 1 — forward: lane strides over v1's chunks, writing new_d1_sh[c] = bits of
+# v1 chunk c that have a hom-edge into v2's current domain.  No-op (early return)
+# for an invalid hom index, matching the serial path; backward then also no-ops.
+@inline function _intra_forward!(tid, blocksize, dom, dom_off, new_d1_sh, bc,
+                                 nc, hf_flat, hf_offs, ::Val{NM}) where {NM}
+    v1 = Int(bc.var1); v1 == 0 && return nothing; v2 = Int(bc.var2)
+    h_idx = Int(bc.param1); n_homs = length(hf_offs) - 1
+    (1 <= h_idx <= n_homs) || return nothing
+    off1 = dom_off + (v1 - 1) * NM
+    off2 = dom_off + (v2 - 1) * NM
+    off_h = Int(hf_offs[h_idx])
+    n_elems_h = (Int(hf_offs[h_idx + 1]) - off_h) ÷ nc
+    c = tid
+    while c <= nc
+        acc = UInt64(0)
+        chunk = dom[off1 + c]
+        while chunk != UInt64(0)
+            lsb = chunk & (-chunk); chunk &= ~lsb
+            bi  = trailing_zeros(lsb)
+            w   = (c - 1) * 64 + bi + 1
+            if w <= n_elems_h
+                off_w = off_h + (w - 1) * nc
+                for ci in 1:nc
+                    if (hf_flat[off_w + ci] & dom[off2 + ci]) != UInt64(0)
+                        acc |= lsb; break
+                    end
+                end
+            end
+        end
+        new_d1_sh[c] = acc
+        c += blocksize
+    end
+    nothing
+end
+
+# Phase 2 — backward+narrow (after a barrier on new_d1_sh): lane owns chunk c and
+# narrows BOTH v1 (= new_d1_sh[c]) and v2 (&= reachable[c], the OR over all
+# surviving v1 bits of the hom column c).  Sets changed_flag if anything shrank.
+@inline function _intra_backward!(tid, blocksize, dom, dom_off, new_d1_sh,
+                                  changed_flag, bc, nc, hf_flat, hf_offs,
+                                  ::Val{NM}) where {NM}
+    v1 = Int(bc.var1); v1 == 0 && return nothing; v2 = Int(bc.var2)
+    h_idx = Int(bc.param1); n_homs = length(hf_offs) - 1
+    (1 <= h_idx <= n_homs) || return nothing
+    off1 = dom_off + (v1 - 1) * NM
+    off2 = dom_off + (v2 - 1) * NM
+    off_h = Int(hf_offs[h_idx])
+    n_elems_h = (Int(hf_offs[h_idx + 1]) - off_h) ÷ nc
+    c = tid
+    while c <= nc
+        oldv1 = dom[off1 + c]
+        nv1   = new_d1_sh[c]
+        if nv1 != oldv1
+            dom[off1 + c] = nv1
+            changed_flag[1] = true
+        end
+        reach = UInt64(0)
+        for cc in 1:nc
+            ch = new_d1_sh[cc]
+            while ch != UInt64(0)
+                lsb = ch & (-ch); ch &= ~lsb
+                bi  = trailing_zeros(lsb)
+                w   = (cc - 1) * 64 + bi + 1
+                if w <= n_elems_h
+                    reach |= hf_flat[off_h + (w - 1) * nc + c]
+                end
+            end
+        end
+        oldv2 = dom[off2 + c]
+        nv2   = oldv2 & reach
+        if nv2 != oldv2
+            dom[off2 + c] = nv2
+            changed_flag[1] = true
+        end
+        c += blocksize
+    end
+    nothing
+end
+
+# Single-bytecode PROP_NEQ / PROP_EQ on the calling lane (cheap, O(nc), no hom
+# scan).  Caller runs it under `tid == 1` and barriers after.
+@inline function _intra_simple!(dom, dom_off, changed_flag, bc, nc,
+                                ::Val{NM}) where {NM}
+    v1 = Int(bc.var1); v1 == 0 && return nothing; v2 = Int(bc.var2)
+    off1 = dom_off + (v1 - 1) * NM
+    off2 = dom_off + (v2 - 1) * NM
+    if bc.op == PROP_NEQ
+        ones2 = 0
+        for c in 1:nc; ones2 += count_ones(dom[off2 + c]); end
+        if ones2 == 1
+            for c in 1:nc
+                o = dom[off1 + c]; nv = o & ~dom[off2 + c]
+                if nv != o; dom[off1 + c] = nv; changed_flag[1] = true; end
+            end
+        end
+        ones1 = 0
+        for c in 1:nc; ones1 += count_ones(dom[off1 + c]); end
+        if ones1 == 1
+            for c in 1:nc
+                o = dom[off2 + c]; nv = o & ~dom[off1 + c]
+                if nv != o; dom[off2 + c] = nv; changed_flag[1] = true; end
+            end
+        end
+    elseif bc.op == PROP_EQ
+        for c in 1:nc
+            o1 = dom[off1 + c]; o2 = dom[off2 + c]; n = o1 & o2
+            if n != o1; dom[off1 + c] = n; changed_flag[1] = true; end
+            if n != o2; dom[off2 + c] = n; changed_flag[1] = true; end
+        end
+    end
+    nothing
+end
+
 # ── EPS (Embarrassingly Parallel Search) Turbo kernel ────────────────────────
 
 """
@@ -1773,8 +1895,8 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     hf_offs       :: AbstractVector{Int32},
     ::Val{NM},
     ::Val{NVNM16},
-    ::Val{BLOCK_PROP},
-) where {NM, NVNM16, BLOCK_PROP}
+    ::Val{PROP_MODE},
+) where {NM, NVNM16, PROP_MODE}
 
     tid       = @index(Local, Linear)   # 1-based thread within block
     blocksize = @groupsize()[1]
@@ -1785,7 +1907,8 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     stack_v  = @localmem Int32  (16,)      # branching variable at each solve-phase level
     stnext   = @localmem Int32  (16,)      # next candidate element index at each level
     ok_flag  = @localmem Bool   (1,)
-    changed_flag = @localmem Bool (1,)  # block-parallel AC-1 fixpoint change flag
+    changed_flag = @localmem Bool (1,)  # parallel AC-1 fixpoint change flag
+    new_d1_sh = @localmem UInt64 (NM,)  # intra-bytecode: shared forward-narrowed v1 domain
     # binfo: [1]=ub_var (0=all fixed), [2]=branch_elem (1-based flat), [3]=found_next
     binfo    = @localmem Int32  (3,)
     # mysub_block: the subproblem index claimed by this block (one value for all 32 threads)
@@ -1814,9 +1937,31 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
         dive_ok = true
 
         for d in 1:D
-            # AC-1 propagation fixpoint: single-thread serial (default) or
-            # block-parallel across all lanes (BLOCK_PROP, opt-in via RG_BLOCK_PROP).
-            if BLOCK_PROP
+            # AC-1 propagation fixpoint. PROP_MODE: 0=serial (default), 1=block-
+            # parallel over bytecodes (RG_BLOCK_PROP), 2=intra-bytecode parallel
+            # over nc domain chunks (RG_INTRA_PROP).
+            if PROP_MODE == 2
+                for _ in 1:(n_bc * 8 + 1)
+                    if tid == 1; changed_flag[1] = false; end
+                    @synchronize()
+                    for i in 1:n_bc
+                        bc = bytecodes[i]
+                        if bc.op == PROP_FUNC
+                            _intra_forward!(tid, blocksize, dom, 0, new_d1_sh, bc,
+                                            nc, hf_flat, hf_offs, Val(NM))
+                        end
+                        @synchronize()
+                        if bc.op == PROP_FUNC
+                            _intra_backward!(tid, blocksize, dom, 0, new_d1_sh,
+                                             changed_flag, bc, nc, hf_flat, hf_offs, Val(NM))
+                        elseif tid == 1
+                            _intra_simple!(dom, 0, changed_flag, bc, nc, Val(NM))
+                        end
+                        @synchronize()
+                    end
+                    changed_flag[1] || break
+                end
+            elseif PROP_MODE == 1
                 for _ in 1:(n_bc * 8 + 1)
                     if tid == 1; changed_flag[1] = false; end
                     @synchronize()
@@ -1926,9 +2071,30 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
                 lev_off = (level - 1) * n_vars_nm
 
                 if state == 1
-                    # AC-1 propagation fixpoint: single-thread serial (default) or
-                    # block-parallel (BLOCK_PROP, opt-in via RG_BLOCK_PROP).
-                    if BLOCK_PROP
+                    # AC-1 propagation fixpoint. PROP_MODE: 0=serial, 1=block-
+                    # parallel (RG_BLOCK_PROP), 2=intra-bytecode (RG_INTRA_PROP).
+                    if PROP_MODE == 2
+                        for _ in 1:(n_bc * 8 + 1)
+                            if tid == 1; changed_flag[1] = false; end
+                            @synchronize()
+                            for i in 1:n_bc
+                                bc = bytecodes[i]
+                                if bc.op == PROP_FUNC
+                                    _intra_forward!(tid, blocksize, dom, lev_off, new_d1_sh, bc,
+                                                    nc, hf_flat, hf_offs, Val(NM))
+                                end
+                                @synchronize()
+                                if bc.op == PROP_FUNC
+                                    _intra_backward!(tid, blocksize, dom, lev_off, new_d1_sh,
+                                                     changed_flag, bc, nc, hf_flat, hf_offs, Val(NM))
+                                elseif tid == 1
+                                    _intra_simple!(dom, lev_off, changed_flag, bc, nc, Val(NM))
+                                end
+                                @synchronize()
+                            end
+                            changed_flag[1] || break
+                        end
+                    elseif PROP_MODE == 1
                         for _ in 1:(n_bc * 8 + 1)
                             if tid == 1; changed_flag[1] = false; end
                             @synchronize()
@@ -2059,17 +2225,17 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     end  # while mysub_b[1] < 2^D
 end
 
-# Single-thread serial AC-1 propagation is the DEFAULT — it is faster on game_full,
-# where block-parallel was a measured ~6-8% regression (median 29.1 vs 27.4 s/turn,
-# A40): the post-codomain-decomp solves have FEW bytecodes, so distributing them
-# across 32 lanes gives little parallelism width while the 2 `@synchronize`/pass +
-# shared-memory `atomic_and!` contention add overhead the serial path never pays.
-# Block-parallel (all lanes share the bytecodes) is kept OPT-IN via `RG_BLOCK_PROP`
-# for workloads with many bytecodes where the lane parallelism can pay off.  (For
-# few-bytecode/huge-domain solves the real lever is intra-bytecode parallelism.)
-_block_prop() = haskey(ENV, "RG_BLOCK_PROP")
+# AC-1 propagation mode for turbo_block_kernel!.  2 = intra-bytecode parallel over
+# the nc domain chunks (DEFAULT) — each PROP_FUNC's chunk scan is split across the
+# 32 lanes; ~3x faster on game_full (median 9.3 vs 27.4 s/turn, A40), whose solves
+# have few bytecodes (n_bc=2-9) but huge domains (nc=45).  0 = single-thread serial
+# (`RG_SERIAL_PROP`, the reference / kill-switch).  1 = block-parallel over bytecodes
+# (`RG_BLOCK_PROP`) — a ~6-8% regression on game_full (too little width), kept for
+# many-bytecode workloads.
+_prop_mode() = haskey(ENV, "RG_SERIAL_PROP") ? 0 :
+               (haskey(ENV, "RG_BLOCK_PROP") ? 1 : 2)
 
-# Private helper: dispatch Val{nc_max}, Val{nvnm16}, Val{block_prop} for
+# Private helper: dispatch Val{nc_max}, Val{nvnm16}, Val{prop_mode} for
 # turbo_block_kernel!.  Called from gpu_turbo_solve and _gpu_turbo_fill_scratch!.
 function _launch_turbo_block!(backend,
                                d_gpu, b_gpu,
@@ -2077,11 +2243,13 @@ function _launch_turbo_block!(backend,
                                nextsub, sol_gpu, cnt_gpu, max_solutions::Int,
                                hf_flat, hf_offs,
                                nc_max::Int, nvnm16::Int, n_blks::Int,
-                               block_prop::Bool = true)
+                               prop_mode::Int = 0)
+    haskey(ENV, "RG_SOLVE_DIAG") &&
+        println(stderr, "TBLK nbc=$n_bc nv=$n_vars nc=$nc D=$D nblk=$n_blks")
     turbo_block_kernel!(backend, 32)(
         d_gpu, b_gpu, n_bc, n_vars, nc, D,
         nextsub, sol_gpu, cnt_gpu, max_solutions,
-        hf_flat, hf_offs, Val(nc_max), Val(nvnm16), Val(block_prop);
+        hf_flat, hf_offs, Val(nc_max), Val(nvnm16), Val(prop_mode);
         ndrange = n_blks * 32
     )
 end
@@ -2218,7 +2386,7 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
                               sub_gpu, sol_gpu, cnt_gpu, max_solutions,
                               hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks,
-                              _block_prop())
+                              _prop_mode())
     end
     KernelAbstractions.synchronize(backend)
 
@@ -2285,7 +2453,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
         _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,
                               sub_gpu, sol_gpu, cnt_gpu, max_solutions,
                               hf_flat_gpu, hf_offs_gpu, nc_max, nvnm16, n_blks,
-                              _block_prop())
+                              _prop_mode())
     end
     KernelAbstractions.synchronize(backend)
     CUDA.@allowscalar min(Int(scratch.buf_sol_count[1]), max_solutions)
