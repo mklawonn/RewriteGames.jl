@@ -487,3 +487,75 @@ cross-episode `compile_schedule` cache (deferred — a training-throughput win w
 cache must guard `enc`/world consistency).  NB: low-variance timing needs a
 deterministic red + seeded model; a random red roughly doubles game_full episode
 time (more SAM activity → more downstream work).
+
+---
+
+## GPU CSP propagation — intra-bytecode is the DEFAULT (2026-06-08, ~2.75× on full game)
+
+`turbo_block_kernel!`'s per-block AC-1 propagation fixpoint now has **three modes**,
+chosen at compile time via `Val{PROP_MODE}` from `_prop_mode()` (env):
+
+- **mode 2 — intra-bytecode (DEFAULT).** Bytecodes processed serially, but each
+  `PROP_FUNC` is parallelized over its `nc` domain chunks across the 32 lanes — lane
+  owns chunk `c`, so narrowing is **race-free (no atomics)**. Three sync-free phase
+  fns `_intra_forward!` (lane → shared `new_d1_sh[c]`), `_intra_backward!` (lane owns
+  chunk c, narrows v1 = new_d1_sh[c] and v2 &= OR-over-v1-bits of hom column c),
+  `_intra_simple!` (PROP_NEQ/EQ on tid==1), driven by a small inline skeleton at the
+  dive + solve sites (the bytecode loop + 2 barriers/bytecode stay in the kernel).
+- **mode 0 — serial (`RG_SERIAL_PROP`).** The single-thread (`tid==1`) reference /
+  kill-switch — what the kernel did before. `_propagate_serial!`.
+- **mode 1 — block-parallel over bytecodes (`RG_BLOCK_PROP`).** `_propagate_block!`;
+  a **~6-8% regression** on game_full, kept only for hypothetical many-bytecode work.
+
+**Why (profile via env `RG_SOLVE_DIAG`, logged in `_launch_turbo_block!`):** every
+full-scenario turbo_block solve has **nc=45** (huge domains, ~2880 elems/var) but
+**n_bc=2-9** (few bytecodes). Spreading bytecodes across lanes (mode 1) has ~no
+width; parallelizing each `PROP_FUNC`'s ~2880-element scan over the lanes (mode 2)
+cuts its critical path ~32×.
+
+**Measured (A40, `build_scenario(1.0)` ~2838-target world, `build_planning_exec_sched_attr`,
+GNN blue vs fixed red, isolated, n=5):** intra **9.3 s/turn** vs serial **25.5 →
+~2.75×**. This **revises the "host/sync-bound, no single dominant cost" lesson above**:
+that was T_MAX=2 and *predates codomain decomposition*. Once codomain decomp removed
+the move-solve cost, the per-turn time concentrated in the non-move turbo_block solves
+(SEAD/engage, nc=45), which are **propagation-dominated** — hence intra's ~2.75×. The
+remaining ~9.3 s/turn is now the dive/solve DFS + featurization.
+
+**Validation:** solver set-equivalence intra == serial == Catlab for PROP_FUNC
+(nc=2..41) + PROP_NEQ (nc=2,8); full suite 1025/1025 with intra default AND with
+`RG_SERIAL_PROP`. Local solver A/B harness: build a CSP via the ext internals, call
+`gpu_turbo_solve` twice toggling the env mode, `issetequal` + compare to Catlab
+`homomorphisms` (force nc≥2, i.e. >64 target parts, or it dispatches to EPS).
+
+**KernelAbstractions / GPU-Julia gotchas (hard-won; apply to any new device code in
+this kernel):**
+- **Device fns called from a KA `@kernel` MUST use UNTYPED args.** Typed args with
+  free type params (`dom::DOM … where DOM`) compile standalone and under raw `@cuda`
+  but throw `InvalidIRError: jl_f_throw_methoderror` *only* inside the KA `@kernel`.
+  `_propagate_*!` / `_intra_*!` are all untyped.
+- **`@synchronize` cannot live inside a called device fn (or a macro that expands to
+  one).** Keep the barrier-bearing loop inline in the kernel; split per-pass work
+  into sync-free phase fns.
+- **`Atomix.@atomic` has no method on `@localmem` (shared) arrays** → use
+  `CUDA.atomic_and!(pointer(dom,i), v)`, or design for race-freedom (intra's
+  chunk-ownership needs no atomics).
+- Allocate `MVector` / `@localmem` at function/kernel top, never inside a dynamic loop.
+
+**Timescale history (full-scenario turn):** intra-bytecode is the latest of a stack of
+GPU-solver wins — codomain decomposition (~6×), batched Tier-2 NAC filter (~1.36×), GPU
+attribute thresholds, now intra propagation. A session carrying the old ~100-130 s/turn
+mental model should expect **~9 s/turn** on the full scenario today.
+
+## Attribute support on the GPU engine (on `main`, commit 9687827)
+
+The GPU solver matches and modifies attributes on-device (no CPU round-trip):
+- **Ordinal threshold matching** — `PROP_ATTR_LEQ` / `PROP_ATTR_GEQ` bytecodes
+  (`TCNBytecode.jl`) pre-filter a variable's domain by a `≤`/`≥` bound; set per-rule
+  via `set_attr_thresholds!(rule, thresholds)` (`src/schedule/attr_thresholds.jl`,
+  exported).
+- **Affine attribute deltas** — `set_attr_deltas!(rule, deltas)` applies affine
+  updates to attribute values on rewrite, GPU-resident.
+
+NB: FalconRewriteGame's AGENT.md still carries an older "GPU engine has no attribute
+arithmetic — use tokens, not Counter+`expr`" caveat. Affine deltas partially supersede
+that (affine updates work on the GPU now); a general `expr` is still unsupported.
