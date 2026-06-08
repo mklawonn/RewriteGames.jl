@@ -1796,12 +1796,17 @@ function _dispatch_gpu_box!(box::CompiledBox, b_idx::Int, sched::CompiledGPUSche
         # NATIVE_RULE on CUDA uses the single-sync pipeline; PLAYER_RULE keeps
         # the multi-sync path so the agent can inspect solutions.  Rules with
         # NAC/PAC conditions must take the standard path so _filter_nac_solutions
-        # runs — the fast pipeline does not enforce application conditions.
+        # runs — the fast pipeline does not enforce application conditions.  Rules
+        # with affine attribute deltas (set_attr_deltas!) also take the standard
+        # path: the fast pipeline does the structural rewrite only and skips the
+        # Phase-2 _apply_attr_deltas! step, so e.g. the campaign-clock advance_time
+        # (clk_ticks += 1) would be a no-op on the fast path.
         fired = if box.box_type == BOX_NATIVE_RULE &&
                    CUDA.functional() &&
                    state.scratch !== nothing &&
                    gpu_cube !== nothing &&
-                   !_rule_has_conditions(rule)
+                   !_rule_has_conditions(rule) &&
+                   isempty(RewriteGames.get_attr_deltas(rule, _inner_rule_of(rule)))
             _gpu_native_pipeline!(g, csp, cube, gpu_cube, rule,
                                   schema, enc, state)
         else
