@@ -396,7 +396,15 @@ Implemented in `FalconRewriteGame/src/gnn_agent.jl` on branch `feature/gpu-share
 
 ## Performance: the engine is HOST-TRANSFER bound, not compute bound (2026-06)
 
-A profiling pass on an agent-dense episode (game_E) found the GPU CSP solve
+> **Game-name + staleness note (2026-06-08):** FalconRewriteGame now has a SINGLE
+> game, `falcon_tornado_A`. Older perf lessons below name the former `game_E` (the
+> agent-dense multimove token game) and `game_full` (the full attribute scenario =
+> `falcon_tornado_A` at `fraction=1.0`). The "host-bound / no single dominant cost"
+> conclusions here predate codomain-decomposition + intra-bytecode propagation — see
+> "GPU CSP propagation — intra-bytecode is the DEFAULT" below: at full `T_MAX` on the
+> full scenario the turbo_block propagation IS the dominant compute cost (~2.75× win).
+
+A profiling pass on an agent-dense episode (the former game_E) found the GPU CSP solve
 kernels have **~0 self-time** — the cost is on the host. **Profile self-time and
 optimize what the profile shows; do not assume the GPU kernels are the
 bottleneck.** Two host costs dominated, both now fixed:
@@ -410,7 +418,7 @@ rebuild). Replaced with vectorized compaction (`cumsum` of the active-flag
 vector + `findall`) and **bulk** `set_subpart!(result, :, name, col)` writes, with
 a per-element fallback only when a hom target is missing/deleted (`0`) or an
 attribute decodes to `nothing` (preserves the original "skip" semantics exactly).
-Equivalence: `test/test_gpu_download.jl`. Result: **~2.6–3× faster game_E
+Equivalence: `test/test_gpu_download.jl`. Result: **~2.6–3× faster agent-game
 episode**; the per-call download win grows with schema richness (Falcon has many
 homs/attrs). Lesson: building a Catlab ACSet element-by-element is expensive —
 always write whole columns.
@@ -476,7 +484,7 @@ candidates, then calls it once.  The default loops `select_action_gpu` (so non-G
 GPU players are unchanged); a GNN player overrides it with a single batched (masked)
 transformer forward.
 
-**Perf lesson (measured on game_full, A40, T_MAX=2):** building `hom_forward` ONCE
+**Perf lesson (measured on the full scenario, A40, T_MAX=2):** building `hom_forward` ONCE
 instead of 315×/turn gave **no wall-time win (1.00×)** — the per-agent rebuilds are
 ~free (GPU-parallel), confirming the engine is host/sync-bound, not compute-bound.
 After the merged sync work (`perf/fewer-syncs`, `perf/batch-nac`), a flat profile
@@ -485,7 +493,7 @@ tier-1 NAC, per-episode `compile_schedule`, and solve-result download are each
 ~5–13%.  Remaining single-episode levers: batched GNN scoring (done) and a
 cross-episode `compile_schedule` cache (deferred — a training-throughput win whose
 cache must guard `enc`/world consistency).  NB: low-variance timing needs a
-deterministic red + seeded model; a random red roughly doubles game_full episode
+deterministic red + seeded model; a random red roughly doubles full-scenario episode
 time (more SAM activity → more downstream work).
 
 ---
@@ -505,7 +513,7 @@ chosen at compile time via `Val{PROP_MODE}` from `_prop_mode()` (env):
 - **mode 0 — serial (`RG_SERIAL_PROP`).** The single-thread (`tid==1`) reference /
   kill-switch — what the kernel did before. `_propagate_serial!`.
 - **mode 1 — block-parallel over bytecodes (`RG_BLOCK_PROP`).** `_propagate_block!`;
-  a **~6-8% regression** on game_full, kept only for hypothetical many-bytecode work.
+  a **~6-8% regression** on the full scenario, kept only for hypothetical many-bytecode work.
 
 **Why (profile via env `RG_SOLVE_DIAG`, logged in `_launch_turbo_block!`):** every
 full-scenario turbo_block solve has **nc=45** (huge domains, ~2880 elems/var) but
