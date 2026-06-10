@@ -1270,6 +1270,13 @@ function _nac_diag(solutions::Vector{Vector{Int32}}, rule, csp::CSPProblem,
         _NAC_DIAG_MISM[] += 1
         @warn "NAC SET mismatch" ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
     end
+    # Tier-1 (NacSpec) cross-check, when it applies to this rule: must keep the
+    # same set as the CPU reference (and hence as tier 2 above).
+    kept_t1 = _gpu_filter_nac_solutions(copy(solutions), rule, csp, g, schema)
+    if kept_t1 !== nothing && Set(kept_t1) != Set(kept_cpu)
+        _NAC_DIAG_MISM[] += 1
+        @warn "NAC SET mismatch (tier1 vs CPU)" nt1=length(kept_t1) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+    end
 end
 
 # ── Agent-loop per-instance pin ───────────────────────────────────────────────
@@ -1438,26 +1445,38 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         end
 
         # ── NAC/PAC post-filter ──
-        # Tier 1: fast single-new-element GPU existence check (NacSpec).
+        # Tier 1: fast single-new-element GPU existence check (NacSpec) — light
+        #         kernels but ~2 device round-trips PER CANDIDATE.
         # Tier 2: general GPU-native check — lower each condition pattern and
-        #         run the rule solver pinned to the match (no world download).
+        #         run the rule solver pinned to the match (no world download);
+        #         the batched variant syncs once per CONDITION.
         # Tier 3: CPU host-side Catlab homsearch, only if a pattern won't lower.
-        gpu_filtered = _gpu_filter_nac_solutions(solutions, rule, csp, g, schema)
-        if gpu_filtered === nothing
-            haskey(ENV, "RG_NAC_DIAG") && _nac_diag(solutions, rule, csp, g, schema, enc, state.world_type)
-            gpu_general = _gpu_filter_conditions(solutions, rule, csp, g, schema, enc)
-            if gpu_general === nothing
-                nac_tier  = 3
-                solutions = _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
-                                                  state.world_type)
-            else
-                nac_tier  = 2
-                solutions = gpu_general
-            end
-        else
-            nac_tier  = 1
-            solutions = gpu_filtered
+        # Ordering: tier 1 first at small N; at N ≥ RG_NAC_BATCH_MIN the batched
+        # tier 2 goes first (tier 1's per-candidate syncs dominate at large N).
+        # RG_NACSPEC_FIRST restores the historical tier-1-first ordering.
+        haskey(ENV, "RG_NAC_DIAG") && _rule_has_conditions(rule) &&
+            _nac_diag(solutions, rule, csp, g, schema, enc, state.world_type)
+        filtered = nothing
+        tried_t2 = false
+        if length(solutions) >= _nac_batch_min() && !haskey(ENV, "RG_NACSPEC_FIRST")
+            filtered = _gpu_filter_conditions(solutions, rule, csp, g, schema, enc)
+            tried_t2 = true
+            filtered !== nothing && (nac_tier = 2)
         end
+        if filtered === nothing
+            filtered = _gpu_filter_nac_solutions(solutions, rule, csp, g, schema)
+            filtered !== nothing && (nac_tier = 1)
+        end
+        if filtered === nothing && !tried_t2
+            filtered = _gpu_filter_conditions(solutions, rule, csp, g, schema, enc)
+            filtered !== nothing && (nac_tier = 2)
+        end
+        if filtered === nothing
+            nac_tier  = 3
+            filtered  = _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
+                                              state.world_type)
+        end
+        solutions = filtered
         bt && (t_nac = time_ns())
         n_post = length(solutions)
         if isempty(solutions)
