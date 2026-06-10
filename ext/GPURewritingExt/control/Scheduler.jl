@@ -1302,6 +1302,19 @@ function _effective_take(state, b_idx::Int, turn::Int)
     return Int(val)
 end
 
+# RG_BOX_TIME: one stderr line per standard-path box solve.  Section times in ms;
+# t_build = hom-fwd + domain build, t_solve = CSP solve (incl. internal sync),
+# t_nac = NAC/PAC post-filter (tier 1/2/3), t_choose = player match selection,
+# t_apply = DPO apply + attr deltas.  pre/post = solution counts around the filter.
+_rg_boxt(turn, b_idx, csp, n_pre, n_post, tier, t0, tb, ts, tn, tc, ta) =
+    println(stderr, "BOXT turn=$turn b=$b_idx nv=$(csp.n_vars) nc=$(csp.n_chunks) " *
+        "pre=$n_pre post=$n_post tier=$tier " *
+        "t_build=$(round((tb - t0) / 1e6, digits = 3)) " *
+        "t_solve=$(round((ts - tb) / 1e6, digits = 3)) " *
+        "t_nac=$(round((tn - ts) / 1e6, digits = 3)) " *
+        "t_choose=$(round((tc - tn) / 1e6, digits = 3)) " *
+        "t_apply=$(round((ta - tc) / 1e6, digits = 3))")
+
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               cube::AdhesiveCube,
                               gpu_cube::Union{GPUAdhesiveCube, Nothing},
@@ -1309,6 +1322,13 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               box, b_idx::Int, sched, state, turn::Int;
                               agent_pin::Union{Nothing,Tuple{Symbol,Int}}=nothing)::Bool
     scratch = state.scratch
+
+    # Env-gated per-box timing (RG_BOX_TIME); only the standard path emits lines.
+    bt      = haskey(ENV, "RG_BOX_TIME")
+    bt_std  = false
+    t_start = bt ? time_ns() : UInt64(0)
+    t_build = t_start; t_solve = t_start; t_nac = t_start; t_choose = t_start
+    n_pre = 0; n_post = 0; nac_tier = 0
 
     # Detect agent early: GPU players get a fast path that skips bulk download
     player_sym = box.box_type == BOX_PLAYER_RULE ? sched.box_players[b_idx] : nothing
@@ -1376,6 +1396,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         Array(@view scratch.buf_solutions[1:n_vars, chosen_col])
     else
         # ── Standard path: solve on GPU/CPU, download all solutions, choose ──
+        bt_std = true
         solutions = if CUDA.functional() && scratch !== nothing
             backend          = CUDA.CUDABackend()
             nc               = csp.n_chunks
@@ -1384,6 +1405,7 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
             _apply_attr_masks_gpu_device!(d_gpu, csp, g, schema, enc, backend, scratch)
             agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
             KernelAbstractions.synchronize(backend)
+            bt && (t_build = time_ns())
             gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
         else
             if CUDA.functional()
@@ -1407,7 +1429,13 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                 cpu_dive_solve(fresh_csp, domains)
             end
         end
-        isempty(solutions) && return false
+        bt && (t_solve = time_ns())
+        n_pre = length(solutions)
+        if isempty(solutions)
+            bt && _rg_boxt(turn, b_idx, csp, n_pre, 0, 0,
+                           t_start, t_build, t_solve, t_solve, t_solve, time_ns())
+            return false
+        end
 
         # ── NAC/PAC post-filter ──
         # Tier 1: fast single-new-element GPU existence check (NacSpec).
@@ -1418,24 +1446,41 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
         if gpu_filtered === nothing
             haskey(ENV, "RG_NAC_DIAG") && _nac_diag(solutions, rule, csp, g, schema, enc, state.world_type)
             gpu_general = _gpu_filter_conditions(solutions, rule, csp, g, schema, enc)
-            solutions = gpu_general === nothing ?
-                _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
-                                      state.world_type) :
-                gpu_general
+            if gpu_general === nothing
+                nac_tier  = 3
+                solutions = _filter_nac_solutions(solutions, rule, csp, g, enc, schema,
+                                                  state.world_type)
+            else
+                nac_tier  = 2
+                solutions = gpu_general
+            end
         else
+            nac_tier  = 1
             solutions = gpu_filtered
         end
-        isempty(solutions) && return false
+        bt && (t_nac = time_ns())
+        n_post = length(solutions)
+        if isempty(solutions)
+            bt && _rg_boxt(turn, b_idx, csp, n_pre, 0, nac_tier,
+                           t_start, t_build, t_solve, t_nac, t_nac, time_ns())
+            return false
+        end
 
-        if box.box_type == BOX_PLAYER_RULE
+        sol = if box.box_type == BOX_PLAYER_RULE
             _choose_gpu_match(solutions, agent, rule, csp, schema,
                               g, enc, state.world_type, turn; can_pass=can_pass,
                               state=state)
         else
             solutions[1]
         end
+        bt && (t_choose = time_ns())
+        sol
     end
-    chosen_sol === nothing && return false
+    if chosen_sol === nothing
+        bt && bt_std && _rg_boxt(turn, b_idx, csp, n_pre, n_post, nac_tier,
+                                 t_start, t_build, t_solve, t_nac, t_choose, time_ns())
+        return false
+    end
 
     if rule !== nothing
         d_match = nothing
@@ -1455,6 +1500,8 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                             RewriteGames.get_attr_deltas(rule, _inner_rule_of(rule)))
         state.graph_dirty = true
     end
+    bt && bt_std && _rg_boxt(turn, b_idx, csp, n_pre, n_post, nac_tier,
+                             t_start, t_build, t_solve, t_nac, t_choose, time_ns())
     true
 end
 

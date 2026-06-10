@@ -2270,6 +2270,8 @@ function _launch_turbo_eps!(backend,
                              ub_info,    # AbstractVector{Int32} length ≥ 3
                              ub_elems,   # AbstractVector{Int32} capacity ≥ nc_max*64
                              workspace)  # AbstractMatrix{UInt64} rows ≥ nc_max*64*n_vars, cols=16
+    haskey(ENV, "RG_SOLVE_DIAG") &&
+        println(stderr, "TEPS nbc=$n_bc nv=$n_vars nc=$nc ncmax=$nc_max")
     # Initialise: ub_info = [n_vars+1 (sentinel), 0 (n_subs), 1 (ok)]
     copyto!(ub_info, Int32[n_vars + 1, 0, 1])
     find_unbound_var_kernel!(backend, 64)(ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
