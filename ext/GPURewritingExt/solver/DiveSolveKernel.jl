@@ -1894,6 +1894,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     solutions     :: AbstractMatrix{Int32},
     sol_count     :: AbstractVector{Int32},
     max_solutions :: Int,
+    es_cap        :: Int32,
     hf_flat       :: AbstractVector{UInt64},
     hf_offs       :: AbstractVector{Int32},
     ::Val{NM},
@@ -1916,14 +1917,21 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     binfo    = @localmem Int32  (3,)
     # mysub_block: the subproblem index claimed by this block (one value for all 32 threads)
     mysub_b  = @localmem Int32  (1,)
+    # Early-stop flag: once the GLOBAL solution count reaches es_cap (= the
+    # max_solutions storage cap unless RG_NO_EARLY_STOP), all blocks abandon
+    # remaining search — further solutions could not be stored anyway.  The
+    # flag is only ever written by tid 1 directly before a @synchronize, so
+    # every loop-condition read is block-uniform (no divergent barriers).
+    stop_b   = @localmem Bool   (1,)
 
     # ── Thread 1 claims first subproblem for the block ────────────────────────
     if tid == 1
         mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+        stop_b[1]  = sol_count[1] >= es_cap
     end
     @synchronize()
 
-    while mysub_b[1] < Int32(1 << D)
+    while mysub_b[1] < Int32(1 << D) && !stop_b[1]
         mysub = Int(mysub_b[1])
 
         # ── 1. Copy root domains into dom level 1 (all threads cooperate) ──────
@@ -2069,7 +2077,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
             state  = 1
             safety = 0
 
-            while level > 0 && safety < 10_000_000
+            while level > 0 && safety < 10_000_000 && !stop_b[1]
                 safety += 1
                 lev_off = (level - 1) * n_vars_nm
 
@@ -2132,6 +2140,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
                                 if ones > 1; binfo[1] = Int32(v); break; end
                             end
                         end
+                        stop_b[1] = sol_count[1] >= es_cap
                     end  # tid == 1
                     @synchronize()
 
@@ -2171,6 +2180,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
                 if state == 2
                     if tid == 1
                         binfo[3] = Int32(0)
+                        stop_b[1] = sol_count[1] >= es_cap
                         v   = Int(stack_v[level])
                         off = lev_off + (v - 1) * NM
                         ne  = Int(stnext[level])
@@ -2223,6 +2233,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
         # ── 4. Claim next subproblem for this block ────────────────────────────
         if tid == 1
             mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+            stop_b[1]  = sol_count[1] >= es_cap
         end
         @synchronize()
     end  # while mysub_b[1] < 2^D
@@ -2273,9 +2284,15 @@ function _launch_turbo_block!(backend,
                                prop_mode::Int = 0)
     haskey(ENV, "RG_SOLVE_DIAG") &&
         println(stderr, "TBLK nbc=$n_bc nv=$n_vars nc=$nc D=$D nblk=$n_blks")
+    # Early-stop: abandon remaining search once max_solutions are stored
+    # (cross-product patterns can have orders of magnitude more matches than
+    # the cap — enumerating them is pure waste).  RG_NO_EARLY_STOP restores
+    # exhaustive search (the stored set is an arbitrary cap-size subset
+    # either way).
+    es_cap = haskey(ENV, "RG_NO_EARLY_STOP") ? typemax(Int32) : Int32(max_solutions)
     turbo_block_kernel!(backend, 32)(
         d_gpu, b_gpu, n_bc, n_vars, nc, D,
-        nextsub, sol_gpu, cnt_gpu, max_solutions,
+        nextsub, sol_gpu, cnt_gpu, max_solutions, es_cap,
         hf_flat, hf_offs, Val(nc_max), Val(nvnm16), Val(prop_mode);
         ndrange = n_blks * 32
     )
