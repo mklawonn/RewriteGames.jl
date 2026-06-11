@@ -19,4 +19,5 @@ using Test
     include("test_gpu_sampling.jl")
     include("test_gpu_download.jl")
     include("test_gpu_thresholds.jl")
+    include("test_gpu_bigvar.jl")
 end

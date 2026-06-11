@@ -2235,6 +2235,22 @@ end
 _prop_mode() = haskey(ENV, "RG_SERIAL_PROP") ? 0 :
                (haskey(ENV, "RG_BLOCK_PROP") ? 1 : 2)
 
+# BIGVAR routing: patterns with 8–14 variables go to the shared-memory block
+# kernel whenever its @localmem workspace fits the 48 KB per-block limit, i.e.
+# nc_max ≤ 16 (14×16×128+256 = 28 928 B; at nc_max ≥ 32 the 14-var band needs
+# > 48 KB, so those patterns stay on the EPS pipeline).  The kernel body already
+# supports this: indexing is runtime (n_vars_nm = n_vars*NM), the DFS stack
+# holds 16 levels, and branch depth ≤ n_vars ≤ 14 < 16.  Exactly TWO NVNM16
+# workspace shapes exist per nc_max bucket — 7*nc_max*16 (legacy band, keeps
+# existing compiled specializations valid) and 14*nc_max*16 — bounding the
+# kernel JIT tax (AGENT.md §JIT) to one extra cheap (nc_max ≤ 16) variant.
+# RG_NO_BIGVAR restores the historical n_vars > 7 → EPS routing.
+const _NV_BIG = 14
+_nv_cap(nc_max::Int) =
+    haskey(ENV, "RG_NO_BIGVAR") ? 7 :
+    (_NV_BIG * nc_max * 128 + 256 <= 49152 ? _NV_BIG : 7)
+_nvnm16_for(n_vars::Int, nc_max::Int) = (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 16
+
 # Private helper: dispatch Val{nc_max}, Val{nvnm16}, Val{prop_mode} for
 # turbo_block_kernel!.  Called from gpu_turbo_solve and _gpu_turbo_fill_scratch!.
 function _launch_turbo_block!(backend,
@@ -2270,6 +2286,8 @@ function _launch_turbo_eps!(backend,
                              ub_info,    # AbstractVector{Int32} length ≥ 3
                              ub_elems,   # AbstractVector{Int32} capacity ≥ nc_max*64
                              workspace)  # AbstractMatrix{UInt64} rows ≥ nc_max*64*n_vars, cols=16
+    haskey(ENV, "RG_SOLVE_DIAG") &&
+        println(stderr, "TEPS nbc=$n_bc nv=$n_vars nc=$nc ncmax=$nc_max")
     # Initialise: ub_info = [n_vars+1 (sentinel), 0 (n_subs), 1 (ok)]
     copyto!(ub_info, Int32[n_vars + 1, 0, 1])
     find_unbound_var_kernel!(backend, 64)(ub_info, d_gpu, n_vars, nc; ndrange = n_vars)
@@ -2337,14 +2355,14 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
     end
 
-    # Use EPS (global-memory) when nc==1, n_vars>7, or when block-kernel smem
-    # would exceed the 48 KB CUDA per-block limit.
-    # turbo_block @localmem dom uses 7*nc_max*16 UInt64 words = 7*nc_max*128 bytes;
-    # plus ~256 bytes for stack_v/stnext/flags.  n_vars>7 always routes to EPS;
-    # for n_vars≤7 the threshold is n_vars*nc_max*128+256 > 49152.
-    # For nc_max=48, n_vars=7: 7×48×128+256 = 43264 < 49152 → turbo_block.
-    # For nc_max=64: 7×64×128+256 = 57600 > 49152 → always EPS.
-    use_eps = nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152
+    # Use EPS (global-memory) when nc==1, n_vars exceeds the routing cap
+    # (7 legacy / 14 with BIGVAR, see _nv_cap), or when the block-kernel smem
+    # workspace for the pattern's band would exceed the 48 KB CUDA per-block
+    # limit: band_cap*nc_max*128 + ~256 bytes for stack_v/stnext/flags.
+    # nc_max=48, n_vars≤7: 7×48×128+256 = 43264 < 49152 → turbo_block.
+    # nc_max=48, n_vars=8–14 or nc_max=64: > 49152 → EPS.
+    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
+              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
@@ -2371,11 +2389,11 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        # Use 7*nc_max*16 instead of n_vars×nc_max×16 so that all n_vars≤7
-        # values sharing the same nc_max compile to one Val{NVNM16} specialization.
-        # @localmem over-allocates slightly for n_vars < 7; actual indexing uses
-        # n_vars_nm = n_vars*NM so no out-of-bounds.  n_vars>7 routes to EPS above.
-        nvnm16 = 7 * nc_max * 16
+        # Per-band NVNM16 (7 or 14 vars' worth of workspace) so all n_vars in a
+        # band share one Val{NVNM16} specialization per nc_max.  @localmem
+        # over-allocates slightly within a band; actual indexing uses
+        # n_vars_nm = n_vars*NM so no out-of-bounds.
+        nvnm16 = _nvnm16_for(n_vars, nc_max)
         if scratch !== nothing
             sub_gpu = scratch.buf_turbo_nextsub
             KernelAbstractions.fill!(sub_gpu, Int32(0))
@@ -2427,11 +2445,10 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
     n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
 
-    # turbo_block @localmem dom uses 7*nc_max*16 UInt64 words = 7*nc_max*128 bytes;
-    # plus ~256 bytes for stack_v/stnext/flags.  n_vars>7 always routes to EPS;
-    # for n_vars≤7 threshold is n_vars*nc_max*128+256 > 49152.
-    # nc_max=48,n_vars=7: 43264 < 49152 → turbo_block. nc_max=64: always EPS.
-    use_eps = nc == 1 || n_vars > 7 || n_vars * nc_max * 128 + 256 > 49152
+    # Same routing as gpu_turbo_solve: EPS when nc==1, n_vars over the cap
+    # (7 legacy / 14 BIGVAR), or the pattern's band workspace exceeds 48 KB smem.
+    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
+              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
     if use_eps
         # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
@@ -2447,7 +2464,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
         # Multi-block Turbo: block-cooperative AC-1 in shared memory.
         D      = clamp(ceil(Int, log2(max(nc * 64, 2))), 4, 14)
         n_blks = min(1 << D, 576)
-        nvnm16 = 7 * nc_max * 16   # fixed per nc_max; collapses n_vars≤7 to 1 specialization
+        nvnm16 = _nvnm16_for(n_vars, nc_max)  # per-band shape (7 or 14 vars), see _nv_cap
         sub_gpu = scratch.buf_turbo_nextsub
         KernelAbstractions.fill!(sub_gpu, Int32(0))
         _launch_turbo_block!(backend, d_gpu, b_gpu, n_bc, n_vars, nc, D,

@@ -567,3 +567,36 @@ The GPU solver matches and modifies attributes on-device (no CPU round-trip):
 NB: FalconRewriteGame's AGENT.md still carries an older "GPU engine has no attribute
 arithmetic — use tokens, not Counter+`expr`" caveat. Affine deltas partially supersede
 that (affine updates work on the GPU now); a general `expr` is still unsupported.
+
+## BIGVAR routing + NAC tier ordering (2026-06-10, game-B chain_mult work)
+
+Two dispatch changes motivated by Falcon Tornado **game B**, whose schedule repeats
+the kill chain `chain_mult` times per turn (every repeat = a fresh solve of the same
+8–13-var rules: isr_datalink=9, sead=8, dead=10, engage_stealth=10,
+engage_nonstealth=13 vars — CSP lowering assigns one variable per L element):
+
+- **BIGVAR (`solver/DiveSolveKernel.jl`, `_nv_cap`/`_nvnm16_for`):** patterns with
+  8–14 vars now route to `turbo_block_kernel!` (shared-mem AC-1, intra-bytecode
+  parallel propagation) whenever the 14-var band workspace fits 48 KB smem —
+  i.e. **nc_max ≤ 16**; at nc_max ≥ 32 they still fall to EPS (the f=1.0 regime —
+  fixing that needs the block-cooperative EPS kernel, planned separately).  The
+  kernel body is untouched (runtime indexing, 16-level DFS stack ≥ n_vars=14).
+  Exactly TWO `Val{NVNM16}` shapes per nc_max bucket (7- and 14-var bands) keep the
+  JIT tax at one extra cheap variant and existing kernel caches valid.
+  Kill switch: `RG_NO_BIGVAR` (historical n_vars > 7 → EPS routing).
+- **NAC tier ordering (`control/Scheduler.jl`, `_gpu_solve_inplace!`):** tier 1
+  (`NacSpec`) costs ~2 device syncs PER CANDIDATE (`_gpu_nac_exists` broadcast +
+  `any`); the batched tier 2 syncs once per CONDITION.  At
+  `N ≥ RG_NAC_BATCH_MIN` (default 32) tier 2 now runs first; tier 1 remains first
+  for small N.  Kill switch: `RG_NACSPEC_FIRST` (historical tier-1-first).
+  `RG_NAC_DIAG` now also cross-checks tier-1 vs the CPU reference and runs for
+  every conditional rule.
+
+Diag additions: `RG_SOLVE_DIAG` prints `TEPS nbc= nv= nc= ncmax=` from the EPS
+launch (mirror of `TBLK`), so EPS-vs-turbo routing is visible per solve.
+`RG_BOX_TIME=1` emits one `BOXT` stderr line per standard-path box solve
+(`build/solve/nac/choose/apply` ms + pre/post candidate counts + NAC tier, incl.
+zero-solution exits); `FalconRewriteGame/test/profile_chain_boxes.jl` aggregates
+them per box.  Set-equivalence: `test/test_gpu_bigvar.jl` (default vs
+`RG_NO_BIGVAR` vs Catlab `homomorphisms`, n_vars ∈ {7, 9, 13, 15}; NAC ordering
+under both flags).
