@@ -51,20 +51,25 @@ function _decomp_nvars_per_type(csp::CSPProblem)
 end
 
 """
-    _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot) -> Dict{Symbol,Vector{Int}}
+    _decomp_gather(schema, csp, fk_cols, n_alloc, seed_obj, seed_slots) -> Dict{Symbol,Vector{Int}}
 
-Fixpoint over the rule's morphism edges (both directions), seeded with the pinned agent,
-returning the sorted world slots reachable per rule-variable type.  `fk_cols[h]` is the
-host FK column of hom `h` (length n_alloc[hom_dom[h]]).  Over-approximates the exact match
-support (safe: any valid match element is reachable), bounded by the local connectivity.
+Fixpoint over the rule's morphism edges (both directions), seeded with one or more slots
+of the seed type (a pinned agent, or an anchored-decomposition cell), returning the
+sorted world slots reachable per rule-variable type.  `fk_cols[h]` is the host FK column
+of hom `h` (length n_alloc[hom_dom[h]]).  Over-approximates the exact match support
+(safe: any valid match element is reachable), bounded by the local connectivity.
 """
+_decomp_gather(schema::SchemaInfo, csp::CSPProblem,
+               fk_cols::Dict{Symbol,Vector{Int32}}, n_alloc::Dict{Symbol,Int},
+               agent_obj::Symbol, agent_slot::Int) =
+    _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, Int[agent_slot])
 function _decomp_gather(schema::SchemaInfo, csp::CSPProblem,
                         fk_cols::Dict{Symbol,Vector{Int32}},
                         n_alloc::Dict{Symbol,Int},
-                        agent_obj::Symbol, agent_slot::Int)
+                        agent_obj::Symbol, seed_slots::Vector{Int})
     rel = _decomp_relevant_homs(schema, csp)
     sets = Dict{Symbol,Set{Int}}(o => Set{Int}() for o in keys(csp.var_offset))
-    push!(sets[agent_obj], agent_slot)
+    union!(sets[agent_obj], seed_slots)
     # ── Connectivity closure (bounds the universe).  FREEZE the agent type: never grow
     #    its set, so reverse-FK neighbors (e.g. this platform's FuelTokens) stay local to
     #    THIS agent instead of cascading to siblings via shared hubs (squadron/zone). ──
@@ -115,15 +120,26 @@ function _decomp_gather(schema::SchemaInfo, csp::CSPProblem,
             end
         end
     end
-    # Fallback ONLY for ISOLATED var types (in no relevant hom): they range freely, so
-    # give them the full active set.  A connected-but-empty type (e.g. a NAC element with
-    # none linked to this agent) must stay empty — that is the correct "no candidates".
-    connected = Set{Symbol}()
-    for h in rel
-        push!(connected, schema.hom_dom[h]); push!(connected, schema.hom_cod[h])
+    # Types NOT reachable from the seed through the rule's own homs (type-level,
+    # undirected) form unanchored components and range over the full active set:
+    # isolated types (in no relevant hom — the original fallback) and whole
+    # connected-but-unseeded components (e.g. a TLAM-style rule whose slot/squadron
+    # side has no hom path to the anchor).  A REACHABLE type that ends empty must
+    # stay empty — that is the correct "no candidates" (e.g. a NAC element with
+    # none linked to this seed).
+    reach = Set{Symbol}((agent_obj,))
+    changed = true
+    while changed
+        changed = false
+        for h in rel
+            A = schema.hom_dom[h]; B = schema.hom_cod[h]
+            if (A in reach) != (B in reach)
+                push!(reach, A); push!(reach, B); changed = true
+            end
+        end
     end
     for (o, _) in csp.var_offset
-        if o != agent_obj && !(o in connected) && isempty(sets[o])
+        if !(o in reach) && isempty(sets[o])
             for w in 1:get(n_alloc, o, 0); push!(sets[o], w); end
         end
     end
@@ -144,10 +160,26 @@ function decomposed_pinned_solve(backend, csp::CSPProblem, schema::SchemaInfo,
                                   base_d_host::Vector{UInt64},
                                   fk_cols::Dict{Symbol,Vector{Int32}},
                                   n_alloc::Dict{Symbol,Int})
+    nbhd = _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot)
+    _decomp_compact_solve(backend, csp, schema, nbhd, base_d_host, fk_cols)
+end
+
+"""
+    _decomp_compact_solve(backend, csp, schema, nbhd, base_d_host, fk_cols)
+        -> Vector{Vector{Int32}}
+
+Solve the CSP over the compact codomain `nbhd` (world slots per rule-variable
+type, from `_decomp_gather`) and return solutions in WORLD indices.  Shared by
+the pinned-agent and anchored-cell decompositions.
+"""
+function _decomp_compact_solve(backend, csp::CSPProblem, schema::SchemaInfo,
+                                nbhd::Dict{Symbol,Vector{Int}},
+                                base_d_host::Vector{UInt64},
+                                fk_cols::Dict{Symbol,Vector{Int32}};
+                                max_solutions::Int = 10_000)
     nv      = Int(csp.n_vars)
     nc_w    = csp.n_chunks
     vt      = _decomp_var_types(csp)
-    nbhd    = _decomp_gather(schema, csp, fk_cols, n_alloc, agent_obj, agent_slot)
 
     # Per-type local index maps.
     l2w = Dict{Symbol,Vector{Int}}()        # local idx -> world slot
@@ -208,7 +240,8 @@ function decomposed_pinned_solve(backend, csp::CSPProblem, schema::SchemaInfo,
     d_gpu   = CuArray(dl)
     hf_gpu  = CuArray(hf)
     ho_gpu  = CuArray(hom_offs)
-    sols_l  = gpu_turbo_solve(backend, csp_l, d_gpu, hf_gpu, ho_gpu; scratch = nothing)
+    sols_l  = gpu_turbo_solve(backend, csp_l, d_gpu, hf_gpu, ho_gpu;
+                              max_solutions = max_solutions, scratch = nothing)
 
     # Back-translate local solution indices to world slots (rows 1..nv are meaningful).
     out = Vector{Vector{Int32}}()

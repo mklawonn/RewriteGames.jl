@@ -21,7 +21,7 @@ mutable struct GPUScratchBuffers
     buf_bytecodes     :: CuVector{TCNBytecode}  # max bytecodes
     buf_solutions     :: CuMatrix{Int32}        # n_vars_max × max_solutions
     buf_sol_count     :: CuVector{Int32}        # [1]
-    buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * MAX_CHUNKS × 16
+    buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * nc_max × 16 (dive); EPS resizes bigger
     buf_type_mask     :: CuVector{UInt64}       # nc
     buf_to_del        :: CuVector{Bool}         # sum(n_alloc) (grown as world grows)
     buf_violation     :: CuVector{Int32}        # [1] dangling-check flag (0=ok, 1=violated)
@@ -1220,7 +1220,10 @@ function _gpu_filter_conditions_serial(solutions::Vector{Vector{Int32}}, rule,
         b_gpu    = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, ccsp.bytecodes)
         sol_gpu  = KernelAbstractions.allocate(backend, Int32, max(cn_vars, 1), 1)  # existence only
-        work_gpu = KernelAbstractions.allocate(backend, UInt64, max(cn_vars, 1) * MAX_CHUNKS, 16)
+        # dive_solve_kernel! workspace rows are strided by nc_max (NOT nc, and NOT
+        # the legacy MAX_CHUNKS=4 cap): undersizing is silent out-of-bounds
+        # device writes at nc > 4 (allocator-layout-dependent wrong NAC verdicts).
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, max(cn_vars, 1) * nc_max, 16)
         cnt_all  = KernelAbstractions.allocate(backend, Int32, N)
         KernelAbstractions.fill!(cnt_all, Int32(0))
         kern = dive_solve_kernel!(backend)
@@ -1268,14 +1271,14 @@ function _nac_diag(solutions::Vector{Vector{Int32}}, rule, csp::CSPProblem,
     _NAC_DIAG_CHECKS[] += 1
     if Set(kept_gpu) != Set(kept_cpu)
         _NAC_DIAG_MISM[] += 1
-        @warn "NAC SET mismatch" ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+        @warn "NAC SET mismatch" nv=Int(csp.n_vars) nc=csp.n_chunks ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
     end
     # Tier-1 (NacSpec) cross-check, when it applies to this rule: must keep the
     # same set as the CPU reference (and hence as tier 2 above).
     kept_t1 = _gpu_filter_nac_solutions(copy(solutions), rule, csp, g, schema)
     if kept_t1 !== nothing && Set(kept_t1) != Set(kept_cpu)
         _NAC_DIAG_MISM[] += 1
-        @warn "NAC SET mismatch (tier1 vs CPU)" nt1=length(kept_t1) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+        @warn "NAC SET mismatch (tier1 vs CPU)" nv=Int(csp.n_vars) nc=csp.n_chunks nt1=length(kept_t1) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
     end
 end
 
@@ -1321,6 +1324,38 @@ _rg_boxt(turn, b_idx, csp, n_pre, n_post, tier, t0, tb, ts, tn, tc, ta) =
         "t_nac=$(round((tn - ts) / 1e6, digits = 3)) " *
         "t_choose=$(round((tc - tn) / 1e6, digits = 3)) " *
         "t_apply=$(round((ta - tc) / 1e6, digits = 3))")
+
+# Anchored-fiber decomposition of big-codomain standard-path solves (see
+# solver/AnchorDecomp.jl).  RG_ANCHOR_DIAG cross-checks each decomposed solve's
+# solution SET against the global solver (counters asserted 0-mismatch in tests).
+const _ANCHOR_DIAG_CHECKS = Ref(0)
+const _ANCHOR_DIAG_MISM   = Ref(0)
+const _ANCHOR_DIAG_CAPPED = Ref(0)   # solves skipped: either side hit max_solutions
+
+# Try the anchored decomposition for one standard-path solve.  `d_gpu` must be
+# final (attr masks + any agent pin applied).  Returns `nothing` when the solve
+# is not eligible — would not route to EPS for big-nc reasons, no qualifying
+# anchor, or per-cell closure blowup — and the caller runs the global solve.
+function _try_anchored_solve(backend, csp::CSPProblem, g::GPUACSet,
+                              schema::SchemaInfo, d_gpu)
+    haskey(ENV, "RG_NO_ANCHOR_DECOMP") && return nothing
+    nv, nc = Int(csp.n_vars), csp.n_chunks
+    nv >= 2 || return nothing
+    haskey(ENV, "RG_ANCHOR_FORCE") ||
+        (nc > 16 && _would_use_eps(nv, nc)) || return nothing
+    base_d_host = Array(d_gpu)
+    fk_cols     = Dict{Symbol,Vector{Int32}}()
+    for h in _decomp_relevant_homs(schema, csp)
+        nh = g.n_alloc[schema.hom_dom[h]]
+        fk_cols[h] = nh > 0 ? Array(@view g.homs[h][1:nh]) : Int32[]
+    end
+    sols = anchored_decomposed_solve(backend, csp, schema, base_d_host,
+                                     fk_cols, g.n_alloc)
+    haskey(ENV, "RG_SOLVE_DIAG") && println(stderr,
+        "TANCH nv=$nv nc=$nc -> " *
+        (sols === nothing ? "fallback" : "$(length(sols)) sols"))
+    sols
+end
 
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               cube::AdhesiveCube,
@@ -1413,7 +1448,26 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
             agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
             KernelAbstractions.synchronize(backend)
             bt && (t_build = time_ns())
-            gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
+            sols_anchor = _try_anchored_solve(backend, csp, g, schema, d_gpu)
+            if sols_anchor !== nothing && haskey(ENV, "RG_ANCHOR_DIAG")
+                ref = gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs;
+                                      scratch = scratch)
+                nvv  = Int(csp.n_vars)
+                if length(sols_anchor) >= _ANCHOR_MAX_SOLUTIONS ||
+                   length(ref) >= _ANCHOR_MAX_SOLUTIONS
+                    _ANCHOR_DIAG_CAPPED[] += 1   # both are arbitrary cap-size subsets
+                else
+                    _ANCHOR_DIAG_CHECKS[] += 1
+                    aset = Set(Vector{Int32}(s[1:min(nvv, length(s))]) for s in sols_anchor)
+                    rset = Set(Vector{Int32}(r[1:min(nvv, length(r))]) for r in ref)
+                    if aset != rset
+                        _ANCHOR_DIAG_MISM[] += 1
+                        @warn "ANCHOR SET mismatch" nv=nvv nc=csp.n_chunks na=length(aset) nr=length(rset) raw_na=length(sols_anchor) raw_nr=length(ref) a_minus_r=length(setdiff(aset, rset)) r_minus_a=length(setdiff(rset, aset)) maxlog=40
+                    end
+                end
+            end
+            sols_anchor !== nothing ? sols_anchor :
+                gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
         else
             if CUDA.functional()
                 backend          = CUDA.CUDABackend()

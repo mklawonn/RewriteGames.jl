@@ -79,6 +79,7 @@ include("lowering/ScheduleCompiler.jl")
 include("solver/PropagationKernel.jl")
 include("solver/DiveSolveKernel.jl")
 include("solver/CodomainDecomp.jl")   # compact per-agent codomain decomposition
+include("solver/AnchorDecomp.jl")     # anchored-fiber decomposition of EPS solves
 
 # ── Rewriting layer ───────────────────────────────────────────────────────────
 include("rewriting/GPUACSet.jl")

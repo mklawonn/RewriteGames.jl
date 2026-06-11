@@ -697,12 +697,16 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     n_vars = Int(csp.n_vars)
     n_bc   = length(csp.bytecodes)
     nc     = csp.n_chunks
+    nc_max = _select_nc_max(nc)
 
     if scratch !== nothing
         # Use pre-allocated buffers from GPUScratchBuffers (B1: zero allocations)
         b_gpu    = scratch.buf_bytecodes
         sol_gpu  = scratch.buf_solutions
         cnt_gpu  = scratch.buf_sol_count
+        if size(scratch.buf_workspace, 1) < n_vars * nc_max   # dive rows stride by nc_max
+            scratch.buf_workspace = CUDA.zeros(UInt64, n_vars * nc_max * 2, 16)
+        end
         work_gpu = scratch.buf_workspace
 
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
@@ -714,10 +718,9 @@ function gpu_dive_solve(backend, csp::CSPProblem,
         sol_gpu  = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
         cnt_gpu  = KernelAbstractions.allocate(backend, Int32, 1)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
-        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * nc_max, 16)
     end
 
-    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
            work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
@@ -745,8 +748,9 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
     cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
-    # workspace: n_vars * MAX_CHUNKS rows × 16 DFS levels
-    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+    # workspace: n_vars * nc_max rows × 16 DFS levels (dive rows stride by nc_max)
+    nc_max   = _select_nc_max(nc)
+    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * nc_max, 16)
 
     # Flatten hom_forward (already in chunked flat format)
     hom_fwd_flat = UInt64[]
@@ -762,7 +766,6 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     hf_offs_gpu = KernelAbstractions.allocate(backend, Int32, length(hom_fwd_offs))
     KernelAbstractions.copyto!(backend, hf_offs_gpu, hom_fwd_offs)
 
-    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
            work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
@@ -1891,6 +1894,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     solutions     :: AbstractMatrix{Int32},
     sol_count     :: AbstractVector{Int32},
     max_solutions :: Int,
+    es_cap        :: Int32,
     hf_flat       :: AbstractVector{UInt64},
     hf_offs       :: AbstractVector{Int32},
     ::Val{NM},
@@ -1913,14 +1917,21 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
     binfo    = @localmem Int32  (3,)
     # mysub_block: the subproblem index claimed by this block (one value for all 32 threads)
     mysub_b  = @localmem Int32  (1,)
+    # Early-stop flag: once the GLOBAL solution count reaches es_cap (= the
+    # max_solutions storage cap unless RG_NO_EARLY_STOP), all blocks abandon
+    # remaining search — further solutions could not be stored anyway.  The
+    # flag is only ever written by tid 1 directly before a @synchronize, so
+    # every loop-condition read is block-uniform (no divergent barriers).
+    stop_b   = @localmem Bool   (1,)
 
     # ── Thread 1 claims first subproblem for the block ────────────────────────
     if tid == 1
         mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+        stop_b[1]  = sol_count[1] >= es_cap
     end
     @synchronize()
 
-    while mysub_b[1] < Int32(1 << D)
+    while mysub_b[1] < Int32(1 << D) && !stop_b[1]
         mysub = Int(mysub_b[1])
 
         # ── 1. Copy root domains into dom level 1 (all threads cooperate) ──────
@@ -2066,7 +2077,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
             state  = 1
             safety = 0
 
-            while level > 0 && safety < 10_000_000
+            while level > 0 && safety < 10_000_000 && !stop_b[1]
                 safety += 1
                 lev_off = (level - 1) * n_vars_nm
 
@@ -2129,6 +2140,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
                                 if ones > 1; binfo[1] = Int32(v); break; end
                             end
                         end
+                        stop_b[1] = sol_count[1] >= es_cap
                     end  # tid == 1
                     @synchronize()
 
@@ -2168,6 +2180,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
                 if state == 2
                     if tid == 1
                         binfo[3] = Int32(0)
+                        stop_b[1] = sol_count[1] >= es_cap
                         v   = Int(stack_v[level])
                         off = lev_off + (v - 1) * NM
                         ne  = Int(stnext[level])
@@ -2220,6 +2233,7 @@ Launch with blocksize=32, n_blocks = min(2^D, 576).
         # ── 4. Claim next subproblem for this block ────────────────────────────
         if tid == 1
             mysub_b[1] = CUDA.atomic_add!(pointer(nextsub, 1), Int32(1))
+            stop_b[1]  = sol_count[1] >= es_cap
         end
         @synchronize()
     end  # while mysub_b[1] < 2^D
@@ -2250,6 +2264,14 @@ _nv_cap(nc_max::Int) =
     haskey(ENV, "RG_NO_BIGVAR") ? 7 :
     (_NV_BIG * nc_max * 128 + 256 <= 49152 ? _NV_BIG : 7)
 _nvnm16_for(n_vars::Int, nc_max::Int) = (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 16
+# Single source of truth for the EPS-vs-turbo_block routing decision, shared by
+# both dispatch sites below and by the anchored-decomposition eligibility check
+# in the Scheduler (which decomposes exactly the solves that would go to EPS).
+function _would_use_eps(n_vars::Int, nc::Int)
+    nc_max = _select_nc_max(nc)
+    nc == 1 || n_vars > _nv_cap(nc_max) ||
+        (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
+end
 
 # Private helper: dispatch Val{nc_max}, Val{nvnm16}, Val{prop_mode} for
 # turbo_block_kernel!.  Called from gpu_turbo_solve and _gpu_turbo_fill_scratch!.
@@ -2262,9 +2284,15 @@ function _launch_turbo_block!(backend,
                                prop_mode::Int = 0)
     haskey(ENV, "RG_SOLVE_DIAG") &&
         println(stderr, "TBLK nbc=$n_bc nv=$n_vars nc=$nc D=$D nblk=$n_blks")
+    # Early-stop: abandon remaining search once max_solutions are stored
+    # (cross-product patterns can have orders of magnitude more matches than
+    # the cap — enumerating them is pure waste).  RG_NO_EARLY_STOP restores
+    # exhaustive search (the stored set is an arbitrary cap-size subset
+    # either way).
+    es_cap = haskey(ENV, "RG_NO_EARLY_STOP") ? typemax(Int32) : Int32(max_solutions)
     turbo_block_kernel!(backend, 32)(
         d_gpu, b_gpu, n_bc, n_vars, nc, D,
-        nextsub, sol_gpu, cnt_gpu, max_solutions,
+        nextsub, sol_gpu, cnt_gpu, max_solutions, es_cap,
         hf_flat, hf_offs, Val(nc_max), Val(nvnm16), Val(prop_mode);
         ndrange = n_blks * 32
     )
@@ -2361,9 +2389,7 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     # limit: band_cap*nc_max*128 + ~256 bytes for stack_v/stnext/flags.
     # nc_max=48, n_vars≤7: 7×48×128+256 = 43264 < 49152 → turbo_block.
     # nc_max=48, n_vars=8–14 or nc_max=64: > 49152 → EPS.
-    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
-              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
-    if use_eps
+    if _would_use_eps(n_vars, nc)
         # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
         ws_cap = nc_max * 64 * n_vars * nc_max
@@ -2447,9 +2473,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
 
     # Same routing as gpu_turbo_solve: EPS when nc==1, n_vars over the cap
     # (7 legacy / 14 BIGVAR), or the pattern's band workspace exceeds 48 KB smem.
-    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
-              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
-    if use_eps
+    if _would_use_eps(n_vars, nc)
         # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
         if size(scratch.buf_workspace, 1) < ws_cap
