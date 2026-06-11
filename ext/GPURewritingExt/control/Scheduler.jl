@@ -1322,6 +1322,37 @@ _rg_boxt(turn, b_idx, csp, n_pre, n_post, tier, t0, tb, ts, tn, tc, ta) =
         "t_choose=$(round((tc - tn) / 1e6, digits = 3)) " *
         "t_apply=$(round((ta - tc) / 1e6, digits = 3))")
 
+# Anchored-fiber decomposition of big-codomain standard-path solves (see
+# solver/AnchorDecomp.jl).  RG_ANCHOR_DIAG cross-checks each decomposed solve's
+# solution SET against the global solver (counters asserted 0-mismatch in tests).
+const _ANCHOR_DIAG_CHECKS = Ref(0)
+const _ANCHOR_DIAG_MISM   = Ref(0)
+
+# Try the anchored decomposition for one standard-path solve.  `d_gpu` must be
+# final (attr masks + any agent pin applied).  Returns `nothing` when the solve
+# is not eligible — would not route to EPS for big-nc reasons, no qualifying
+# anchor, or per-cell closure blowup — and the caller runs the global solve.
+function _try_anchored_solve(backend, csp::CSPProblem, g::GPUACSet,
+                              schema::SchemaInfo, d_gpu)
+    haskey(ENV, "RG_NO_ANCHOR_DECOMP") && return nothing
+    nv, nc = Int(csp.n_vars), csp.n_chunks
+    nv >= 2 || return nothing
+    haskey(ENV, "RG_ANCHOR_FORCE") ||
+        (nc > 16 && _would_use_eps(nv, nc)) || return nothing
+    base_d_host = Array(d_gpu)
+    fk_cols     = Dict{Symbol,Vector{Int32}}()
+    for h in _decomp_relevant_homs(schema, csp)
+        nh = g.n_alloc[schema.hom_dom[h]]
+        fk_cols[h] = nh > 0 ? Array(@view g.homs[h][1:nh]) : Int32[]
+    end
+    sols = anchored_decomposed_solve(backend, csp, schema, base_d_host,
+                                     fk_cols, g.n_alloc)
+    haskey(ENV, "RG_SOLVE_DIAG") && println(stderr,
+        "TANCH nv=$nv nc=$nc -> " *
+        (sols === nothing ? "fallback" : "$(length(sols)) sols"))
+    sols
+end
+
 function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                               cube::AdhesiveCube,
                               gpu_cube::Union{GPUAdhesiveCube, Nothing},
@@ -1413,7 +1444,18 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
             agent_pin !== nothing && _pin_agent_var!(d_gpu, csp, agent_pin)
             KernelAbstractions.synchronize(backend)
             bt && (t_build = time_ns())
-            gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
+            sols_anchor = _try_anchored_solve(backend, csp, g, schema, d_gpu)
+            if sols_anchor !== nothing && haskey(ENV, "RG_ANCHOR_DIAG")
+                ref = gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs;
+                                      scratch = scratch)
+                nvv  = Int(csp.n_vars)
+                _ANCHOR_DIAG_CHECKS[] += 1
+                aset = Set(Vector{Int32}(s[1:min(nvv, length(s))]) for s in sols_anchor)
+                rset = Set(Vector{Int32}(r[1:min(nvv, length(r))]) for r in ref)
+                aset != rset && (_ANCHOR_DIAG_MISM[] += 1)
+            end
+            sols_anchor !== nothing ? sols_anchor :
+                gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)
         else
             if CUDA.functional()
                 backend          = CUDA.CUDABackend()

@@ -2250,6 +2250,14 @@ _nv_cap(nc_max::Int) =
     haskey(ENV, "RG_NO_BIGVAR") ? 7 :
     (_NV_BIG * nc_max * 128 + 256 <= 49152 ? _NV_BIG : 7)
 _nvnm16_for(n_vars::Int, nc_max::Int) = (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 16
+# Single source of truth for the EPS-vs-turbo_block routing decision, shared by
+# both dispatch sites below and by the anchored-decomposition eligibility check
+# in the Scheduler (which decomposes exactly the solves that would go to EPS).
+function _would_use_eps(n_vars::Int, nc::Int)
+    nc_max = _select_nc_max(nc)
+    nc == 1 || n_vars > _nv_cap(nc_max) ||
+        (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
+end
 
 # Private helper: dispatch Val{nc_max}, Val{nvnm16}, Val{prop_mode} for
 # turbo_block_kernel!.  Called from gpu_turbo_solve and _gpu_turbo_fill_scratch!.
@@ -2361,9 +2369,7 @@ function gpu_turbo_solve(backend, csp::CSPProblem,
     # limit: band_cap*nc_max*128 + ~256 bytes for stack_v/stnext/flags.
     # nc_max=48, n_vars≤7: 7×48×128+256 = 43264 < 49152 → turbo_block.
     # nc_max=48, n_vars=8–14 or nc_max=64: > 49152 → EPS.
-    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
-              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
-    if use_eps
+    if _would_use_eps(n_vars, nc)
         # EPS pipeline: one thread per domain element, global-memory workspace.
         # Workspace rows needed: n_subs * n_vars * nc_max ≤ nc_max*64 * n_vars * nc_max.
         ws_cap = nc_max * 64 * n_vars * nc_max
@@ -2447,9 +2453,7 @@ function _gpu_turbo_fill_scratch!(backend, csp::CSPProblem,
 
     # Same routing as gpu_turbo_solve: EPS when nc==1, n_vars over the cap
     # (7 legacy / 14 BIGVAR), or the pattern's band workspace exceeds 48 KB smem.
-    use_eps = nc == 1 || n_vars > _nv_cap(nc_max) ||
-              (n_vars <= 7 ? 7 : _NV_BIG) * nc_max * 128 + 256 > 49152
-    if use_eps
+    if _would_use_eps(n_vars, nc)
         # EPS pipeline: one thread per domain element, global-memory workspace.
         ws_cap = nc_max * 64 * n_vars * nc_max
         if size(scratch.buf_workspace, 1) < ws_cap
