@@ -175,7 +175,8 @@ the pinned-agent and anchored-cell decompositions.
 function _decomp_compact_solve(backend, csp::CSPProblem, schema::SchemaInfo,
                                 nbhd::Dict{Symbol,Vector{Int}},
                                 base_d_host::Vector{UInt64},
-                                fk_cols::Dict{Symbol,Vector{Int32}})
+                                fk_cols::Dict{Symbol,Vector{Int32}};
+                                max_solutions::Int = 10_000)
     nv      = Int(csp.n_vars)
     nc_w    = csp.n_chunks
     vt      = _decomp_var_types(csp)
@@ -239,7 +240,8 @@ function _decomp_compact_solve(backend, csp::CSPProblem, schema::SchemaInfo,
     d_gpu   = CuArray(dl)
     hf_gpu  = CuArray(hf)
     ho_gpu  = CuArray(hom_offs)
-    sols_l  = gpu_turbo_solve(backend, csp_l, d_gpu, hf_gpu, ho_gpu; scratch = nothing)
+    sols_l  = gpu_turbo_solve(backend, csp_l, d_gpu, hf_gpu, ho_gpu;
+                              max_solutions = max_solutions, scratch = nothing)
 
     # Back-translate local solution indices to world slots (rows 1..nv are meaningful).
     out = Vector{Vector{Int32}}()

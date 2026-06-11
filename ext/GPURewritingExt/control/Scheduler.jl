@@ -1330,6 +1330,7 @@ _rg_boxt(turn, b_idx, csp, n_pre, n_post, tier, t0, tb, ts, tn, tc, ta) =
 # solution SET against the global solver (counters asserted 0-mismatch in tests).
 const _ANCHOR_DIAG_CHECKS = Ref(0)
 const _ANCHOR_DIAG_MISM   = Ref(0)
+const _ANCHOR_DIAG_CAPPED = Ref(0)   # solves skipped: either side hit max_solutions
 
 # Try the anchored decomposition for one standard-path solve.  `d_gpu` must be
 # final (attr masks + any agent pin applied).  Returns `nothing` when the solve
@@ -1452,10 +1453,18 @@ function _gpu_solve_inplace!(g::GPUACSet, csp::CSPProblem, rule,
                 ref = gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs;
                                       scratch = scratch)
                 nvv  = Int(csp.n_vars)
-                _ANCHOR_DIAG_CHECKS[] += 1
-                aset = Set(Vector{Int32}(s[1:min(nvv, length(s))]) for s in sols_anchor)
-                rset = Set(Vector{Int32}(r[1:min(nvv, length(r))]) for r in ref)
-                aset != rset && (_ANCHOR_DIAG_MISM[] += 1)
+                if length(sols_anchor) >= _ANCHOR_MAX_SOLUTIONS ||
+                   length(ref) >= _ANCHOR_MAX_SOLUTIONS
+                    _ANCHOR_DIAG_CAPPED[] += 1   # both are arbitrary cap-size subsets
+                else
+                    _ANCHOR_DIAG_CHECKS[] += 1
+                    aset = Set(Vector{Int32}(s[1:min(nvv, length(s))]) for s in sols_anchor)
+                    rset = Set(Vector{Int32}(r[1:min(nvv, length(r))]) for r in ref)
+                    if aset != rset
+                        _ANCHOR_DIAG_MISM[] += 1
+                        @warn "ANCHOR SET mismatch" nv=nvv nc=csp.n_chunks na=length(aset) nr=length(rset) raw_na=length(sols_anchor) raw_nr=length(ref) a_minus_r=length(setdiff(aset, rset)) r_minus_a=length(setdiff(rset, aset)) maxlog=40
+                    end
+                end
             end
             sols_anchor !== nothing ? sols_anchor :
                 gpu_turbo_solve(backend, csp, d_gpu, hf_flat, hf_offs; scratch = scratch)

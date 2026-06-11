@@ -125,6 +125,19 @@ end
             @test with_env(; RG_NO_ANCHOR_DECOMP = 1) do
                 ext._try_anchored_solve(backend, s.csp, s.g, s.schema, s.d)
             end === nothing
+
+            # max_solutions cap: the union truncates like the global solve;
+            # everything kept must still be a valid solution.
+            fk = Dict{Symbol,Vector{Int32}}()
+            for h in ext._decomp_relevant_homs(s.schema, s.csp)
+                nh = s.g.n_alloc[s.schema.hom_dom[h]]
+                fk[h] = nh > 0 ? Array(view(s.g.homs[h], 1:nh)) : Int32[]
+            end
+            capped = ext.anchored_decomposed_solve(backend, s.csp, s.schema,
+                                                   Array(s.d), fk, s.g.n_alloc;
+                                                   max_solutions = 50)
+            @test length(capped) == 50
+            @test all(v -> v in expect, capped)
         end
 
         @testset "ineligible shapes return nothing" begin

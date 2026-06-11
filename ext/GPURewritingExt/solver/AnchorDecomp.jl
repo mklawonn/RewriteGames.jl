@@ -57,6 +57,12 @@ function _anchor_for(csp::CSPProblem, n_alloc::Dict{Symbol,Int})
     best
 end
 
+# Mirrors gpu_turbo_solve's default cap: the standard path presents at most
+# this many matches per solve, so the cell union stops there too (and the
+# RG_ANCHOR_DIAG comparison skips cap-truncated solves — both sides are then
+# arbitrary same-size subsets of the valid set, not comparable).
+const _ANCHOR_MAX_SOLUTIONS = 10_000
+
 """
     anchored_decomposed_solve(backend, csp, schema, base_d_host, fk_cols, n_alloc)
         -> Union{Nothing, Vector{Vector{Int32}}}
@@ -64,12 +70,14 @@ end
 Solve the CSP as a union of per-cell compact solves over the anchor's candidate
 slots, in WORLD indices.  Returns `nothing` (caller falls back to the global
 solve) when no anchor qualifies, the pattern exceeds the turbo_block var band,
-or any cell's closure stays too big for shared memory.
+or any cell's closure stays too big for shared memory.  The union stops at
+`max_solutions` (matching the global solve's cap) — later cells are skipped.
 """
 function anchored_decomposed_solve(backend, csp::CSPProblem, schema::SchemaInfo,
                                     base_d_host::Vector{UInt64},
                                     fk_cols::Dict{Symbol,Vector{Int32}},
-                                    n_alloc::Dict{Symbol,Int})
+                                    n_alloc::Dict{Symbol,Int};
+                                    max_solutions::Int = _ANCHOR_MAX_SOLUTIONS)
     nv = Int(csp.n_vars)
     nv <= _NV_BIG || return nothing          # cells would still route to EPS
     a  = _anchor_for(csp, n_alloc)
@@ -107,8 +115,11 @@ function anchored_decomposed_solve(backend, csp::CSPProblem, schema::SchemaInfo,
     out = Vector{Vector{Int32}}()
     for nbhd in nbhds
         append!(out, _decomp_compact_solve(backend, csp, schema, nbhd,
-                                           base_d_host, fk_cols))
+                                           base_d_host, fk_cols;
+                                           max_solutions = max_solutions - length(out)))
+        length(out) >= max_solutions && break
     end
+    length(out) > max_solutions && resize!(out, max_solutions)
     _ANCHOR_SOLVES[] += 1
     out
 end
