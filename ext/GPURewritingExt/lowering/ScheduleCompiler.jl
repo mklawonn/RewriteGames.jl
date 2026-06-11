@@ -77,6 +77,7 @@ struct CompiledGPUSched
     sub_schedules   :: Vector{CompiledGPUSched}
     rules           :: Vector{Any}
     box_players     :: Vector{Symbol}
+    box_names       :: Vector{Symbol}   # schedule box name per box (`:_none` for wiring boxes)
     device_boxes    :: Any
     registry        :: Any   # DeviceRuleRegistry when CUDA functional, nothing otherwise
 end
@@ -121,11 +122,16 @@ boxes rather than emitting `BOX_NESTED_SCHED`.
 `wire_prefix` is prepended to internal wire names to avoid collisions.
 """
 function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cubes,
-                         rule_registry, wire_index, wire_set, box_players, sub_schedules,
-                         world, schema, enc;
+                         rule_registry, wire_index, wire_set, box_players, box_names,
+                         sub_schedules, world, schema, enc;
                          wire_subst  :: Dict{Symbol,Symbol} = Dict{Symbol,Symbol}(),
                          wire_prefix :: String              = "",
                          n_chunks    :: Int                 = 1)
+
+    # Schedule-level name for a box: the key it was registered under in the
+    # GameSched's boxes NamedTuple, falling back to the box's own `.name`.
+    _box_name(key, box) = key isa Symbol ? key :
+                          hasproperty(box, :name) ? Symbol(box.name) : :_box
 
     function _w!(name::Symbol)
         resolved = get(wire_subst, name, nothing)
@@ -181,6 +187,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      (in_w, UInt16(0), UInt16(0), UInt16(0)),
                                      (0f0,0f0,0f0,0f0), UInt16(0)))
             push!(box_players, :_none)
+            push!(box_names, :_none)
         end
 
         if box isa PlayerRuleApp
@@ -190,6 +197,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      _p_idx(box.player), in_w, out_ws,
                                      (can_pass_f, 0f0, 0f0, 0f0), UInt16(0)))
             push!(box_players, box.player)
+            push!(box_names, _box_name(step.box, box))
 
         elseif box isa GameSched && box._agent_name !== nothing
             # Agent loop: the body sub-schedule is the same GameSched with the
@@ -219,6 +227,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      _p_idx(box._agent_name), in_w, out_ws,
                                      (0f0,0f0,0f0,0f0), sub_idx))
             push!(box_players, box._agent_name)
+            push!(box_names, _box_name(step.box, box))
 
         elseif box isa GameSched && box._agent_name === nothing
             # Inline the sub-schedule by building a wire substitution map
@@ -239,7 +248,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
             new_prefix = wire_prefix * string(step.box) * "__"
             _process_steps!(box._steps, box._all_boxes, boxes, csps, rules_list,
                              adhesive_cubes, rule_registry, wire_index, wire_set,
-                             box_players, sub_schedules, world, schema, enc;
+                             box_players, box_names, sub_schedules, world, schema, enc;
                              wire_subst=sub_subst, wire_prefix=new_prefix,
                              n_chunks=n_chunks)
 
@@ -250,6 +259,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      _p_idx(:_none), in_w, out_ws,
                                      (0f0,0f0,0f0,0f0), UInt16(0)))
             push!(box_players, :_none)
+            push!(box_names, _box_name(step.box, box))
 
         elseif hasproperty(box, :p) && box isa RewriteGames.Coin
             # Stochastic split: MasterScheduler reads params[1] as the probability
@@ -258,6 +268,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                      _p_idx(:_none), in_w, out_ws,
                                      (Float32(box.p), 0f0, 0f0, 0f0), UInt16(0)))
             push!(box_players, :_none)
+            push!(box_names, _box_name(step.box, box))
 
         else
             # Utility box (MergeWires, etc.): emit one BOX_WEAKEN per input wire
@@ -268,6 +279,7 @@ function _process_steps!(steps, all_boxes, boxes, csps, rules_list, adhesive_cub
                                          _p_idx(:_none), iw, out_ws,
                                          (0f0,0f0,0f0,0f0), UInt16(0)))
                 push!(box_players, :_none)
+                push!(box_names, :_none)
             end
         end
     end
@@ -322,6 +334,7 @@ function compile_schedule(gs::GameSched, world,
             [box], wire_set, wire_index, csps, adhesive_cubes,
             [gpu_upload_cube(c) for c in adhesive_cubes],
             [1], Int[], [2], Tuple{Int,Int}[], 2, [sub], rules_list, [gs._agent_name],
+            [:_agent_loop],
             device_boxes,
             CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
     end
@@ -364,11 +377,12 @@ function compile_schedule(gs::GameSched, world,
     # ── 3. Compile steps (with inlining) ──────────────────────────────────────
     boxes         = CompiledBox[]
     box_players   = Symbol[]
+    box_names     = Symbol[]
     sub_schedules = CompiledGPUSched[]
 
     _process_steps!(gs._steps, gs._all_boxes, boxes, csps, rules_list, adhesive_cubes,
-                    rule_registry, wire_index, wire_set, box_players, sub_schedules,
-                    world, schema, enc; n_chunks=n_chunks)
+                    rule_registry, wire_index, wire_set, box_players, box_names,
+                    sub_schedules, world, schema, enc; n_chunks=n_chunks)
 
     # ── 4. Compute control wire sets ──────────────────────────────────────────
     init_wires  = [wire_index[w] for w in gs._init_names  if haskey(wire_index, w)]
@@ -396,7 +410,7 @@ function compile_schedule(gs::GameSched, world,
         [gpu_upload_cube(c) for c in adhesive_cubes],
         init_wires, trace_wires, exit_wires, trace_loops,
         length(wire_set), sub_schedules,
-        rules_list, box_players,
+        rules_list, box_players, box_names,
         device_boxes,
         CUDA.functional() ? _build_device_registry(rules_list, csps, adhesive_cubes, schema, enc) : nothing)
 end

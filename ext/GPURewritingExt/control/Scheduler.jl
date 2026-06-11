@@ -2229,7 +2229,8 @@ end
 function run_gpu_schedule!(state::GPUSchedulerState;
                            T_max::Int = 1000,
                            terminal_fn::Function = _DEFAULT_TERMINAL,
-                           winner_wires::Dict{Symbol, Union{Symbol,Nothing}} = Dict{Symbol,Union{Symbol,Nothing}}())::Vector{GpuRewriteEvent}
+                           winner_wires::Dict{Symbol, Union{Symbol,Nothing}} = Dict{Symbol,Union{Symbol,Nothing}}(),
+                           turn_snapshots::Union{Nothing,Vector{Any}} = nothing)::Vector{GpuRewriteEvent}
     sched  = state.sched
     g      = state.g
     schema = state.schema
@@ -2259,6 +2260,12 @@ function run_gpu_schedule!(state::GPUSchedulerState;
                                          state, turn, wire_active, events,
                                          rewrite_count, backend)
             any_changed |= changed
+        end
+
+        # End-of-turn world snapshot (one entry per executed turn), so callers
+        # can reconstruct turn-level trajectories instead of final-world-only.
+        if turn_snapshots !== nothing
+            push!(turn_snapshots, download_acset(g, enc, state.world_type))
         end
 
         # A true exit wire (a non-trace return) ends the episode.

@@ -125,6 +125,29 @@ function _agent_loop_body_player(sched::CompiledGPUSched, agent_loop_box)::Symbo
 end
 
 """
+    _agent_loop_body_rule(sched, agent_loop_box) -> Symbol
+
+Name analog of `_agent_loop_body_player`: the first player-rule box name inside
+a `BOX_AGENT_LOOP`'s body sub-schedule (e.g. `:move`), recursing through nested
+agent loops.  Returns `:_none` if the body has no player-rule box.
+"""
+function _agent_loop_body_rule(sched::CompiledGPUSched, agent_loop_box)::Symbol
+    sidx = Int(agent_loop_box.sub_sched_idx)
+    (sidx < 1 || sidx > length(sched.sub_schedules)) && return :_none
+    sub = sched.sub_schedules[sidx]
+    for (i, sbox) in enumerate(sub.boxes)
+        if sbox.box_type == BOX_AGENT_LOOP
+            nn = _agent_loop_body_rule(sub, sbox)
+            nn !== :_none && return nn
+        elseif sbox.box_type == BOX_PLAYER_RULE
+            n = i <= length(sub.box_names) ? sub.box_names[i] : :_none
+            n !== :_none && return n
+        end
+    end
+    return :_none
+end
+
+"""
     gpu_run_game_sched!(gs, initial_world, agents; backend, T_max, terminal,
                         winner_wires, log_trajectory, compact_every)
         -> Vector{Experience}
@@ -147,6 +170,11 @@ with the same structure as the CPU implementation.
 - `winner_wires`:   Dict mapping exit wire names → winning player.
 - `log_trajectory`: Record the full Graph Process trajectory (default: false).
 - `compact_every`:  Run stream compaction every N rewrites (default: 100).
+- `track_turn_worlds`: Download an end-of-turn world snapshot each turn and use
+  it for the decoded experiences, so `state`/`next_state` carry the worlds
+  before/after each event's turn (instead of episode-start/final world).  Each
+  experience also gets `info[:rule]` = the fired schedule box name.  One extra
+  `download_acset` per turn (default: false).
 
 # Returns
 A `Vector{Experience}` identical in structure to `run_game_sched!` output.
@@ -167,6 +195,7 @@ function RewriteGames.gpu_run_game_sched!(
     zone_partition :: Union{ZonePartition, Nothing}            = nothing,
     take                                                       = nothing,
     sample_seed    :: Int                                      = 0,
+    track_turn_worlds :: Bool                                  = false,
 )::Vector{Experience}
 
     # ── Phase 1: Host-side compilation ────────────────────────────────────────
@@ -196,14 +225,17 @@ function RewriteGames.gpu_run_game_sched!(
     state.zone_partition = zone_partition
 
     # ── Phase 4: Execute on GPU ───────────────────────────────────────────────
+    turn_worlds = track_turn_worlds ? Any[] : nothing
     gpu_events = run_gpu_schedule!(state;
-                                   T_max        = T_max,
-                                   terminal_fn  = terminal,
-                                   winner_wires = winner_wires)
+                                   T_max          = T_max,
+                                   terminal_fn    = terminal,
+                                   winner_wires   = winner_wires,
+                                   turn_snapshots = turn_worlds)
 
     # ── Phase 5: Decode results ───────────────────────────────────────────────
     # state.g is updated after each rewrite; download the final world from it
     final_world = download_acset(state.g, enc, world_type)
+    n_snaps     = turn_worlds === nothing ? 0 : length(turn_worlds)
 
     exps = Experience[]
     for ev in gpu_events
@@ -218,17 +250,29 @@ function RewriteGames.gpu_run_game_sched!(
         player == :_none && continue
 
         turn_n     = Int(ev.turn)
-        # NOTE (B13): state_pre is always the episode-start world, not the per-turn
-        # pre-rewrite state.  For RL workflows that need the correct intermediate
-        # pre-states, pass `track_pre_states=true` (unimplemented; see GPU_PLAN.md
-        # Bottleneck 13 for the trajectory-replay approach).
-        state_pre  = GameState(initial_world, turn_n)
-        state_post = GameState(final_world, turn_n + 1)
+        # NOTE (B13): without `track_turn_worlds`, state_pre is always the
+        # episode-start world and state_post the final world.  With it, both are
+        # turn-level snapshots (end of turn t−1 / end of turn t) — still not the
+        # per-event pre-rewrite state; see GPU_PLAN.md Bottleneck 13 for the
+        # full trajectory-replay approach.
+        pre_world  = (turn_n >= 2 && turn_n - 1 <= n_snaps) ?
+                     turn_worlds[turn_n - 1] : initial_world
+        post_world = (1 <= turn_n <= n_snaps) ? turn_worlds[turn_n] : final_world
+        state_pre  = GameState(pre_world, turn_n)
+        state_post = GameState(post_world, turn_n + 1)
+
+        info = Dict{Symbol,Any}()
+        if track_turn_worlds
+            rule_name = sched.boxes[bidx].box_type == BOX_AGENT_LOOP ?
+                        _agent_loop_body_rule(sched, sched.boxes[bidx]) :
+                        (bidx <= length(sched.box_names) ? sched.box_names[bidx] : :_none)
+            rule_name !== :_none && (info[:rule] = rule_name)
+        end
 
         push!(exps, Experience(
             player, state_pre, Action[], nothing,
             state_post, false, nothing,
-            Dict{Symbol,Any}(), Symbol[], nothing,
+            info, Symbol[], nothing,
         ))
     end
     exps

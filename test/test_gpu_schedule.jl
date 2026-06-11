@@ -288,3 +288,43 @@ end
         @test count(e -> e.player == :alice, exps) == T
     end
 end
+
+# ── Per-turn world snapshots (track_turn_worlds) ──────────────────────────────
+#
+# Same traced add_v schedule: one vertex per turn, so with `track_turn_worlds`
+# the t-th experience must carry pre/post worlds with t−1 / t vertices (end-of-
+# turn snapshots) plus the fired box name in `info[:rule]`.  Without the flag
+# the legacy decode (pre = episode start, post = final world, empty info) must
+# be unchanged.
+
+@testset "GPU schedule — track_turn_worlds per-turn snapshots" begin
+    pra = PlayerRuleApp(:add_v, rule_add_v, I_empty, :alice)
+    gs  = mk_game_sched((tr=:I,), (init=:I,), N_empty,
+                        (add_v=pra, mw=merge_wires(I_empty)),
+                        quote
+                            s, f = add_v([init, tr])
+                            out  = mw(s, f)
+                            return out
+                        end)
+    agents = Dict(:alice => first_agent)
+    T = 4
+
+    exps = gpu_run_game_sched!(gs, Graph(0), agents; T_max=T,
+                               track_turn_worlds=true)
+    @test length(exps) == T
+    for (t, e) in enumerate(exps)
+        @test e.state.turn == t
+        @test nparts(e.state.world, :V)      == t - 1
+        @test nparts(e.next_state.world, :V) == t
+        @test e.info[:rule] == :add_v
+    end
+
+    # Flag off: legacy decode unchanged (start/final worlds, no :rule info)
+    legacy = gpu_run_game_sched!(gs, Graph(0), agents; T_max=T)
+    @test length(legacy) == T
+    for e in legacy
+        @test nparts(e.state.world, :V)      == 0
+        @test nparts(e.next_state.world, :V) == T
+        @test !haskey(e.info, :rule)
+    end
+end

@@ -185,6 +185,30 @@ use EPS regardless — the 48 KB shared-memory limit is a hard physical constrai
 
 ---
 
+## Per-Turn World Snapshots: `track_turn_worlds`
+
+By default `gpu_run_game_sched!` decodes every `Experience` with
+`state = episode-start world` and `next_state = final world` (B13: per-event
+intermediate states are unimplemented), `action = nothing`, and an empty `info`.
+Pass `track_turn_worlds = true` to get turn-level trajectories instead:
+
+- `run_gpu_schedule!` downloads an end-of-turn snapshot each turn (one
+  `download_acset` per turn, ~negligible vs. solve cost; pushed into the
+  `turn_snapshots` kwarg vector).
+- Each experience's `state`/`next_state` become the end-of-turn-(t−1) /
+  end-of-turn-t worlds for its event's turn.
+- `info[:rule]` carries the fired schedule box name, via the
+  `CompiledGPUSched.box_names` vector (parallel to `box_players`, filled in
+  `_process_steps!`).  `BOX_AGENT_LOOP` firings resolve to the body's
+  player-rule name (e.g. `:move`) via `_agent_loop_body_rule`, mirroring
+  `_agent_loop_body_player`.
+
+This is still **turn**-granular, not per-event: all events in turn t share the
+same pre/post snapshot pair.  Flag off ⇒ legacy decode, byte-identical.
+Consumer: FalconServer's Watch playback (one tick per planning+execution pass).
+Covered by the "track_turn_worlds per-turn snapshots" testset in
+`test/test_gpu_schedule.jl`.
+
 ## Known Issue: `done` flag in `gpu_run_game_sched!`
 
 `run_game_sched!` (CPU) sets `experience.done = true` on the final experience
