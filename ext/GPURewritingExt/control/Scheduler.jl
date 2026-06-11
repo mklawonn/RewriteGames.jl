@@ -21,7 +21,7 @@ mutable struct GPUScratchBuffers
     buf_bytecodes     :: CuVector{TCNBytecode}  # max bytecodes
     buf_solutions     :: CuMatrix{Int32}        # n_vars_max × max_solutions
     buf_sol_count     :: CuVector{Int32}        # [1]
-    buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * MAX_CHUNKS × 16
+    buf_workspace     :: CuMatrix{UInt64}       # n_vars_max * nc_max × 16 (dive); EPS resizes bigger
     buf_type_mask     :: CuVector{UInt64}       # nc
     buf_to_del        :: CuVector{Bool}         # sum(n_alloc) (grown as world grows)
     buf_violation     :: CuVector{Int32}        # [1] dangling-check flag (0=ok, 1=violated)
@@ -1220,7 +1220,10 @@ function _gpu_filter_conditions_serial(solutions::Vector{Vector{Int32}}, rule,
         b_gpu    = KernelAbstractions.allocate(backend, TCNBytecode, max(n_bc, 1))
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, ccsp.bytecodes)
         sol_gpu  = KernelAbstractions.allocate(backend, Int32, max(cn_vars, 1), 1)  # existence only
-        work_gpu = KernelAbstractions.allocate(backend, UInt64, max(cn_vars, 1) * MAX_CHUNKS, 16)
+        # dive_solve_kernel! workspace rows are strided by nc_max (NOT nc, and NOT
+        # the legacy MAX_CHUNKS=4 cap): undersizing is silent out-of-bounds
+        # device writes at nc > 4 (allocator-layout-dependent wrong NAC verdicts).
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, max(cn_vars, 1) * nc_max, 16)
         cnt_all  = KernelAbstractions.allocate(backend, Int32, N)
         KernelAbstractions.fill!(cnt_all, Int32(0))
         kern = dive_solve_kernel!(backend)
@@ -1268,14 +1271,14 @@ function _nac_diag(solutions::Vector{Vector{Int32}}, rule, csp::CSPProblem,
     _NAC_DIAG_CHECKS[] += 1
     if Set(kept_gpu) != Set(kept_cpu)
         _NAC_DIAG_MISM[] += 1
-        @warn "NAC SET mismatch" ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+        @warn "NAC SET mismatch" nv=Int(csp.n_vars) nc=csp.n_chunks ngpu=length(kept_gpu) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
     end
     # Tier-1 (NacSpec) cross-check, when it applies to this rule: must keep the
     # same set as the CPU reference (and hence as tier 2 above).
     kept_t1 = _gpu_filter_nac_solutions(copy(solutions), rule, csp, g, schema)
     if kept_t1 !== nothing && Set(kept_t1) != Set(kept_cpu)
         _NAC_DIAG_MISM[] += 1
-        @warn "NAC SET mismatch (tier1 vs CPU)" nt1=length(kept_t1) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
+        @warn "NAC SET mismatch (tier1 vs CPU)" nv=Int(csp.n_vars) nc=csp.n_chunks nt1=length(kept_t1) ncpu=length(kept_cpu) nsol=length(solutions) maxlog=40
     end
 end
 

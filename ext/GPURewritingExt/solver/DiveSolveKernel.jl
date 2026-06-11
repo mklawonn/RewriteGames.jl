@@ -697,12 +697,16 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     n_vars = Int(csp.n_vars)
     n_bc   = length(csp.bytecodes)
     nc     = csp.n_chunks
+    nc_max = _select_nc_max(nc)
 
     if scratch !== nothing
         # Use pre-allocated buffers from GPUScratchBuffers (B1: zero allocations)
         b_gpu    = scratch.buf_bytecodes
         sol_gpu  = scratch.buf_solutions
         cnt_gpu  = scratch.buf_sol_count
+        if size(scratch.buf_workspace, 1) < n_vars * nc_max   # dive rows stride by nc_max
+            scratch.buf_workspace = CUDA.zeros(UInt64, n_vars * nc_max * 2, 16)
+        end
         work_gpu = scratch.buf_workspace
 
         n_bc > 0 && KernelAbstractions.copyto!(backend, b_gpu, csp.bytecodes)
@@ -714,10 +718,9 @@ function gpu_dive_solve(backend, csp::CSPProblem,
         sol_gpu  = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
         cnt_gpu  = KernelAbstractions.allocate(backend, Int32, 1)
         KernelAbstractions.fill!(cnt_gpu, Int32(0))
-        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+        work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * nc_max, 16)
     end
 
-    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
            work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
@@ -745,8 +748,9 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     sol_gpu = KernelAbstractions.allocate(backend, Int32, n_vars, max_solutions)
     cnt_gpu = KernelAbstractions.allocate(backend, Int32, 1)
     KernelAbstractions.fill!(cnt_gpu, Int32(0))
-    # workspace: n_vars * MAX_CHUNKS rows × 16 DFS levels
-    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * MAX_CHUNKS, 16)
+    # workspace: n_vars * nc_max rows × 16 DFS levels (dive rows stride by nc_max)
+    nc_max   = _select_nc_max(nc)
+    work_gpu = KernelAbstractions.allocate(backend, UInt64, n_vars * nc_max, 16)
 
     # Flatten hom_forward (already in chunked flat format)
     hom_fwd_flat = UInt64[]
@@ -762,7 +766,6 @@ function gpu_dive_solve(backend, csp::CSPProblem,
     hf_offs_gpu = KernelAbstractions.allocate(backend, Int32, length(hom_fwd_offs))
     KernelAbstractions.copyto!(backend, hf_offs_gpu, hom_fwd_offs)
 
-    nc_max = _select_nc_max(nc)
     kernel = dive_solve_kernel!(backend)
     kernel(d_gpu, b_gpu, n_bc, n_vars, nc, sol_gpu, cnt_gpu, max_solutions,
            work_gpu, hf_flat_gpu, hf_offs_gpu, Val(nc_max); ndrange=1)
