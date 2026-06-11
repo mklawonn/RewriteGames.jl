@@ -600,3 +600,51 @@ zero-solution exits); `FalconRewriteGame/test/profile_chain_boxes.jl` aggregates
 them per box.  Set-equivalence: `test/test_gpu_bigvar.jl` (default vs
 `RG_NO_BIGVAR` vs Catlab `homomorphisms`, n_vars ∈ {7, 9, 13, 15}; NAC ordering
 under both flags).
+
+## Anchored-fiber decomposition + kernel early-stop (2026-06-11, the f=1.0 levers)
+
+BIGVAR left the full scenario (nc_max ≥ 32) on EPS, and profiling (`RG_BOX_TIME`)
+showed two distinct full-scale costs.  Both fixed here; game-B f=1.0 A/B on an A40:
+K=1 **24.5×** (69.3 → 2.8 s/turn), K=4 **21.5×** (176.7 → 8.2 s/turn).
+
+- **Anchored-fiber decomposition (`solver/AnchorDecomp.jl`):** a standard-path solve
+  that would route to EPS for big-nc reasons, whose pattern has exactly ONE variable
+  of some large type (the ANCHOR — e.g. the kill chain's single Target), is solved as
+  a union of per-cell compact solves: anchor slots split into contiguous cells
+  (`RG_ANCHOR_CELL`, 512), each cell's codomain restricted to its FK-closure and
+  remapped via the CodomainDecomp machinery (`_decomp_gather` generalized to set
+  seeds + unreached-component full-range fallback, `_decomp_compact_solve`
+  extracted), solved on the shared-memory turbo_block path.  The union is EXACT and
+  disjoint (matches partition by the anchor variable) and stops at `max_solutions`.
+  Closure blowup or a missing anchor falls back to the global solve (no allowlist).
+  Only existing NM ≤ 16 kernel shapes are used — no new JIT.  Measured per-box:
+  nv=12 6350→259 ms, nv=14 200→9 ms at f=1.0.  Kill switch `RG_NO_ANCHOR_DECOMP`;
+  `RG_ANCHOR_MIN` (1024) anchor-cardinality floor; `RG_ANCHOR_FORCE` decomposes
+  every anchorable solve (testing); `RG_ANCHOR_DIAG` per-solve set cross-check vs
+  the global solver (cap-truncated solves counted as `_ANCHOR_DIAG_CAPPED`, not
+  compared — both sides are arbitrary cap-size subsets).
+- **turbo_block early-stop (`solver/DiveSolveKernel.jl`):** cross-product patterns
+  (fire_tlam: TLAM slot × authorized target, 500k+ true matches at f=1.0) enumerated
+  their whole match space at full-nc propagation cost while storing only the first
+  10k — ~150 s PER SOLVE, 94 % of the f=1.0 turn.  The kernel now abandons the DFS
+  and the subproblem-claim loop once the global `sol_count` reaches the cap, via a
+  block-uniform shared flag (written by tid 1 ONLY and always immediately before an
+  existing `@synchronize` — a divergent barrier deadlocks).  Uncapped solves are
+  bit-identical; capped solves already returned an arbitrary cap-size subset.
+  Kill switch `RG_NO_EARLY_STOP` (exhaustive search).
+- **Dive-workspace OOB fix (latent corruption bug):** `dive_solve_kernel!` strides
+  its workspace by `nc_max`, but the serial tier-2 NAC filter and both
+  `gpu_dive_solve` entries allocated `n_vars * MAX_CHUNKS` (= 4) rows — at nc > 4
+  silent out-of-bounds device writes into neighboring pool allocations.  On game B
+  (nc = 5) this made tier-2 KEEP NAC-violating engage candidates (allocator-layout
+  dependent, so small Graph-world tests never caught it).  All three sites now size
+  by nc_max; the scratch-pool dive branch gained a resize guard.  Lesson: any
+  buffer handed to a `Val{NM}` kernel must be sized by the BUCKET, not by nc or a
+  legacy constant.
+
+Validation: `test/test_gpu_anchor_decomp.jl` (star schema; decomposed set == Catlab
+on a 2200-part EPS-bound world, == the global solver under `RG_ANCHOR_FORCE`;
+ragged cells, blowup fallback, kill switch, max_solutions truncation).  Game-level:
+`FalconRewriteGame/test/diag_anchor_decomp.jl` forces decomposition through a real
+episode — f=0.10 293/0, f=0.5 129/0, f=1.0 72/0 set mismatches (NAC diag 0
+everywhere).  Suite 1061/1061 on RTX 2070 and A40.
